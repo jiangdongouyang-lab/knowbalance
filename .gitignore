@@ -1,0 +1,8 @@
+node_modules/
+.opencode/
+.tmp/
+*.log
+.DS_Store
+opencode.json
+
+.opencode
