@@ -1,0 +1,17 @@
+# KnowBalance role ownership expectations
+#
+# Replace @jiangdongouyang-lab with concrete teammate usernames when the team is ready.
+# CODEOWNERS documents review responsibility; effective review enforcement requires GitHub branch protection.
+
+/knowledge_base/ @jiangdongouyang-lab
+/src/knowledge/ @jiangdongouyang-lab
+/src/rag/ @jiangdongouyang-lab
+/schemas/ @jiangdongouyang-lab
+/examples/ @jiangdongouyang-lab
+/scripts/ @jiangdongouyang-lab
+/docs/ @jiangdongouyang-lab
+/src/role-a-knowledge/ @jiangdongouyang-lab
+/src/role-b-profile/ @jiangdongouyang-lab
+/src/role-c-content/ @jiangdongouyang-lab
+/src/role-d-ui/ @jiangdongouyang-lab
+/tests/ @jiangdongouyang-lab
