@@ -1,6 +1,12 @@
 import type { WorkerDefinition } from "../agents/types"
+import { buildRoleBWorkerPrompt, isRoleBWorker } from "../role-b-profile/prompts"
 
 export function buildWorkerStubPrompt(definition: WorkerDefinition): string {
+  // B 角色画像链 4 个 worker 使用真实 prompt（src/role-b-profile/prompts.ts）
+  if (isRoleBWorker(definition.name)) {
+    return buildRoleBWorkerPrompt(definition)
+  }
+
   if (["concept-tutor", "code-lab", "tiered-evaluator"].includes(definition.name)) {
     return buildRagGroundedWorkerPrompt(definition)
   }
