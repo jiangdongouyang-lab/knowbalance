@@ -1,0 +1,42 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "RAG Retrieval Result",
+  "type": "object",
+  "required": ["query", "topK", "results"],
+  "properties": {
+    "query": { "type": "string" },
+    "learnerLevel": { "type": "string", "enum": ["beginner", "basic", "intermediate", "integrated"] },
+    "topK": { "type": "number" },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sourceId", "title", "difficulty", "score", "snippet", "facts", "file"],
+        "properties": {
+          "sourceId": { "type": "string", "pattern": "^K[0-9]{3}$" },
+          "title": { "type": "string" },
+          "difficulty": { "type": "string" },
+          "score": { "type": "number" },
+          "reason": { "type": "string" },
+          "snippet": { "type": "string" },
+          "facts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["sourceId", "factId", "content"],
+              "properties": {
+                "sourceId": { "type": "string" },
+                "factId": { "type": "string", "pattern": "^F[0-9]{3}$" },
+                "content": { "type": "string" }
+              }
+            }
+          },
+          "examples": { "type": "array", "items": { "type": "string" } },
+          "practiceTasks": { "type": "array", "items": { "type": "string" } },
+          "quizItems": { "type": "array", "items": { "type": "string" } },
+          "file": { "type": "string" }
+        }
+      }
+    }
+  }
+}
