@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/code_lab_secure.schema.json",
+  "title": "C Code Lab Secure Artifact",
+  "type": "object",
+  "allOf": [{ "$ref": "artifact_envelope.schema.json" }],
+  "required": ["schema_version", "artifact_id", "artifact_type", "agent", "status", "payload"],
+  "properties": {
+    "schema_version": { "const": "1.0" }, "artifact_id": { "type": "string" },
+    "artifact_type": { "const": "code_lab_secure" }, "agent": { "const": "code-lab" },
+    "status": { "enum": ["ready", "blocked", "failed"] },
+    "payload": {
+      "type": ["object", "null"],
+      "required": ["lab_id", "reference_solution", "hidden_tests", "scoring_groups", "misconception_map"],
+      "properties": {
+        "lab_id": { "type": "string" }, "reference_solution": { "type": "string" },
+        "hidden_tests": { "type": "array" }, "scoring_groups": { "type": "array" }, "misconception_map": { "type": "array" }
+      }
+    }
+  }
+}

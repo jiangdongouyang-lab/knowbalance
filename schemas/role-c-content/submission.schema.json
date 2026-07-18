@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/submission.schema.json",
+  "title": "C Submission Envelope",
+  "type": "object",
+  "required": ["schema_version", "submission_id", "run_id", "learner_id_hash", "form_id", "attempt_no", "answers"],
+  "properties": {
+    "schema_version": { "const": "1.0" }, "submission_id": { "type": "string" }, "run_id": { "type": "string" },
+    "learner_id_hash": { "type": "string" }, "form_id": { "type": "string" },
+    "attempt_no": { "type": "integer", "minimum": 1 },
+    "answers": {
+      "type": "array",
+      "items": {
+        "type": "object", "required": ["item_id", "hint_level_used"],
+        "properties": {
+          "item_id": { "type": "string" }, "selected_option_id": { "type": "string" },
+          "text_response": { "type": "string" }, "code_response": { "type": "string" },
+          "hint_level_used": { "type": "integer", "minimum": 0, "maximum": 3 }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

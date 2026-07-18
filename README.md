@@ -36,7 +36,7 @@ opencode run --agent learning-orchestrator \
   "Goal: learn TypeScript generics. Background: JavaScript developer. Self-rating: beginner. Diagnostic seed: explain when to use a generic instead of any."
 ```
 
-The expected result is an ordered list of eight `[executed:<worker-name>]` markers and a clear notice that all learning outputs are placeholders.
+The native OpenCode orchestration path demonstrates the ordered `[executed:<worker-name>]` ledger. Complete Role C artifacts use the typed pipeline and its validators described below.
 
 ### Headless runtime note
 
@@ -55,6 +55,14 @@ The four evidence workers (`background-collector`, `self-assessor`, `objective-d
 
 ```bash
 bun src/role-b-profile/profile-demo.ts   # end-to-end B chain demo, no model credentials needed
+```
+
+## Role C: evidence-constrained content framework shell
+
+Role C now provides a typed framework shell for `concept-tutor`, `code-lab`, and `tiered-evaluator`: A/B adapters, a frozen `GenerationSpec`, external JSON schemas, public/secure artifact separation, validation gates, pipeline states, basic grading boundaries, and B-facing learning evidence events. Model-backed generation, an isolated code runner, and secure persistence remain injectable ports for later integration. See `docs/role_c_design.md`.
+
+```bash
+bun run demo:role-c   # B profile → A retrieval → C GenerationSpec contract demo
 ```
 
 ## Extension points

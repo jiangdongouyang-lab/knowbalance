@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/rag_evidence_pack.schema.json",
+  "title": "A to C Canonical RAG Evidence Pack",
+  "$comment": "Backend-internal: quiz_seeds may contain answers and must not be sent to learner-facing clients.",
+  "type": "object",
+  "required": ["schema_version", "retrieval_id", "query", "top_k", "match_status", "kb_version", "rag_version", "results"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "retrieval_id": { "type": "string", "minLength": 1 },
+    "query": { "type": "string", "minLength": 1 },
+    "learner_level": { "enum": ["beginner", "basic", "intermediate", "integrated"] },
+    "top_k": { "type": "integer", "minimum": 1 },
+    "match_status": { "enum": ["strong", "weak", "no_match"] },
+    "kb_version": { "type": "string", "minLength": 1 },
+    "rag_version": { "type": "string", "minLength": 1 },
+    "results": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["source_id", "title", "difficulty", "rank_score", "match_reason", "snippet", "facts", "examples", "practice_tasks", "quiz_seeds", "source_file", "retrieval_trace"],
+        "properties": {
+          "source_id": { "type": "string", "pattern": "^K[0-9]{3}$" },
+          "title": { "type": "string" },
+          "difficulty": { "enum": ["beginner", "basic", "intermediate", "integrated"] },
+          "rank_score": { "type": "number" },
+          "match_reason": { "type": "string" },
+          "snippet": { "type": "string" },
+          "facts": {
+            "type": "array",
+            "items": {
+              "type": "object", "required": ["source_id", "fact_id", "content"],
+              "properties": {
+                "source_id": { "type": "string", "pattern": "^K[0-9]{3}$" },
+                "fact_id": { "type": "string", "pattern": "^F[0-9]{3}$" },
+                "content": { "type": "string" }
+              }
+            }
+          },
+          "examples": { "type": "array", "items": { "type": "object" } },
+          "practice_tasks": { "type": "array", "items": { "type": "string" } },
+          "quiz_seeds": { "type": "array", "items": { "type": "object" } },
+          "source_file": { "type": "string" },
+          "retrieval_trace": { "type": "object" }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -6,7 +6,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test ./tests",
-    "check": "bun run typecheck && bun run test"
+    "check": "bun run typecheck && bun run test",
+    "demo:role-c": "bun scripts/role-c-content-demo.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.20",

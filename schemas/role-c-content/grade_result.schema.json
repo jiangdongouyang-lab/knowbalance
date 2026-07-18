@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/grade_result.schema.json",
+  "title": "C Grade Result Artifact",
+  "type": "object",
+  "allOf": [{ "$ref": "artifact_envelope.schema.json" }],
+  "required": ["schema_version", "artifact_id", "artifact_type", "agent", "status", "payload"],
+  "properties": {
+    "schema_version": { "const": "1.0" }, "artifact_id": { "type": "string" },
+    "artifact_type": { "const": "grade_result" }, "agent": { "const": "tiered-evaluator" },
+    "status": { "enum": ["ready", "blocked", "failed"] },
+    "payload": {
+      "type": ["object", "null"],
+      "required": ["submission_id", "form_id", "score_frozen", "raw_score", "max_score", "item_results", "recommendation"],
+      "properties": {
+        "submission_id": { "type": "string" }, "form_id": { "type": "string" }, "score_frozen": { "const": true },
+        "raw_score": { "type": "number" }, "max_score": { "type": "number" }, "item_results": { "type": "array" },
+        "recommendation": {
+          "type": "object", "required": ["action", "confidence", "reason_codes"],
+          "properties": {
+            "action": { "enum": ["remediate", "reinforce", "advance", "reprofile"] },
+            "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+            "reason_codes": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      }
+    }
+  }
+}

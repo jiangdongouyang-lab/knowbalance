@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/agent_trace_event.schema.json",
+  "title": "C to D Agent Trace Event",
+  "type": "object",
+  "required": ["schema_version", "seq", "event_type", "run_id", "status", "input_refs", "summary"],
+  "properties": {
+    "schema_version": { "const": "1.0" }, "seq": { "type": "integer", "minimum": 1 },
+    "event_type": { "enum": ["c.spec.ready", "c.agent.started", "c.agent.ready", "c.validation.failed", "c.pipeline.blocked", "c.pipeline.failed", "c.pipeline.ready"] },
+    "run_id": { "type": "string" },
+    "agent": { "enum": ["concept-tutor", "code-lab", "tiered-evaluator"] },
+    "status": { "enum": ["started", "success", "blocked", "failed"] },
+    "input_refs": { "type": "array", "items": { "type": "string" } },
+    "output_ref": { "type": "string" }, "summary": { "type": "string" }
+  },
+  "additionalProperties": false
+}

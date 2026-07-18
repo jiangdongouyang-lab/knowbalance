@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/assessment_secure.schema.json",
+  "title": "C Assessment Secure Artifact",
+  "type": "object",
+  "allOf": [{ "$ref": "artifact_envelope.schema.json" }],
+  "required": ["schema_version", "artifact_id", "artifact_type", "agent", "status", "payload"],
+  "properties": {
+    "schema_version": { "const": "1.0" }, "artifact_id": { "type": "string" },
+    "artifact_type": { "const": "assessment_secure" }, "agent": { "const": "tiered-evaluator" },
+    "status": { "enum": ["ready", "blocked", "failed"] },
+    "payload": {
+      "type": ["object", "null"],
+      "required": ["form_id", "items", "option_order_seed"],
+      "properties": {
+        "form_id": { "type": "string" }, "option_order_seed": { "type": "integer" },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object", "required": ["item_id", "objective_id", "modality", "max_score", "answer_spec", "misconception_by_option", "evidence_weight"],
+            "properties": {
+              "item_id": { "type": "string" }, "objective_id": { "type": "string" },
+              "modality": { "enum": ["mcq", "true_false", "trace", "short_answer", "code"] },
+              "max_score": { "type": "number", "minimum": 0 }, "answer_spec": { "type": "object" },
+              "correct_option_id": { "type": "string" }, "misconception_by_option": { "type": "object" },
+              "evidence_weight": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      }
+    }
+  }
+}

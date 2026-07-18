@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/assessment_public.schema.json",
+  "title": "C Assessment Public Artifact",
+  "type": "object",
+  "allOf": [{ "$ref": "artifact_envelope.schema.json" }],
+  "required": ["schema_version", "artifact_id", "artifact_type", "agent", "status", "payload"],
+  "properties": {
+    "schema_version": { "const": "1.0" }, "artifact_id": { "type": "string" },
+    "artifact_type": { "const": "assessment_public" }, "agent": { "const": "tiered-evaluator" },
+    "status": { "enum": ["ready", "blocked", "failed"] },
+    "payload": {
+      "type": ["object", "null"],
+      "required": ["form_id", "title", "objective_ids", "items", "submission_policy"],
+      "properties": {
+        "form_id": { "type": "string" }, "title": { "type": "string" },
+        "objective_ids": { "type": "array", "items": { "type": "string" } },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object", "required": ["item_id", "objective_id", "tier", "modality", "prompt", "max_score", "citations"],
+            "properties": {
+              "item_id": { "type": "string" }, "objective_id": { "type": "string" },
+              "tier": { "type": "integer", "minimum": 1, "maximum": 3 },
+              "modality": { "enum": ["mcq", "true_false", "trace", "short_answer", "code"] },
+              "prompt": { "type": "string" }, "options": { "type": "array" }, "starter_code": { "type": "string" },
+              "max_score": { "type": "number", "minimum": 0 }, "citations": { "type": "array" }
+            },
+            "not": { "anyOf": [
+              { "required": ["answer"] }, { "required": ["answer_spec"] }, { "required": ["correct_option_id"] }, { "required": ["hidden_tests"] }
+            ] }
+          }
+        },
+        "submission_policy": { "type": "object" }
+      }
+    }
+  }
+}

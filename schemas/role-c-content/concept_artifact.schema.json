@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/concept_artifact.schema.json",
+  "title": "C Concept Lesson Artifact",
+  "type": "object",
+  "allOf": [{ "$ref": "artifact_envelope.schema.json" }],
+  "required": ["schema_version", "run_id", "artifact_id", "artifact_type", "agent", "status", "versions", "seed", "input_refs", "citations", "quality", "payload", "trace_ref"],
+  "properties": {
+    "schema_version": { "const": "1.0" }, "run_id": { "type": "string" }, "artifact_id": { "type": "string" },
+    "artifact_type": { "const": "concept_lesson" }, "agent": { "const": "concept-tutor" },
+    "status": { "enum": ["ready", "blocked", "failed"] }, "versions": { "type": "object" },
+    "seed": { "type": "integer" }, "input_refs": { "type": "array", "items": { "type": "string" } },
+    "citations": { "type": "array", "items": { "$ref": "#/$defs/citation" } }, "quality": { "type": "object" },
+    "payload": {
+      "type": ["object", "null"],
+      "properties": {
+        "title": { "type": "string" }, "objective_ids": { "type": "array", "items": { "type": "string" } },
+        "prerequisite_bridge": { "type": "array" }, "explanation_blocks": { "type": "array" },
+        "worked_examples": { "type": "array" }, "misconceptions": { "type": "array" },
+        "micro_checks": { "type": "array" }, "hint_ladders": { "type": "array" },
+        "summary": { "type": "array" }, "objective_coverage": { "type": "array" }, "used_evidence": { "type": "array" }
+      },
+      "required": ["title", "objective_ids", "prerequisite_bridge", "explanation_blocks", "worked_examples", "misconceptions", "micro_checks", "hint_ladders", "summary", "objective_coverage", "used_evidence"]
+    },
+    "trace_ref": { "type": "string" }, "blocked_reason": { "type": "object" }
+  },
+  "$defs": {
+    "citation": {
+      "type": "object", "required": ["source_id", "fact_id", "relation"],
+      "properties": { "source_id": { "type": "string" }, "fact_id": { "type": "string" }, "relation": { "enum": ["supports", "derived_from", "prerequisite"] } }
+    }
+  }
+}
