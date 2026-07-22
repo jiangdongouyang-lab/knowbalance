@@ -1,4 +1,4 @@
-import { C_SCHEMA_VERSION, type SchemaVersion } from "./common"
+import { C_SCHEMA_VERSION, type ArtifactVersions, type SchemaVersion } from "./common"
 
 export interface LearningEvidenceEvent {
   schema_version: SchemaVersion
@@ -57,6 +57,12 @@ export interface AgentTraceEvent {
   input_refs: string[]
   output_ref?: string
   summary: string
+  occurred_at?: string
+  duration_ms?: number
+  attempt?: number
+  retry_kind?: "transport" | "format_repair" | "tool" | "semantic_revision" | "resume"
+  validator_results?: Array<{ validator: string; ok: boolean; issue_count: number }>
+  versions?: ArtifactVersions
 }
 
 export function newTraceEvent(input: Omit<AgentTraceEvent, "schema_version">): AgentTraceEvent {

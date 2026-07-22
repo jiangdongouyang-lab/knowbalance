@@ -66,13 +66,13 @@
         "schema_version"
       ],
       "properties": {
-        "profile_version": { "type": "string" },
-        "kb_version": { "type": "string" },
-        "rag_version": { "type": "string" },
-        "prompt_version": { "type": "string" },
-        "model_config_hash": { "type": "string" },
+        "profile_version": { "type": "string", "minLength": 1 },
+        "kb_version": { "type": "string", "minLength": 1 },
+        "rag_version": { "type": "string", "minLength": 1 },
+        "prompt_version": { "type": "string", "minLength": 1 },
+        "model_config_hash": { "type": "string", "minLength": 1 },
         "schema_version": { "const": "1.0" },
-        "runner_image_digest": { "type": "string" }
+        "runner_image_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
       },
       "additionalProperties": false
     },
@@ -85,7 +85,10 @@
         "objective_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
         "alignment_score": { "type": "number", "minimum": 0, "maximum": 1 },
         "execution_verified": { "type": "boolean" },
-        "answer_key_verified": { "type": "boolean" }
+        "answer_key_verified": { "type": "boolean" },
+        "mutation_kill_rate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "verified_test_count": { "type": "integer", "minimum": 0 },
+        "verified_item_count": { "type": "integer", "minimum": 0 }
       },
       "additionalProperties": false
     },

@@ -6,23 +6,16 @@
   "allOf": [{ "$ref": "artifact_envelope.schema.json" }],
   "required": ["schema_version", "artifact_id", "artifact_type", "agent", "status", "payload"],
   "properties": {
-    "schema_version": { "const": "1.0" }, "artifact_id": { "type": "string" },
-    "artifact_type": { "const": "code_lab_public" }, "agent": { "const": "code-lab" },
+    "schema_version": { "const": "1.0" },
+    "artifact_id": { "type": "string", "minLength": 1 },
+    "artifact_type": { "const": "code_lab_public" },
+    "agent": { "const": "code-lab" },
     "status": { "enum": ["ready", "blocked", "failed"] },
     "payload": {
-      "type": ["object", "null"],
-      "required": ["lab_id", "title", "objective_ids", "instructions", "execution_contract", "starter_code", "public_tests", "hint_ladders", "reflection_questions", "used_evidence"],
-      "properties": {
-        "lab_id": { "type": "string" }, "title": { "type": "string" },
-        "objective_ids": { "type": "array", "items": { "type": "string" } }, "instructions": { "type": "array" },
-        "execution_contract": { "type": "object" }, "starter_code": { "type": "string" },
-        "public_tests": { "type": "array" }, "hint_ladders": { "type": "array" },
-        "reflection_questions": { "type": "array", "items": { "type": "string" } }, "used_evidence": { "type": "array" }
-      },
-      "not": { "anyOf": [
-        { "required": ["reference_solution"] }, { "required": ["hidden_tests"] },
-        { "required": ["answer_spec"] }, { "required": ["correct_option_id"] }
-      ] }
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "code_lab_draft.schema.json#/$defs/public_payload" }
+      ]
     }
   }
 }

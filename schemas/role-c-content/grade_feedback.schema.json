@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/grade_feedback.schema.json",
+  "title": "Role C Frozen Grade Feedback",
+  "type": "object",
+  "required": ["generated_after_score_freeze", "mode", "summary", "item_feedback"],
+  "properties": {
+    "generated_after_score_freeze": { "const": true },
+    "mode": { "enum": ["formative", "summative"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 1000 },
+    "item_feedback": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["item_id", "feedback_code", "message", "next_step"],
+        "properties": {
+          "item_id": { "type": "string", "minLength": 1 },
+          "feedback_code": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "next_step": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

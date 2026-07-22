@@ -5,7 +5,10 @@ import {
   adaptLearnerProfile,
   adaptRagResult,
   buildGenerationSpec,
+  DeterministicConceptContentProvider,
   defineLearningPathNode,
+  generateConceptLesson,
+  ROLE_C_PROMPT_MANIFEST_VERSION,
   type LearningPathNode,
 } from "../src/role-c-content"
 
@@ -24,6 +27,7 @@ const pathNode = defineLearningPathNode({
   prerequisite_source_ids: rawPath.prerequisite_source_ids,
   goal: rawPath.goal,
   objectives: rawPath.objectives,
+  assessment_blueprint: rawPath.assessment_blueprint,
 })
 const evidencePack = adaptRagResult(ragResult, {
   kb_version: kb.version,
@@ -35,19 +39,27 @@ const specResult = buildGenerationSpec({
   path_node: pathNode,
   evidence_pack: evidencePack,
   versions: {
-    prompt_version: "c-shell-0.1.0",
-    model_config_hash: "provider-not-bound",
+    prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+    model_config_hash: "deterministic-concept-reference-v1",
   },
   seed: 42,
 })
 
+const conceptArtifact = specResult.ok
+  ? await generateConceptLesson(
+      { generation_spec: specResult.spec, evidence_pack: evidencePack },
+      new DeterministicConceptContentProvider(),
+    )
+  : undefined
+
 console.log(JSON.stringify({
-  workflow: "B_profile_and_path_to_A_evidence_to_C_generation_spec",
-  status: specResult.ok ? "ready_for_c_agents" : "blocked",
+  workflow: "B_profile_and_path_to_A_evidence_to_C_verified_concept_lesson",
+  status: conceptArtifact?.status === "ready" ? "concept_lesson_ready" : "blocked",
   b_to_a_rag_request: ragRequest,
   b_to_c_profile_snapshot: profileSnapshot,
   b_to_c_learning_path_node: pathNode,
   a_to_c_evidence_pack: evidencePack,
   c_intake_result: specResult,
+  c_concept_artifact: conceptArtifact,
   publication_rule: "Only public artifacts go to D/browser; secure artifacts are persisted server-side and exposed by opaque ref only.",
 }, null, 2))

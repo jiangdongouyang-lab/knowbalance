@@ -1,10 +1,3 @@
-import type {
-  AssessmentPublicPayload,
-  AssessmentSecurePayload,
-  CodeLabPublicPayload,
-  CodeLabSecurePayload,
-  ConceptLessonPayload,
-} from "../contracts/artifacts"
 import {
   C_SCHEMA_VERSION,
   stableId,
@@ -18,10 +11,29 @@ import type { GenerationSpec } from "../contracts/generation-spec"
 import type { RagEvidencePack } from "../contracts/evidence-pack"
 import { validateCitations } from "../validators/citation-validator"
 import { validatePublicArtifactNoSecrets } from "../validators/public-secure-leak-validator"
+import {
+  validateArtifactStatusSemantics,
+  validateRoleCSchema,
+  type RoleCSchemaFile,
+} from "../validators/runtime-schema-validator"
 import type { ArtifactDraft } from "./types"
 
 type RoleCArtifactType = ArtifactEnvelope<unknown>["artifact_type"]
 
+const ARTIFACT_SCHEMAS: Record<RoleCArtifactType, RoleCSchemaFile> = {
+  concept_lesson: "concept_artifact.schema.json",
+  code_lab_public: "code_lab_public.schema.json",
+  code_lab_secure: "code_lab_secure.schema.json",
+  assessment_public: "assessment_public.schema.json",
+  assessment_secure: "assessment_secure.schema.json",
+  grade_result: "grade_result.schema.json",
+}
+
+/**
+ * Finalizes a Provider Draft inside C's trust boundary. Provider metadata is never
+ * accepted: citations, claim counts, coverage, schema status, and verification flags
+ * are derived here or supplied by an independent verifier.
+ */
 export function finalizeDraft<TPayload>(input: {
   spec: GenerationSpec
   evidence: RagEvidencePack
@@ -31,10 +43,19 @@ export function finalizeDraft<TPayload>(input: {
   input_refs: string[]
   public_payload: boolean
   objective_ids: string[]
+  trusted_citations?: CitationRef[]
+  trusted_objective_coverage?: number
   execution_verified?: boolean
   answer_key_verified?: boolean
+  runner_image_digest?: string
+  mutation_kill_rate?: number
+  verified_test_count?: number
+  verified_item_count?: number
+  verification_issues?: string[]
 }): ArtifactEnvelope<TPayload> {
-  const citationReport = validateCitations(input.draft.citations, input.evidence)
+  const derived = derivePayloadMetadata(input.draft.payload)
+  const citations = deduplicateCitations(input.trusted_citations ?? derived.citations)
+  const citationReport = validateCitations(citations, input.evidence)
   if (!citationReport.ok) {
     return blockedEnvelope(input, {
       code: "BLOCKED_INVALID_CITATION",
@@ -58,40 +79,62 @@ export function finalizeDraft<TPayload>(input: {
     return blockedEnvelope(input, {
       code: "BLOCKED_EXECUTION_UNVERIFIED",
       message: "代码实验尚未由可信执行器验证，当前保持 blocked",
+      details: input.verification_issues,
     })
   }
 
   if (input.answer_key_verified === false) {
     return blockedEnvelope(input, {
       code: "BLOCKED_ANSWER_KEY_UNVERIFIED",
-      message: "测评答案规范尚未验证，当前保持 blocked",
+      message: "测评答案规范尚未由独立验证器验证，当前保持 blocked",
+      details: input.verification_issues,
     })
   }
 
-  const quality = qualityFromDraft(input.spec, input.draft, input.objective_ids, {
+  const quality = qualityFromPayload(input.spec, input.objective_ids, derived, {
+    objective_coverage: input.trusted_objective_coverage,
     execution_verified: input.execution_verified,
     answer_key_verified: input.answer_key_verified,
+    mutation_kill_rate: input.mutation_kill_rate,
+    verified_test_count: input.verified_test_count,
+    verified_item_count: input.verified_item_count,
   })
   const artifactId = stableId("ART", {
     spec_id: input.spec.spec_id,
     artifact_type: input.artifact_type,
     seed: input.spec.policies.seed,
+    payload: input.draft.payload,
   })
-  return {
+  const artifact: ArtifactEnvelope<TPayload> = {
     schema_version: C_SCHEMA_VERSION,
     run_id: input.spec.run_id,
     artifact_id: artifactId,
     artifact_type: input.artifact_type,
     agent: input.agent,
     status: "ready",
-    versions: input.spec.versions,
+    versions: input.runner_image_digest
+      ? { ...input.spec.versions, runner_image_digest: input.runner_image_digest }
+      : input.spec.versions,
     seed: input.spec.policies.seed,
     input_refs: [...input.input_refs],
-    citations: input.draft.citations.map((citation) => ({ ...citation })),
+    citations,
     quality,
     payload: input.draft.payload,
     trace_ref: stableId("TRACE", { artifact_id: artifactId }),
   }
+
+  const schemaReport = validateRoleCSchema(ARTIFACT_SCHEMAS[input.artifact_type], artifact)
+  const stateReport = validateArtifactStatusSemantics(artifact)
+  if (!schemaReport.ok || !stateReport.ok) {
+    return blockedEnvelope(input, {
+      code: "BLOCKED_INVALID_OUTPUT",
+      message: "产物未通过完整运行时 Schema 或状态语义校验",
+      details: [...schemaReport.issues, ...stateReport.issues].map(
+        (issue) => `${issue.path}: ${issue.message}`,
+      ),
+    })
+  }
+  return artifact
 }
 
 export function providerBlockedEnvelope<TPayload>(input: {
@@ -105,7 +148,7 @@ export function providerBlockedEnvelope<TPayload>(input: {
   return blockedEnvelope(
     {
       ...input,
-      draft: { payload: null as TPayload, citations: [], factual_claim_count: 0, cited_claim_count: 0 },
+      draft: { payload: null as TPayload },
       public_payload: true,
       objective_ids: [],
     },
@@ -120,63 +163,17 @@ export function invalidOutputEnvelope<TPayload>(input: {
   artifact_type: RoleCArtifactType
   input_refs: string[]
   message: string
+  details?: string[]
 }): ArtifactEnvelope<TPayload> {
   return blockedEnvelope(
     {
       ...input,
-      draft: { payload: null as TPayload, citations: [], factual_claim_count: 0, cited_claim_count: 0 },
+      draft: { payload: null as TPayload },
       public_payload: true,
       objective_ids: [],
     },
-    { code: "BLOCKED_INVALID_OUTPUT", message: input.message },
+    { code: "BLOCKED_INVALID_OUTPUT", message: input.message, details: input.details },
   )
-}
-
-export function isConceptLessonPayload(value: unknown): value is ConceptLessonPayload {
-  return hasString(value, "title") &&
-    hasStringArray(value, "objective_ids") &&
-    hasArray(value, "prerequisite_bridge") &&
-    hasArray(value, "explanation_blocks") &&
-    hasArray(value, "worked_examples") &&
-    hasArray(value, "misconceptions") &&
-    hasArray(value, "micro_checks") &&
-    hasArray(value, "hint_ladders") &&
-    hasArray(value, "summary") &&
-    hasArray(value, "objective_coverage") &&
-    hasArray(value, "used_evidence")
-}
-
-export function isCodeLabPublicPayload(value: unknown): value is CodeLabPublicPayload {
-  return hasString(value, "lab_id") &&
-    hasString(value, "title") &&
-    hasStringArray(value, "objective_ids") &&
-    hasArray(value, "instructions") &&
-    hasObject(value, "execution_contract") &&
-    hasString(value, "starter_code") &&
-    hasArray(value, "public_tests") &&
-    hasArray(value, "hint_ladders") &&
-    hasArray(value, "reflection_questions") &&
-    hasArray(value, "used_evidence")
-}
-
-export function isCodeLabSecurePayload(value: unknown): value is CodeLabSecurePayload {
-  return hasString(value, "lab_id") &&
-    hasString(value, "reference_solution") &&
-    hasArray(value, "hidden_tests") &&
-    hasArray(value, "scoring_groups") &&
-    hasArray(value, "misconception_map")
-}
-
-export function isAssessmentPublicPayload(value: unknown): value is AssessmentPublicPayload {
-  return hasString(value, "form_id") &&
-    hasString(value, "title") &&
-    hasStringArray(value, "objective_ids") &&
-    hasArray(value, "items") &&
-    hasObject(value, "submission_policy")
-}
-
-export function isAssessmentSecurePayload(value: unknown): value is AssessmentSecurePayload {
-  return hasString(value, "form_id") && hasArray(value, "items") && hasNumber(value, "option_order_seed")
 }
 
 function blockedEnvelope<TPayload>(
@@ -191,6 +188,10 @@ function blockedEnvelope<TPayload>(
     objective_ids: string[]
     execution_verified?: boolean
     answer_key_verified?: boolean
+    runner_image_digest?: string
+    mutation_kill_rate?: number
+    verified_test_count?: number
+    verified_item_count?: number
   },
   reason: BlockedReason,
 ): ArtifactEnvelope<TPayload> {
@@ -218,55 +219,92 @@ function blockedEnvelope<TPayload>(
       alignment_score: 0,
       execution_verified: input.execution_verified,
       answer_key_verified: input.answer_key_verified,
+      mutation_kill_rate: input.mutation_kill_rate,
+      verified_test_count: input.verified_test_count,
+      verified_item_count: input.verified_item_count,
     },
     payload: null,
     trace_ref: stableId("TRACE", { artifact_id: artifactId }),
   }
 }
 
-function qualityFromDraft<TPayload>(
+interface DerivedPayloadMetadata {
+  citations: CitationRef[]
+  factual_claim_count: number
+  cited_claim_count: number
+}
+
+function derivePayloadMetadata(payload: unknown): DerivedPayloadMetadata {
+  const citations: CitationRef[] = []
+  let factualClaimCount = 0
+  let citedClaimCount = 0
+  visit(payload)
+  return {
+    citations: deduplicateCitations(citations),
+    factual_claim_count: factualClaimCount,
+    cited_claim_count: citedClaimCount,
+  }
+
+  function visit(value: unknown): void {
+    if (Array.isArray(value)) {
+      value.forEach(visit)
+      return
+    }
+    if (!value || typeof value !== "object") return
+    const record = value as Record<string, unknown>
+    if (isCitation(record)) citations.push(record)
+    if (typeof record.claim_id === "string" && typeof record.text === "string") {
+      factualClaimCount += 1
+      if (Array.isArray(record.citations) && record.citations.some(isCitation)) citedClaimCount += 1
+    }
+    Object.values(record).forEach(visit)
+  }
+}
+
+function qualityFromPayload(
   spec: GenerationSpec,
-  draft: ArtifactDraft<TPayload>,
   objectiveIds: string[],
-  verification: Pick<ArtifactQuality, "execution_verified" | "answer_key_verified">,
+  metadata: DerivedPayloadMetadata,
+  verification: {
+    objective_coverage?: number
+    execution_verified?: boolean
+    answer_key_verified?: boolean
+    mutation_kill_rate?: number
+    verified_test_count?: number
+    verified_item_count?: number
+  },
 ): ArtifactQuality {
   const requiredObjectives = new Set(spec.targets.map((target) => target.objective_id))
   const covered = new Set(objectiveIds.filter((objectiveId) => requiredObjectives.has(objectiveId)))
-  const objectiveCoverage = requiredObjectives.size === 0 ? 1 : covered.size / requiredObjectives.size
-  const citationCoverage = draft.factual_claim_count === 0
+  const objectiveCoverage = verification.objective_coverage ??
+    (requiredObjectives.size === 0 ? 1 : covered.size / requiredObjectives.size)
+  const citationCoverage = metadata.factual_claim_count === 0
     ? 1
-    : Math.min(1, draft.cited_claim_count / draft.factual_claim_count)
+    : Math.min(1, metadata.cited_claim_count / metadata.factual_claim_count)
   return {
     schema_ok: true,
     citation_coverage: citationCoverage,
     objective_coverage: objectiveCoverage,
     alignment_score: objectiveCoverage,
-    ...verification,
+    execution_verified: verification.execution_verified,
+    answer_key_verified: verification.answer_key_verified,
+    mutation_kill_rate: verification.mutation_kill_rate,
+    verified_test_count: verification.verified_test_count,
+    verified_item_count: verification.verified_item_count,
   }
 }
 
-function hasString(value: unknown, key: string): boolean {
-  return Boolean(value && typeof value === "object" && typeof (value as Record<string, unknown>)[key] === "string")
+function isCitation(value: unknown): value is CitationRef {
+  if (!value || typeof value !== "object") return false
+  const record = value as Record<string, unknown>
+  return typeof record.source_id === "string" &&
+    typeof record.fact_id === "string" &&
+    ["supports", "derived_from", "prerequisite"].includes(String(record.relation))
 }
 
-function hasArray(value: unknown, key: string): boolean {
-  return Boolean(value && typeof value === "object" && Array.isArray((value as Record<string, unknown>)[key]))
-}
-
-function hasObject(value: unknown, key: string): boolean {
-  const child = value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined
-  return Boolean(child && typeof child === "object" && !Array.isArray(child))
-}
-
-function hasNumber(value: unknown, key: string): boolean {
-  return Boolean(value && typeof value === "object" && typeof (value as Record<string, unknown>)[key] === "number")
-}
-
-function hasStringArray(value: unknown, key: string): boolean {
-  return Boolean(
-    value &&
-    typeof value === "object" &&
-    Array.isArray((value as Record<string, unknown>)[key]) &&
-    ((value as Record<string, unknown>)[key] as unknown[]).every((entry) => typeof entry === "string"),
-  )
+function deduplicateCitations(citations: CitationRef[]): CitationRef[] {
+  return [...new Map(citations.map((citation) => [
+    `${citation.source_id}:${citation.fact_id}:${citation.relation}`,
+    { ...citation },
+  ])).values()]
 }

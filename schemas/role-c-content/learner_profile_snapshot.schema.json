@@ -10,11 +10,11 @@
     "profile_version": { "type": "string", "minLength": 1 },
     "learner_id": { "type": "string", "minLength": 1 },
     "level": { "enum": ["beginner", "basic", "intermediate", "integrated"] },
-    "known_concepts": { "type": "array", "items": { "type": "string" } },
-    "weak_concepts": { "type": "array", "items": { "type": "string" } },
+    "known_concepts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "weak_concepts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
     "goal": { "type": "string", "minLength": 1 },
-    "preferred_contexts": { "type": "array", "items": { "type": "string" } },
-    "accommodations": { "type": "array", "items": { "type": "string" } },
+    "preferred_contexts": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+    "accommodations": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
     "provenance_ref": { "type": "string" }
   },
   "additionalProperties": false

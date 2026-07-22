@@ -1,4 +1,5 @@
 import type { KnowledgeDifficulty } from "../../knowledge/types"
+import { createHash } from "node:crypto"
 
 export const C_SCHEMA_VERSION = "1.0" as const
 
@@ -34,6 +35,9 @@ export interface ArtifactQuality {
   alignment_score: number
   execution_verified?: boolean
   answer_key_verified?: boolean
+  mutation_kill_rate?: number
+  verified_test_count?: number
+  verified_item_count?: number
 }
 
 export interface ArtifactEnvelope<TPayload> {
@@ -90,6 +94,11 @@ export function stableId(prefix: string, value: unknown): string {
     hash = Math.imul(hash, 0x01000193)
   }
   return `${prefix}-${(hash >>> 0).toString(16).padStart(8, "0")}`
+}
+
+/** Cryptographic canonical content hash for cache, integrity, and idempotency decisions. */
+export function contentHash(value: unknown): string {
+  return `sha256:${createHash("sha256").update(stableStringify(value)).digest("hex")}`
 }
 
 function stableStringify(value: unknown): string {

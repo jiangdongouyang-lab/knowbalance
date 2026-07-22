@@ -46,6 +46,7 @@ export interface QuizBlock {
   item_id: string
   prompt: string
   options?: PublicOption[]
+  citations: CitationRef[]
 }
 
 export interface HintBlock {
@@ -53,6 +54,7 @@ export interface HintBlock {
   block_type: "hint"
   hint_level: 1 | 2 | 3
   text: string
+  citations: CitationRef[]
 }
 
 export interface CitationBlock {
@@ -84,7 +86,7 @@ export interface ObjectiveCoverageRef {
 
 export interface HintLadder {
   objective_id: string
-  hints: Array<{ hint_level: 1 | 2 | 3; text: string }>
+  hints: Array<{ hint_level: 1 | 2 | 3; text: string; citations: CitationRef[] }>
 }
 
 export interface ConceptLessonPayload {
@@ -93,7 +95,12 @@ export interface ConceptLessonPayload {
   prerequisite_bridge: RenderBlock[]
   explanation_blocks: RenderBlock[]
   worked_examples: RenderBlock[]
-  misconceptions: Array<{ misconception_tag: string; explanation: string; objective_id: string }>
+  misconceptions: Array<{
+    misconception_tag: string
+    explanation: string
+    objective_id: string
+    citations: CitationRef[]
+  }>
   micro_checks: QuizBlock[]
   hint_ladders: HintLadder[]
   summary: RenderBlock[]
@@ -117,9 +124,17 @@ export interface ExecutionContract {
 
 export interface PublicTest {
   test_id: string
+  objective_id: string
   description: string
   input: unknown
   expected_behavior: string
+  citations: CitationRef[]
+}
+
+export interface CodeLabPublicObjectiveCoverage {
+  objective_id: string
+  instruction_block_ids: string[]
+  public_test_ids: string[]
 }
 
 export interface CodeLabPublicPayload {
@@ -132,8 +147,13 @@ export interface CodeLabPublicPayload {
   public_tests: PublicTest[]
   hint_ladders: HintLadder[]
   reflection_questions: string[]
+  objective_coverage: CodeLabPublicObjectiveCoverage[]
   used_evidence: CitationRef[]
 }
+
+export type TestComparison =
+  | { kind: "exact" }
+  | { kind: "numeric"; abs_tolerance: number; rel_tolerance: number }
 
 export interface HiddenTest {
   test_id: string
@@ -141,14 +161,41 @@ export interface HiddenTest {
   expected: unknown
   objective_id: string
   weight: number
+  comparison: TestComparison
+}
+
+export interface CodeLabScoringGroup {
+  group_id: string
+  objective_id: string
+  test_ids: string[]
+  weight: number
+}
+
+export interface CodeMutationVariant {
+  mutation_id: string
+  code: string
+  objective_ids: string[]
+  misconception_tag: string
+  must_fail_test_ids: string[]
+}
+
+export interface CodeLabSecureObjectiveCoverage {
+  objective_id: string
+  hidden_test_ids: string[]
+  scoring_group_ids: string[]
+  mutation_ids: string[]
 }
 
 export interface CodeLabSecurePayload {
   lab_id: string
+  test_suite_id: string
+  execution_contract: ExecutionContract
   reference_solution: string
   hidden_tests: HiddenTest[]
-  scoring_groups: Array<{ group_id: string; test_ids: string[]; weight: number }>
+  scoring_groups: CodeLabScoringGroup[]
   misconception_map: Array<{ failed_test_id: string; misconception_tag: string }>
+  mutation_variants: CodeMutationVariant[]
+  objective_coverage: CodeLabSecureObjectiveCoverage[]
 }
 
 export interface PublicOption {
@@ -159,6 +206,9 @@ export interface PublicOption {
 
 export interface AssessmentItemPublic {
   item_id: string
+  family_id: string
+  variant_id: string
+  display_no: number
   objective_id: string
   tier: 1 | 2 | 3
   modality: "mcq" | "true_false" | "trace" | "short_answer" | "code"
@@ -167,6 +217,20 @@ export interface AssessmentItemPublic {
   starter_code?: string
   max_score: number
   citations: CitationRef[]
+}
+
+export interface AssessmentObjectiveCoverage {
+  objective_id: string
+  item_ids: string[]
+  modalities: AssessmentItemPublic["modality"][]
+}
+
+export interface AssessmentRoutingRule {
+  route_id: string
+  min_anchor_score_ratio: number
+  max_anchor_score_ratio: number
+  action: "remediate" | "reinforce" | "advance"
+  reveal_tiers: Array<1 | 2 | 3>
 }
 
 export interface AssessmentPublicPayload {
@@ -178,6 +242,12 @@ export interface AssessmentPublicPayload {
     max_attempts: number
     formative: boolean
   }
+  routing: {
+    anchor_item_ids: string[]
+    rules: AssessmentRoutingRule[]
+  }
+  objective_coverage: AssessmentObjectiveCoverage[]
+  used_evidence: CitationRef[]
 }
 
 export interface RubricCriterion {
@@ -213,6 +283,7 @@ export type AnswerSpec =
 export interface AssessmentItemSecure {
   item_id: string
   objective_id: string
+  tier: 1 | 2 | 3
   modality: "mcq" | "true_false" | "trace" | "short_answer" | "code"
   max_score: number
   answer_spec: AnswerSpec
@@ -221,10 +292,25 @@ export interface AssessmentItemSecure {
   evidence_weight: number
 }
 
+export interface AssessmentCodeTestSuite {
+  test_suite_id: string
+  execution_contract: ExecutionContract
+  reference_solution: string
+  hidden_tests: HiddenTest[]
+}
+
+export interface AssessmentSecureObjectiveCoverage {
+  objective_id: string
+  item_ids: string[]
+  answer_kinds: AnswerSpec["kind"][]
+}
+
 export interface AssessmentSecurePayload {
   form_id: string
   items: AssessmentItemSecure[]
   option_order_seed: number
+  code_test_suites: AssessmentCodeTestSuite[]
+  objective_coverage: AssessmentSecureObjectiveCoverage[]
 }
 
 export interface SubmissionAnswer {
@@ -251,8 +337,10 @@ export interface SessionState {
   run_id: string
   learner_id_hash: string
   current_path_node_id: string
-  current_form_id?: string
+  current_form_id: string
   attempt_no: number
+  /** Trusted D/backend snapshot of the items required after anchor routing. */
+  required_item_ids: string[]
   revealed_hint_levels: Record<string, 0 | 1 | 2 | 3>
   public_artifact_refs: string[]
   secure_artifact_refs: string[]
@@ -262,10 +350,36 @@ export interface GradeItemResult {
   item_id: string
   objective_id: string
   raw_score: number
+  max_score: number
   evidence_score: number
   grader_confidence: number
+  hint_factor: number
+  repeat_factor: number
   misconception_tags: string[]
   feedback_code: string
+  rubric_results?: RubricCriterionResult[]
+}
+
+export interface RubricCriterionResult {
+  criterion_id: string
+  status: "met" | "unmet" | "uncertain"
+  awarded_score: number
+  confidence: number
+  evidence_excerpt?: string
+}
+
+export interface GradeFeedbackItem {
+  item_id: string
+  feedback_code: string
+  message: string
+  next_step: string
+}
+
+export interface GradeFeedback {
+  generated_after_score_freeze: true
+  mode: "formative" | "summative"
+  summary: string
+  item_feedback: GradeFeedbackItem[]
 }
 
 export interface GradeResultPayload {
@@ -274,12 +388,14 @@ export interface GradeResultPayload {
   score_frozen: true
   raw_score: number
   max_score: number
+  evidence_score: number
   item_results: GradeItemResult[]
   recommendation: {
     action: "remediate" | "reinforce" | "advance" | "reprofile"
     confidence: number
     reason_codes: string[]
   }
+  feedback: GradeFeedback
 }
 
 export type ConceptLessonArtifact = ArtifactEnvelope<ConceptLessonPayload>

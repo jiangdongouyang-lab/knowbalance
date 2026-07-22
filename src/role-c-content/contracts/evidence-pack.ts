@@ -97,6 +97,10 @@ export interface EvidenceRefreshPort {
   refreshEvidence(request: EvidenceGapRequest): Promise<RagEvidencePack>
 }
 
+export interface FactAuditPort {
+  sendFactAudits(packets: FactAuditPacket[]): Promise<void>
+}
+
 export function requestEvidenceRefresh(
   request: EvidenceGapRequest,
   port: EvidenceRefreshPort,
@@ -183,9 +187,15 @@ function normalizeResultItem(item: RagResultItem): RagEvidenceItem {
 
 function classifyMatch(results: RagResultItem[]): RagMatchStatus {
   if (results.length === 0) return "no_match"
+  return results.some(hasSubstantiveRagResultMatch) ? "strong" : "weak"
+}
+
+export function hasSubstantiveEvidenceMatch(item: RagEvidenceItem): boolean {
   const substantiveFields = new Set(["keywords", "title", "facts", "practiceTasks", "taskIntent"])
-  const hasSubstantiveMatch = results.some((item) =>
-    item.retrievalTrace.matchedFields.some((field) => substantiveFields.has(field)),
-  )
-  return hasSubstantiveMatch ? "strong" : "weak"
+  return item.retrieval_trace.matched_fields.some((field) => substantiveFields.has(field))
+}
+
+function hasSubstantiveRagResultMatch(item: RagResultItem): boolean {
+  const substantiveFields = new Set(["keywords", "title", "facts", "practiceTasks", "taskIntent"])
+  return item.retrievalTrace.matchedFields.some((field) => substantiveFields.has(field))
 }

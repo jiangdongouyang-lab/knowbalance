@@ -57,13 +57,29 @@ The four evidence workers (`background-collector`, `self-assessor`, `objective-d
 bun src/role-b-profile/profile-demo.ts   # end-to-end B chain demo, no model credentials needed
 ```
 
-## Role C: evidence-constrained content framework shell
+## Role C: evidence-constrained content generation
 
-Role C now provides a typed framework shell for `concept-tutor`, `code-lab`, and `tiered-evaluator`: A/B adapters, a frozen `GenerationSpec`, external JSON schemas, public/secure artifact separation, validation gates, pipeline states, basic grading boundaries, and B-facing learning evidence events. Model-backed generation, an isolated code runner, and secure persistence remain injectable ports for later integration. See `docs/role_c_design.md`.
+Role C implements `concept-tutor`, `code-lab`, and `tiered-evaluator` with a frozen `GenerationSpec`, runtime JSON Schemas, public/secure separation, independent verification, cross-artifact alignment, mixed grading, frozen feedback, idempotent mastery updates, checkpoint recovery and append-only traces. Model-backed Authors use staged generation and deterministic composition. See `docs/role_c_design.md` and `docs/role_c_prompt_index.md`.
 
 ```bash
-bun run demo:role-c   # B profile → A retrieval → C GenerationSpec contract demo
+bun run demo:role-c       # profile → RAG → verified concept lesson
+bun run demo:role-c:lab   # concept lesson → verified code lab
+bun run demo:role-c:full  # three agents → submission → grade → mastery
 ```
+
+OCI execution uses `ROLE_C_RUNNER_RUNTIME` and a digest-pinned `ROLE_C_RUNNER_IMAGE`:
+
+```bash
+bun run demo:role-c:lab:oci
+```
+
+For a real model smoke test, copy `.env.role-c.example` to `.env.role-c.local`, set `ROLE_C_MODEL_ENDPOINT`, `ROLE_C_MODEL_ID`, optional `ROLE_C_MODEL_API_KEY`, and `ROLE_C_MODEL_THINKING`, then run:
+
+```bash
+bun run smoke:role-c:model
+```
+
+`.env.role-c.local` is Git-ignored. `model_config_hash` records the effective model configuration in `GenerationSpec`.
 
 ## Extension points
 

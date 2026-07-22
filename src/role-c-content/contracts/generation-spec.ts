@@ -5,8 +5,18 @@ import {
   type LearnerLevel,
   type SchemaVersion,
 } from "./common"
-import type { EvidenceGapRequest, RagEvidencePack } from "./evidence-pack"
-import type { LearnerProfileSnapshot, LearningObjective, LearningPathNode } from "./profile-adapter"
+import {
+  type EvidenceGapRequest,
+  type RagEvidencePack,
+} from "./evidence-pack"
+import type {
+  AssessmentBlueprint,
+  LearnerProfileSnapshot,
+  LearningObjective,
+  LearningPathNode,
+} from "./profile-adapter"
+
+export type { AssessmentBlueprint } from "./profile-adapter"
 
 export interface DifficultyVector {
   domain_complexity: number
@@ -15,13 +25,6 @@ export interface DifficultyVector {
   code_complexity: number
   prerequisite_load: number
   scaffold_strength: number
-}
-
-export interface AssessmentBlueprint {
-  tier_1_count: number
-  tier_2_count: number
-  tier_3_count: number
-  required_modalities: Array<"mcq" | "true_false" | "trace" | "short_answer" | "code">
 }
 
 export interface GenerationSpec {
@@ -34,7 +37,7 @@ export interface GenerationSpec {
     profile_id: string
     profile_version: string
   }
-  path_node: Omit<LearningPathNode, "schema_version" | "objectives">
+  path_node: Omit<LearningPathNode, "schema_version" | "objectives" | "assessment_blueprint">
   targets: LearningObjective[]
   learner_adaptation: {
     level: LearnerLevel
@@ -64,15 +67,23 @@ export interface BuildGenerationSpecInput {
   versions: Omit<ArtifactVersions, "profile_version" | "kb_version" | "rag_version" | "schema_version">
   seed?: number
   difficulty?: Partial<DifficultyVector>
-  assessment_blueprint?: Partial<AssessmentBlueprint>
 }
 
 export type BuildGenerationSpecResult =
   | { ok: true; spec: GenerationSpec }
-  | { ok: false; code: "INVALID_INPUT" | "MISSING_EVIDENCE" | "WEAK_EVIDENCE"; errors: string[]; gap_request: EvidenceGapRequest }
+  | { ok: false; code: "INVALID_INPUT"; errors: string[] }
+  | { ok: false; code: "MISSING_EVIDENCE" | "WEAK_EVIDENCE"; errors: string[]; gap_request: EvidenceGapRequest }
 
 export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGenerationSpecResult {
   const errors = validateInputShape(input)
+  if (errors.length > 0) {
+    return {
+      ok: false,
+      code: "INVALID_INPUT",
+      errors,
+    }
+  }
+  const evidenceBySource = new Map(input.evidence_pack.results.map((item) => [item.source_id, item]))
   const sourceIds = new Set(input.evidence_pack.results.map((item) => item.source_id))
   const factKeys = new Set(
     input.evidence_pack.results.flatMap((item) =>
@@ -87,7 +98,11 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
       .map((factId) => `${objective.source_id}:${factId}`),
   )
 
-  if (input.evidence_pack.match_status === "no_match" || missingSources.length > 0 || missingFacts.length > 0) {
+  if (
+    input.evidence_pack.match_status === "no_match" ||
+    missingSources.length > 0 ||
+    missingFacts.length > 0
+  ) {
     const details = [
       ...errors,
       ...(missingSources.length > 0 ? [`缺少知识点：${missingSources.join("、")}`] : []),
@@ -102,20 +117,40 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
   }
 
   if (input.evidence_pack.match_status === "weak") {
+    const weakDetail = "RAG 仅弱匹配"
     return {
       ok: false,
       code: "WEAK_EVIDENCE",
-      errors: ["RAG 仅弱匹配，当前证据不足以发布事实性教学内容"],
-      gap_request: createGapRequest(input, "strong_match", "当前检索只有难度或其他弱信号，需要重写 query 或补充证据"),
+      errors: [`${weakDetail}，当前证据不足以发布事实性教学内容`],
+      gap_request: createGapRequest(input, "strong_match", `${weakDetail}，需要重写 query 或补充证据`),
     }
   }
 
-  if (errors.length > 0) {
-    return {
-      ok: false,
-      code: "INVALID_INPUT",
-      errors,
-      gap_request: createGapRequest(input, "knowledge_item", errors.join("；")),
+  for (const sourceId of input.path_node.target_source_ids) {
+    const item = evidenceBySource.get(sourceId)!
+    if (item.examples.length === 0) {
+      return {
+        ok: false,
+        code: "MISSING_EVIDENCE",
+        errors: [`目标知识点 ${sourceId} 缺少可追踪示例`],
+        gap_request: createGapRequest(input, "example", `目标知识点 ${sourceId} 缺少示例`),
+      }
+    }
+    if (item.practice_tasks.length === 0) {
+      return {
+        ok: false,
+        code: "MISSING_EVIDENCE",
+        errors: [`目标知识点 ${sourceId} 缺少实践任务`],
+        gap_request: createGapRequest(input, "practice_task", `目标知识点 ${sourceId} 缺少实践任务`),
+      }
+    }
+    if (item.quiz_seeds.length === 0) {
+      return {
+        ok: false,
+        code: "MISSING_EVIDENCE",
+        errors: [`目标知识点 ${sourceId} 缺少题目种子`],
+        gap_request: createGapRequest(input, "quiz_seed", `目标知识点 ${sourceId} 缺少题目种子`),
+      }
     }
   }
 
@@ -134,66 +169,106 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
     profile_version: input.profile_snapshot.profile_version,
     path_node_id: input.path_node.node_id,
     retrieval_id: input.evidence_pack.retrieval_id,
+    assessment_blueprint: input.path_node.assessment_blueprint,
     seed,
   }
 
-  return {
-    ok: true,
-    spec: {
-      schema_version: C_SCHEMA_VERSION,
-      spec_id: stableId("SPEC", specIdentity),
-      run_id: input.run_id,
-      evidence_ref: input.evidence_pack.retrieval_id,
-      versions,
-      profile_ref: {
-        profile_id: input.profile_snapshot.profile_id,
-        profile_version: input.profile_snapshot.profile_version,
-      },
-      path_node: {
-        node_id: input.path_node.node_id,
-        target_source_ids: [...input.path_node.target_source_ids],
-        prerequisite_source_ids: [...input.path_node.prerequisite_source_ids],
-        goal: input.path_node.goal,
-      },
-      targets: input.path_node.objectives.map((objective) => ({
-        ...objective,
-        required_fact_ids: [...objective.required_fact_ids],
-      })),
-      learner_adaptation: {
-        level: input.profile_snapshot.level,
-        known_concepts: [...input.profile_snapshot.known_concepts],
-        weak_concepts: [...input.profile_snapshot.weak_concepts],
-        preferred_contexts: [...input.profile_snapshot.preferred_contexts],
-        scaffold_level: defaults.scaffold_level,
-        reading_density: defaults.reading_density,
-        accommodations: [...input.profile_snapshot.accommodations],
-      },
-      difficulty: { ...defaults.difficulty, ...input.difficulty },
-      assessment_blueprint: {
-        tier_1_count: input.assessment_blueprint?.tier_1_count ?? 2,
-        tier_2_count: input.assessment_blueprint?.tier_2_count ?? 2,
-        tier_3_count: input.assessment_blueprint?.tier_3_count ?? 1,
-        required_modalities: input.assessment_blueprint?.required_modalities ?? ["mcq", "trace", "code"],
-      },
-      policies: {
-        external_knowledge_allowed: false,
-        citation_required: true,
-        max_semantic_revision: 1,
-        max_tool_retry: 2,
-        seed,
-      },
+  const spec: GenerationSpec = {
+    schema_version: C_SCHEMA_VERSION,
+    spec_id: stableId("SPEC", specIdentity),
+    run_id: input.run_id,
+    evidence_ref: input.evidence_pack.retrieval_id,
+    versions,
+    profile_ref: {
+      profile_id: input.profile_snapshot.profile_id,
+      profile_version: input.profile_snapshot.profile_version,
+    },
+    path_node: {
+      node_id: input.path_node.node_id,
+      target_source_ids: [...input.path_node.target_source_ids],
+      prerequisite_source_ids: [...input.path_node.prerequisite_source_ids],
+      goal: input.path_node.goal,
+    },
+    targets: input.path_node.objectives.map((objective) => ({
+      ...objective,
+      required_fact_ids: [...objective.required_fact_ids],
+    })),
+    learner_adaptation: {
+      level: input.profile_snapshot.level,
+      known_concepts: [...input.profile_snapshot.known_concepts],
+      weak_concepts: [...input.profile_snapshot.weak_concepts],
+      preferred_contexts: [...input.profile_snapshot.preferred_contexts],
+      scaffold_level: defaults.scaffold_level,
+      reading_density: defaults.reading_density,
+      accommodations: [...input.profile_snapshot.accommodations],
+    },
+    difficulty: { ...defaults.difficulty, ...input.difficulty },
+    assessment_blueprint: {
+      tier_1_count: input.path_node.assessment_blueprint.tier_1_count,
+      tier_2_count: input.path_node.assessment_blueprint.tier_2_count,
+      tier_3_count: input.path_node.assessment_blueprint.tier_3_count,
+      required_modalities: [...input.path_node.assessment_blueprint.required_modalities],
+    },
+    policies: {
+      external_knowledge_allowed: false,
+      citation_required: true,
+      max_semantic_revision: 1,
+      max_tool_retry: 2,
+      seed,
     },
   }
+  return {
+    ok: true,
+    spec: deepFreeze(spec),
+  }
+}
+
+function deepFreeze<T>(value: T): T {
+  if (!value || typeof value !== "object" || Object.isFrozen(value)) return value
+  Object.values(value as Record<string, unknown>).forEach(deepFreeze)
+  return Object.freeze(value)
 }
 
 function validateInputShape(input: BuildGenerationSpecInput): string[] {
   const errors: string[] = []
   if (!input.run_id.trim()) errors.push("run_id 不能为空")
+  if (!input.profile_snapshot.profile_id.trim()) errors.push("profile_id 不能为空")
   if (!input.profile_snapshot.profile_version.trim()) errors.push("profile_version 不能为空")
+  if (!input.profile_snapshot.goal.trim()) errors.push("profile goal 不能为空")
+  if (!input.evidence_pack.retrieval_id.trim()) errors.push("retrieval_id 不能为空")
+  if (!input.evidence_pack.kb_version.trim()) errors.push("kb_version 不能为空")
+  if (!input.evidence_pack.rag_version.trim()) errors.push("rag_version 不能为空")
+  if (!input.versions.prompt_version.trim()) errors.push("prompt_version 不能为空")
+  if (!input.versions.model_config_hash.trim()) errors.push("model_config_hash 不能为空")
+  if (input.versions.runner_image_digest !== undefined
+    && !/^sha256:[a-f0-9]{64}$/.test(input.versions.runner_image_digest)) {
+    errors.push("runner_image_digest 必须为 sha256:<64 hex>")
+  }
+  if (input.seed !== undefined && !Number.isSafeInteger(input.seed)) errors.push("seed 必须为安全整数")
   if (!input.path_node.node_id.trim()) errors.push("path_node.node_id 不能为空")
   if (!input.path_node.goal.trim()) errors.push("path_node.goal 不能为空")
   if (input.path_node.target_source_ids.length === 0) errors.push("target_source_ids 不能为空")
   if (input.path_node.objectives.length === 0) errors.push("objectives 不能为空")
+  if (input.path_node.objectives.length > 0 && !input.path_node.objectives.some((objective) => objective.importance === "core")) {
+    errors.push("objectives 至少包含一个 core 目标")
+  }
+  if (new Set(input.path_node.target_source_ids).size !== input.path_node.target_source_ids.length) errors.push("target_source_ids 不得重复")
+  if (new Set(input.path_node.prerequisite_source_ids).size !== input.path_node.prerequisite_source_ids.length) errors.push("prerequisite_source_ids 不得重复")
+  const overlap = input.path_node.target_source_ids.filter((source) => input.path_node.prerequisite_source_ids.includes(source))
+  if (overlap.length > 0) errors.push(`目标与先修知识不得重复：${overlap.join("、")}`)
+  const objectiveIds = input.path_node.objectives.map((objective) => objective.objective_id)
+  if (new Set(objectiveIds).size !== objectiveIds.length) errors.push("objective_id 不得重复")
+  const profileOverlap = input.profile_snapshot.known_concepts.filter((concept) => input.profile_snapshot.weak_concepts.includes(concept))
+  if (profileOverlap.length > 0) errors.push(`画像的 known_concepts 与 weak_concepts 冲突：${profileOverlap.join("、")}`)
+  for (const [name, values] of Object.entries({
+    known_concepts: input.profile_snapshot.known_concepts,
+    weak_concepts: input.profile_snapshot.weak_concepts,
+    preferred_contexts: input.profile_snapshot.preferred_contexts,
+    accommodations: input.profile_snapshot.accommodations,
+  })) {
+    if (values.some((value) => !value.trim())) errors.push(`画像的 ${name} 不得包含空字符串`)
+    if (new Set(values).size !== values.length) errors.push(`画像的 ${name} 不得重复`)
+  }
   for (const objective of input.path_node.objectives) {
     if (!input.path_node.target_source_ids.includes(objective.source_id)) {
       errors.push(`目标 ${objective.objective_id} 的 source_id 不在 target_source_ids 中`)
@@ -201,8 +276,42 @@ function validateInputShape(input: BuildGenerationSpecInput): string[] {
     if (objective.required_fact_ids.length === 0) {
       errors.push(`目标 ${objective.objective_id} 缺少 required_fact_ids`)
     }
+    if (new Set(objective.required_fact_ids).size !== objective.required_fact_ids.length) errors.push(`目标 ${objective.objective_id} 的 required_fact_ids 不得重复`)
+  }
+  validateDifficulty(input.difficulty, errors)
+  const blueprint = input.path_node.assessment_blueprint as AssessmentBlueprint | undefined
+  if (!blueprint) {
+    errors.push("path_node.assessment_blueprint 必须由上游下发")
+    return errors
+  }
+  for (const [key, value] of Object.entries({
+    tier_1_count: blueprint.tier_1_count,
+    tier_2_count: blueprint.tier_2_count,
+    tier_3_count: blueprint.tier_3_count,
+  })) {
+    if (!Number.isSafeInteger(value) || value < 0 || value > 20) errors.push(`${key} 必须是 0..20 的整数`)
+  }
+  if (new Set(blueprint.required_modalities).size !== blueprint.required_modalities.length) {
+    errors.push("required_modalities 不得重复")
+  }
+  const allowedModalities = new Set(["mcq", "true_false", "trace", "short_answer", "code"])
+  for (const modality of blueprint.required_modalities as string[]) {
+    if (!allowedModalities.has(modality)) errors.push(`不支持的 assessment modality：${modality}`)
+  }
+  const total = blueprint.tier_1_count + blueprint.tier_2_count + blueprint.tier_3_count
+  if (total < 1 || total > 30) errors.push("assessment blueprint 总题量必须在 1..30")
+  if (blueprint.required_modalities.length > total) errors.push("required_modalities 数量不能超过总题量")
+  if (total < input.path_node.objectives.filter((objective) => objective.importance === "core").length) {
+    errors.push("assessment blueprint 总题量不能少于 core objective 数量")
   }
   return errors
+}
+
+function validateDifficulty(difficulty: Partial<DifficultyVector> | undefined, errors: string[]): void {
+  if (!difficulty) return
+  for (const [key, value] of Object.entries(difficulty)) {
+    if (!Number.isFinite(value) || value < 0 || value > 5) errors.push(`difficulty.${key} 必须是 0..5 的有限数值`)
+  }
 }
 
 function createGapRequest(

@@ -3,6 +3,13 @@ import { C_SCHEMA_VERSION, stableId, type LearnerLevel, type SchemaVersion } fro
 
 export type ObservableBehavior = "recognize" | "explain" | "trace" | "apply" | "debug" | "create"
 
+export interface AssessmentBlueprint {
+  tier_1_count: number
+  tier_2_count: number
+  tier_3_count: number
+  required_modalities: Array<"mcq" | "true_false" | "trace" | "short_answer" | "code">
+}
+
 export interface LearnerProfileSnapshot {
   schema_version: SchemaVersion
   profile_id: string
@@ -33,6 +40,8 @@ export interface LearningPathNode {
   prerequisite_source_ids: string[]
   goal: string
   objectives: LearningObjective[]
+  /** Upstream course/path policy. Role C consumes this verbatim and does not choose a product-wide quota. */
+  assessment_blueprint: AssessmentBlueprint
 }
 
 export interface ProfileSnapshotOptions {

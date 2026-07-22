@@ -12,15 +12,10 @@
     "seed": { "type": "integer" }, "input_refs": { "type": "array", "items": { "type": "string" } },
     "citations": { "type": "array", "items": { "$ref": "#/$defs/citation" } }, "quality": { "type": "object" },
     "payload": {
-      "type": ["object", "null"],
-      "properties": {
-        "title": { "type": "string" }, "objective_ids": { "type": "array", "items": { "type": "string" } },
-        "prerequisite_bridge": { "type": "array" }, "explanation_blocks": { "type": "array" },
-        "worked_examples": { "type": "array" }, "misconceptions": { "type": "array" },
-        "micro_checks": { "type": "array" }, "hint_ladders": { "type": "array" },
-        "summary": { "type": "array" }, "objective_coverage": { "type": "array" }, "used_evidence": { "type": "array" }
-      },
-      "required": ["title", "objective_ids", "prerequisite_bridge", "explanation_blocks", "worked_examples", "misconceptions", "micro_checks", "hint_ladders", "summary", "objective_coverage", "used_evidence"]
+      "oneOf": [
+        { "$ref": "concept_lesson_payload.schema.json" },
+        { "type": "null" }
+      ]
     },
     "trace_ref": { "type": "string" }, "blocked_reason": { "type": "object" }
   },
