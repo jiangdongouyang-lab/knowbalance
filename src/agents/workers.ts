@@ -41,22 +41,22 @@ export const WORKER_DEFINITIONS = [
   {
     name: "concept-tutor",
     stage: "concept_instruction",
-    description: "Generates personalized concept instruction for the current path step.",
-    responsibility: "Acknowledge execution of personalized concept-note generation.",
+    description: "Produces evidence-constrained personalized instruction from a frozen GenerationSpec.",
+    responsibility: "Generate the public concept lesson while preserving facts, objectives, prerequisites, and citations.",
     next: "run_code_lab",
   },
   {
     name: "code-lab",
     stage: "code_lab",
-    description: "Prepares and runs an executable code experiment.",
-    responsibility: "Acknowledge execution of the code experiment stage.",
+    description: "Designs a public code lab and a separately stored private verification artifact.",
+    responsibility: "Generate an evidence-aligned lab without exposing reference solutions or hidden tests.",
     next: "run_assessment",
   },
   {
     name: "tiered-evaluator",
     stage: "tiered_assessment",
-    description: "Runs a tiered assessment and recommends progression.",
-    responsibility: "Acknowledge execution of tiered assessment.",
+    description: "Authors tiered assessment items under a public/private answer-key boundary.",
+    responsibility: "Generate objective-aligned public assessment items without exposing private grading material.",
     next: "continue",
   },
 ] as const satisfies readonly WorkerDefinition[]

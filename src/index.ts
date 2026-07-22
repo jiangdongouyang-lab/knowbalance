@@ -21,3 +21,4 @@ export default pluginModule
 
 export { createWorkflowAgents } from "./agents/registry"
 export type { WorkflowAgentName, WorkflowAgentRegistry } from "./agents/types"
+export * from "./role-c-content"
