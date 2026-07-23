@@ -29,6 +29,7 @@
 
 - [ ] `bun run check`
 - [ ] `bun scripts/team-integration-demo.ts`
+- [ ] D 相关 PR 额外运行：`bun run role-d:verify`
 
 请粘贴关键输出：
 

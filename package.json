@@ -6,15 +6,16 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "bun test --isolate ./tests",
-    "check": "bun run typecheck && bun run test",
+    "check": "bun run typecheck && bun run test && bun run role-d:verify",
     "demo:role-c": "bun scripts/role-c-content-demo.ts",
     "demo:role-c:lab": "bun scripts/role-c-code-lab-demo.ts",
     "demo:role-c:lab:oci": "bun scripts/role-c-code-lab-demo.ts --oci",
     "demo:role-c:full": "bun scripts/role-c-full-demo.ts",
     "smoke:role-c:model": "bun scripts/role-c-real-model-smoke.ts",
     "role-d:dev": "vite --config src/role-d-ui/vite.config.ts",
+    "role-d:test": "vitest run --config src/role-d-ui/vite.config.ts",
     "role-d:build": "vite build --config src/role-d-ui/vite.config.ts",
-    "role-d:test": "vitest run --config src/role-d-ui/vite.config.ts"
+    "role-d:verify": "bun run role-d:test && bun x tsc -p src/role-d-ui/tsconfig.json --noEmit && bun run role-d:build"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.20",
