@@ -5,21 +5,36 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "bun test ./tests",
+    "test": "bun test --isolate ./tests",
     "check": "bun run typecheck && bun run test",
     "demo:role-c": "bun scripts/role-c-content-demo.ts",
     "demo:role-c:lab": "bun scripts/role-c-code-lab-demo.ts",
     "demo:role-c:lab:oci": "bun scripts/role-c-code-lab-demo.ts --oci",
     "demo:role-c:full": "bun scripts/role-c-full-demo.ts",
-    "smoke:role-c:model": "bun scripts/role-c-real-model-smoke.ts"
+    "smoke:role-c:model": "bun scripts/role-c-real-model-smoke.ts",
+    "role-d:dev": "vite --config src/role-d-ui/vite.config.ts",
+    "role-d:build": "vite build --config src/role-d-ui/vite.config.ts",
+    "role-d:test": "vitest run --config src/role-d-ui/vite.config.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.20",
     "@opencode-ai/sdk": "1.17.20",
-    "ajv": "8.20.0"
+    "ajv": "8.20.0",
+    "lucide-react": "0.468.0",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "6.8.0",
+    "@testing-library/react": "16.3.0",
+    "@testing-library/user-event": "14.6.1",
     "@types/bun": "latest",
-    "typescript": "latest"
+    "@types/react": "19.1.12",
+    "@types/react-dom": "19.1.9",
+    "@vitejs/plugin-react": "6.0.3",
+    "jsdom": "29.1.1",
+    "typescript": "latest",
+    "vite": "8.1.5",
+    "vitest": "4.1.10"
   }
 }
