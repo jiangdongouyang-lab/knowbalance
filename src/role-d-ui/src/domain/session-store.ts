@@ -1,4 +1,5 @@
 import type { RoleDSession } from "./types"
+import { isAssessmentAnswerValid, isAssessmentComplete } from "./assessment-responses"
 import { isGuidedStage } from "./guided-flow"
 
 const STORAGE_KEY = "knowbalance.role-d.session"
@@ -109,6 +110,7 @@ export function isValidRoleDSession(value: unknown): value is RoleDSession {
     && typeof view.diagnosisAnswer === "string"
     && typeof view.diagnosisSubmitted === "boolean"
     && (view.assessmentAnswers === undefined || isStringRecord(view.assessmentAnswers))
+    && (view.assessmentSubmitted === undefined || typeof view.assessmentSubmitted === "boolean")
     && (view.detailDrawer === "none" || view.detailDrawer === "agents" || view.detailDrawer === "evidence")
 
   return structurallyValid && hasValidReferences(value as unknown as RoleDSession)
@@ -257,7 +259,12 @@ function hasValidReferences(session: RoleDSession): boolean {
       && (artifact.items ?? []).every((item) => item.citations.length > 0
         && item.citations.every((citation) => factIds.has(`${citation.sourceId}-${citation.factId}`)))))
   const assessmentItems = session.artifacts.flatMap((artifact) => artifact.kind === "assessment" ? artifact.items ?? [] : [])
-  const itemOptions = new Map(assessmentItems.map((item) => [item.id, new Set(item.optionIds?.length ? item.optionIds : item.options)]))
-  const answersAreValid = Object.entries(session.view.assessmentAnswers ?? {}).every(([itemId, optionId]) => itemOptions.get(itemId)?.has(optionId) === true)
-  return selectedSourceIsValid && diagnosisIsValid && citationsAreValid && answersAreValid
+  const itemById = new Map(assessmentItems.map((item) => [item.id, item]))
+  const answers = session.view.assessmentAnswers ?? {}
+  const answersAreValid = Object.entries(answers).every(([itemId, answer]) => {
+    const item = itemById.get(itemId)
+    return item ? isAssessmentAnswerValid(item, answer) : false
+  })
+  const submissionIsValid = session.view.assessmentSubmitted !== true || isAssessmentComplete(assessmentItems, answers)
+  return selectedSourceIsValid && diagnosisIsValid && citationsAreValid && answersAreValid && submissionIsValid
 }

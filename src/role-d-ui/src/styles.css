@@ -253,6 +253,13 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:fo
 .answer-options button { min-height: 48px; padding: 12px 15px; color: #a6b0ad; border: 1px solid var(--border); border-radius: 9px; background: rgba(255,255,255,.015); text-align: left; cursor: pointer; font-size: 14px; }
 .answer-options button:hover { color: #dce5e2; border-color: rgba(81,213,177,.32); }
 .answer-options button.is-selected { color: #dff8f0; border-color: rgba(81,213,177,.6); background: rgba(81,213,177,.13); box-shadow: inset 3px 0 0 var(--mint); }
+.assessment-text-response, .assessment-code-response { width: 100%; margin-top: 18px; padding: 14px 15px; resize: vertical; color: #dce5e2; border: 1px solid var(--border); border-radius: 9px; outline: none; background: #090d11; font: inherit; line-height: 1.65; }
+.assessment-code-response { min-height: 210px; color: #b4ded3; font-family: Consolas, monospace; tab-size: 4; }
+.assessment-text-response:focus, .assessment-code-response:focus { border-color: rgba(81,213,177,.58); box-shadow: 0 0 0 3px rgba(81,213,177,.08); }
+.assessment-submit { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 18px; border: 1px solid var(--border); border-radius: 11px; background: rgba(81,213,177,.055); }
+.assessment-submit span { color: #a8b4b0; font-size: 14px; }
+.assessment-submit button { min-height: 42px; padding: 0 18px; color: #07130f; border: 0; border-radius: 8px; background: var(--mint); font-weight: 800; cursor: pointer; }
+.assessment-submit button:disabled { color: #75817d; background: #202825; cursor: not-allowed; }
 .resource-guidance { margin-top: 27px; padding: 17px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,.014); }
 .resource-guidance strong { color: #b0bab7; font-size: 14px; }
 .resource-guidance p { margin: 7px 0 0; color: #87928f; font-size: 14px; line-height: 1.65; }
@@ -435,6 +442,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:fo
   .assessment-item { padding: 13px; }
   .assessment-item > div:first-child { align-items: flex-start; }
   .assessment-item .answer-options { grid-template-columns: 1fr; }
+  .assessment-submit { align-items: stretch; flex-direction: column; }
+  .assessment-submit button { width: 100%; }
   .trace-grid { grid-template-columns: 1fr; }
   .retrieval-picker { grid-template-columns: 1fr; }
   .app-footer { gap: 8px; flex-direction: column; }

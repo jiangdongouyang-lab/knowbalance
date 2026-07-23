@@ -187,6 +187,7 @@ function buildSession(
       diagnosisAnswer: "",
       diagnosisSubmitted: false,
       assessmentAnswers: {},
+      assessmentSubmitted: false,
       detailDrawer: "none",
     },
   })

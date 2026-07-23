@@ -71,7 +71,7 @@ export function App() {
       case "plan":
         return <PlanScreen session={session} onContinue={() => unlockStage("learning")} onBack={() => selectStage("profile")} />
       case "learning":
-        return <LearningScreen session={session} onTab={(activeArtifactKind) => updateView({ activeArtifactKind })} onCitation={(selectedSourceId) => updateView({ selectedSourceId, detailDrawer: "evidence" })} onAssessmentAnswer={(itemId, optionId) => updateView({ assessmentAnswers: { ...(session.view.assessmentAnswers ?? {}), [itemId]: optionId } })} onContinue={() => unlockStage("feedback")} onBack={() => selectStage("plan")} />
+        return <LearningScreen session={session} onTab={(activeArtifactKind) => updateView({ activeArtifactKind })} onCitation={(selectedSourceId) => updateView({ selectedSourceId, detailDrawer: "evidence" })} onAssessmentAnswer={(itemId, answer) => updateView({ assessmentAnswers: { ...(session.view.assessmentAnswers ?? {}), [itemId]: answer }, assessmentSubmitted: false })} onAssessmentSubmit={() => updateView({ assessmentSubmitted: true })} onContinue={() => unlockStage("feedback")} onBack={() => selectStage("plan")} />
       case "feedback":
         return <FeedbackScreen session={session} onRestart={() => updateView({ currentStage: "learning", activeArtifactKind: "lesson", remediationStarted: true })} onBack={() => selectStage("learning")} />
     }
@@ -98,6 +98,7 @@ export function App() {
             diagnosisAnswer: "",
             diagnosisSubmitted: false,
             assessmentAnswers: {},
+            assessmentSubmitted: false,
             detailDrawer: "none",
           },
         }

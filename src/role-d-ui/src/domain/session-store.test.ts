@@ -256,4 +256,27 @@ describe("session-store", () => {
 
     expect(loadSession()).toBeNull()
   })
+
+  test("rejects a submitted assessment whose dynamic item set is incomplete", () => {
+    const invalid = structuredClone(session)
+    invalid.artifacts = [{
+      id: "assessment",
+      kind: "assessment",
+      title: "动态分阶测评",
+      status: "real",
+      content: "公开题面",
+      options: [],
+      citations: [],
+      evidenceStatus: "gap",
+      items: [
+        { id: "trace-item", tier: 2, modality: "trace", prompt: "追踪变量", options: [], citations: [] },
+        { id: "code-item", tier: 3, modality: "code", prompt: "补全代码", options: [], starterCode: "def solve():\n    pass", citations: [] },
+      ],
+    }]
+    invalid.view.assessmentAnswers = { "trace-item": "变量最终为 3" }
+    invalid.view.assessmentSubmitted = true
+    localStorage.setItem("knowbalance.role-d.session", JSON.stringify({ version: 1, data: invalid }))
+
+    expect(loadSession()).toBeNull()
+  })
 })

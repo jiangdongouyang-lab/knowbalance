@@ -78,6 +78,7 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
       diagnosisAnswer: input.view?.diagnosisAnswer ?? "",
       diagnosisSubmitted: input.view?.diagnosisSubmitted ?? false,
       assessmentAnswers: input.view?.assessmentAnswers ?? {},
+      assessmentSubmitted: input.view?.assessmentSubmitted ?? false,
       detailDrawer: input.view?.detailDrawer === "agents" || input.view?.detailDrawer === "evidence" ? input.view.detailDrawer : "none",
     },
   }

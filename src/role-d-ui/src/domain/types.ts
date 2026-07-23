@@ -147,6 +147,7 @@ export interface RoleDSession {
     diagnosisAnswer: string
     diagnosisSubmitted: boolean
     assessmentAnswers?: Record<string, string>
+    assessmentSubmitted?: boolean
     detailDrawer: "none" | "agents" | "evidence"
   }
 }
