@@ -104,7 +104,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:fo
 .main-content { min-width: 0; }
 .topbar { position: sticky; top: 0; z-index: 20; height: 68px; padding: 0 22px; display: flex; align-items: center; justify-content: space-between; gap: 16px; border-bottom: 1px solid var(--border); background: rgba(8, 11, 15, .96); backdrop-filter: blur(12px); }
 .topbar > div:first-child { min-width: 0; display: flex; flex: 1 1 auto; align-items: center; gap: 14px; }
-.topbar > div:first-child > strong, .live-indicator { flex: 0 0 auto; white-space: nowrap; }
+.topbar > div:first-child > strong { flex: 0 0 auto; white-space: nowrap; }
 .course-identity strong { display: flex; align-items: baseline; gap: 7px; }
 .course-identity strong > span { color: var(--mint); font-size: 23px; font-weight: 760; letter-spacing: -.035em; }
 .course-identity strong > small { color: #aeb9b6; font-size: 12px; font-weight: 650; letter-spacing: .06em; }
@@ -122,10 +122,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:fo
 .progress-file-input { position: absolute; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
 .progress-file-notice { position: fixed; top: 66px; right: 16px; z-index: 120; padding: 9px 12px; color: #9ed8c9; border: 1px solid rgba(81,213,177,.22); border-radius: 8px; background: #101a18; box-shadow: 0 12px 35px rgba(0,0,0,.35); font-size: 12px; }
 .progress-file-notice.is-error { color: #e6bc79; border-color: rgba(232,185,104,.25); background: #1b1710; }
-.top-actions, .live-indicator, .detail-button, .new-plan-button, .restart-button, .save-status { display: flex; flex: 0 0 auto; align-items: center; white-space: nowrap; }
-.live-indicator { gap: 7px; color: #84918e; font: 600 11px/1 Consolas, monospace; }
-.live-indicator i { width: 7px; height: 7px; border-radius: 50%; background: var(--mint); box-shadow: 0 0 8px rgba(81,213,177,.65); animation: pulse 2s infinite; }
-.live-indicator.is-paused i { background: var(--quiet); box-shadow: none; animation: none; }
+.top-actions, .detail-button, .new-plan-button, .restart-button, .save-status { display: flex; flex: 0 0 auto; align-items: center; white-space: nowrap; }
 .detail-button { min-height: 36px; padding: 0 10px; display: flex; align-items: center; gap: 6px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,.02); cursor: pointer; font-size: 12px; font-weight: 600; }
 .detail-button { color: #a8b2af; }
 .detail-button:hover { color: var(--text); border-color: var(--border-strong); background: rgba(255,255,255,.035); }
@@ -463,7 +460,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:fo
   .stage-index { width: 27px; height: 27px; }
   .stage-rail small { display: none; }
   .topbar { height: auto; min-height: 64px; padding: 10px 14px; }
-  .topbar > div:first-child > strong, .live-indicator { display: none; }
+  .topbar > div:first-child > strong { display: none; }
   .top-actions { width: 100%; justify-content: flex-end; }
   .detail-button { width: 42px; padding: 0; justify-content: center; font-size: 0; }
   .new-plan-button { width: 42px; padding: 0; justify-content: center; font-size: 0; }

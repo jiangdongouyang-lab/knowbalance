@@ -163,7 +163,7 @@ export function App() {
       <AppSidebar profile={session.profile} learnerName={activeUser.displayName} currentStage={session.view.currentStage} maxUnlockedStage={session.view.maxUnlockedStage} onStageSelect={selectStage} />
       <main className="main-content">
         <header className="topbar">
-          <div className="course-identity"><strong><span>Python</span><small>基础训练</small></strong><span className={`live-indicator${session.planSource === "real-ab" ? "" : " is-paused"}`}><i /> {session.planSource === "real-ab" ? "A/B/C 本次实跑" : "案例预览"}</span></div>
+          <div className="course-identity"><strong><span>Python</span><small>基础训练</small></strong></div>
           <div className="top-actions">
             <button className="detail-button" type="button" aria-label={workflowLabel} onClick={() => updateView({ detailDrawer: "agents" })}><Network size={17} /><span className="desktop-label">{workflowLabel}</span></button>
             <button className="detail-button" type="button" aria-label="查看知识证据" onClick={() => updateView({ detailDrawer: "evidence" })}><Database size={17} /><span className="desktop-label">查看知识证据</span></button>

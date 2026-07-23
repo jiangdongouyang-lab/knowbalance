@@ -202,7 +202,7 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     render(<App />)
     await setupRealPlan()
 
-    expect(screen.getByText("A/B/C 本次实跑")).toBeInTheDocument()
+    expect(screen.queryByText("A/B/C 本次实跑")).not.toBeInTheDocument()
     expect(screen.queryByText("实时事件")).not.toBeInTheDocument()
 
     await userEvent.click(screen.getByRole("button", { name: "查看 A/B/C 执行链" }))
