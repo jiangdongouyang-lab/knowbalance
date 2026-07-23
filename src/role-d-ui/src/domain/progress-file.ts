@@ -41,7 +41,14 @@ export function importProgressJson(json: string): ProgressImportResult {
   if (typeof value.exportedAt !== "string" || !isValidRoleDSession(value.session)) {
     return { ok: false, error: "进度文件内容损坏或字段不完整。" }
   }
-  return { ok: true, session: value.session }
+  return {
+    ok: true,
+    session: {
+      ...value.session,
+      assessmentGraded: false,
+      decision: { next: "remediate", reason: "等待 C 正式评分后更新动态路径。" },
+    },
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

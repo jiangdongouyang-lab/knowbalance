@@ -1,5 +1,5 @@
 import { loadKnowledgeBase } from "../../../knowledge/loader"
-import type { KnowledgeDifficulty, KnowledgeQuizItem } from "../../../knowledge/types"
+import type { KnowledgeBase, KnowledgeDifficulty, KnowledgeItem, KnowledgeQuizItem } from "../../../knowledge/types"
 import { executeProfileRetrieval } from "../../../role-b-profile/rag-bridge"
 import { synthesizeProfile } from "../../../role-b-profile/profile-synthesizer"
 import type { BackgroundEvidence, ObjectiveDiagnosisEvidence, SelfAssessmentEvidence } from "../../../role-b-profile/types"
@@ -14,12 +14,25 @@ export interface NewLearningPlanInput {
   educationContext: string
   timeBudget: string
   selfRating: KnowledgeDifficulty
+  priorLanguages?: string[]
   knownConcepts: string[]
   weakConcepts: string[]
   goal: string
 }
 
 export interface PlanDiagnosis {
+  items: PlanDiagnosisItem[]
+  sourceId: string
+  factId: string
+  concept: string
+  difficulty: KnowledgeDifficulty
+  question: string
+  options: string[]
+  answer: string
+}
+
+export interface PlanDiagnosisItem {
+  id: string
   sourceId: string
   factId: string
   concept: string
@@ -43,7 +56,8 @@ export async function createLearningPlan(input: NewLearningPlanInput, requestRol
   const evidence = buildEvidence(input, [])
   const synthesis = synthesizeProfile({ ...evidence, knowledgeBase })
   const { rag_result: ragResult } = await executeProfileRetrieval(synthesis.profile)
-  const diagnosis = selectDiagnosis(ragResult)
+  const diagnosisRagResult = expandDiagnosisEvidence(ragResult, knowledgeBase)
+  const diagnosis = selectDiagnosis(diagnosisRagResult)
   const sessionId = `session-${input.learnerId}-${Date.now()}`
   const roleC = await requestRoleC({
     profile: synthesis.profile,
@@ -51,33 +65,39 @@ export async function createLearningPlan(input: NewLearningPlanInput, requestRol
     kbVersion: knowledgeBase.version,
     runId: `RUN-${sessionId}`,
   })
-  const session = buildSession(input, synthesis, ragResult, diagnosis, roleC, sessionId)
+  const session = buildSession(input, synthesis, diagnosisRagResult, diagnosis, roleC, sessionId)
   return { source: "real-ab", input, diagnosis, session }
 }
 
-export async function evaluatePlanDiagnosis(plan: CreatedLearningPlan, answer: string, requestRoleC: RoleCRequester = requestRoleCContent): Promise<CreatedLearningPlan> {
-  const verdict = normalize(answer) === normalize(plan.diagnosis.answer) ? "correct" : "incorrect"
-  const objectiveItems: ObjectiveDiagnosisEvidence["items"] = [{
-    source_id: plan.diagnosis.sourceId,
-    fact_id: plan.diagnosis.factId,
-    question: plan.diagnosis.question,
-    learner_answer: answer,
-    verdict,
-    concept: plan.diagnosis.concept,
-    difficulty: plan.diagnosis.difficulty,
-  }]
+export async function evaluatePlanDiagnosis(plan: CreatedLearningPlan, answers: Record<string, string> | string, requestRoleC: RoleCRequester = requestRoleCContent): Promise<CreatedLearningPlan> {
+  const firstId = plan.diagnosis.items[0]?.id ?? "legacy"
+  const answerMap = typeof answers === "string" ? { [firstId]: answers } : answers
+  const objectiveItems: ObjectiveDiagnosisEvidence["items"] = plan.diagnosis.items.map((item) => {
+    const learnerAnswer = answerMap[item.id] ?? ""
+    return {
+      source_id: item.sourceId,
+      fact_id: item.factId,
+      question: item.question,
+      learner_answer: learnerAnswer,
+      verdict: normalize(learnerAnswer) === normalize(item.answer) ? "correct" : "incorrect",
+      concept: item.concept,
+      difficulty: item.difficulty,
+    }
+  })
   const knowledgeBase = await loadKnowledgeBase()
   const evidence = buildEvidence(plan.input, objectiveItems)
   const synthesis = synthesizeProfile({ ...evidence, knowledgeBase })
   const { rag_result: ragResult } = await executeProfileRetrieval(synthesis.profile)
+  const diagnosisRagResult = expandDiagnosisEvidence(ragResult, knowledgeBase)
   const roleC = await requestRoleC({
     profile: synthesis.profile,
     ragResult,
     kbVersion: knowledgeBase.version,
     runId: `RUN-${plan.session.sessionId}-diagnosed`,
   })
-  const session = buildSession(plan.input, synthesis, ragResult, plan.diagnosis, roleC, plan.session.sessionId)
-  session.view.diagnosisAnswer = answer
+  const session = buildSession(plan.input, synthesis, diagnosisRagResult, plan.diagnosis, roleC, plan.session.sessionId)
+  session.view.diagnosisAnswers = answerMap
+  session.view.diagnosisAnswer = answerMap[firstId] ?? ""
   session.view.diagnosisSubmitted = true
   return { ...plan, session }
 }
@@ -92,7 +112,7 @@ function buildEvidence(input: NewLearningPlanInput, items: ObjectiveDiagnosisEvi
       evidence_type: "background",
       learner_id: input.learnerId,
       education_context: input.educationContext || null,
-      prior_languages: ["Python"],
+      prior_languages: input.priorLanguages ?? [],
       prior_topics: input.knownConcepts,
       goal_raw: input.goal,
       time_budget: input.timeBudget || null,
@@ -113,16 +133,83 @@ function buildEvidence(input: NewLearningPlanInput, items: ObjectiveDiagnosisEvi
   }
 }
 
+function expandDiagnosisEvidence(ragResult: RagResult, knowledgeBase: KnowledgeBase): RagResult {
+  const byId = new Map(knowledgeBase.items.map((item) => [item.sourceId, item]))
+  const anchors = ragResult.results.filter(hasSemanticMatch)
+  if (anchors.length === 0) throw new Error("A 检索结果中没有语义相关的可诊断知识点，请换一个知识库支持的学习目标")
+  const included = new Set(anchors.map((item) => item.sourceId))
+  const expanded = [...anchors]
+  const queue = anchors.flatMap((item) => byId.get(item.sourceId)?.prerequisites ?? [])
+
+  while (queue.length > 0 && expanded.length < 10) {
+    const sourceId = queue.shift()!
+    if (included.has(sourceId)) continue
+    const item = byId.get(sourceId)
+    if (!item) continue
+    included.add(sourceId)
+    expanded.push(toPrerequisiteResult(item))
+    queue.push(...item.prerequisites)
+  }
+
+  return { ...ragResult, topK: expanded.length, results: expanded }
+}
+
+function toPrerequisiteResult(item: KnowledgeItem): RagResultItem {
+  const scoreBreakdown = { keyword: 0, title: 0, facts: 0, practiceTasks: 0, difficulty: 0, bonus: 0 }
+  return {
+    sourceId: item.sourceId,
+    source_id: item.sourceId,
+    title: item.title,
+    difficulty: item.difficulty,
+    score: 0,
+    reason: "由 A 命中知识点的 prerequisites 关系补充，用于客观诊断前置基础。",
+    snippet: item.snippet,
+    facts: item.facts,
+    examples: item.examples,
+    practiceTasks: item.practiceTasks,
+    quizItems: item.quizItems,
+    file: item.file,
+    retrievalTrace: {
+      matchedKeywords: [],
+      matchedFields: ["prerequisite"],
+      difficultyMatch: true,
+      scoreBreakdown,
+    },
+    retrieval_trace: {
+      matched_keywords: [],
+      matched_fields: ["prerequisite"],
+      difficulty_match: true,
+      score_breakdown: scoreBreakdown,
+    },
+  }
+}
+
+function hasSemanticMatch(item: RagResultItem): boolean {
+  const semanticFields = item.retrievalTrace.matchedFields.filter((field) => field !== "difficulty")
+  const scores = item.retrievalTrace.scoreBreakdown
+  return item.retrievalTrace.matchedKeywords.length > 0
+    || semanticFields.length > 0
+    || scores.keyword > 0
+    || scores.title > 0
+    || scores.facts > 0
+    || scores.practiceTasks > 0
+    || scores.bonus > 0
+}
+
 function selectDiagnosis(ragResult: RagResult): PlanDiagnosis {
+  const items: PlanDiagnosisItem[] = []
   for (const item of ragResult.results) {
     const quiz = item.quizItems.find((candidate) => candidate.options && candidate.options.length > 1)
-    if (quiz) return normalizeDiagnosis(item, quiz)
+    if (quiz) items.push(normalizeDiagnosis(item, quiz, items.length))
+    if (items.length === 5) break
   }
+  if (items.length > 0) return { ...items[0]!, items }
   throw new Error("A 检索结果中没有可直接作答的知识库选择题，请补充已学或薄弱知识后重试")
 }
 
-function normalizeDiagnosis(item: RagResultItem, quiz: KnowledgeQuizItem): PlanDiagnosis {
+function normalizeDiagnosis(item: RagResultItem, quiz: KnowledgeQuizItem, index: number): PlanDiagnosisItem {
   return {
+    id: `${quiz.sourceId}-${quiz.factId}-${index + 1}`,
     sourceId: quiz.sourceId,
     factId: quiz.factId,
     concept: item.title,
@@ -157,7 +244,7 @@ function buildSession(
         timestamp: new Date().toISOString(),
       }]
   return adaptHandoff({
-    eventMode: roleC.status === "ready" ? "live" : "demo",
+    eventMode: "demo",
     planSource: "real-ab",
     planInput: input,
     diagnosis,
@@ -185,6 +272,7 @@ function buildSession(
       goalDraft: input.goal,
       selfRatingDraft: input.selfRating,
       diagnosisAnswer: "",
+      diagnosisAnswers: {},
       diagnosisSubmitted: false,
       assessmentAnswers: {},
       assessmentSubmitted: false,

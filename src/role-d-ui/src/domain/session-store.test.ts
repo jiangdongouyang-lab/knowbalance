@@ -257,6 +257,32 @@ describe("session-store", () => {
     expect(loadSession()).toBeNull()
   })
 
+  test("rejects malformed dynamic diagnosis choices and duplicate item ids", () => {
+    const invalidAnswer = structuredClone(session)
+    invalidAnswer.diagnosis.items = [
+      { id: "D1", sourceId: "K007", factId: "F001", concept: "for 循环", difficulty: "beginner", question: "题目 1", options: ["A", "B"], answer: "不存在" },
+    ]
+    localStorage.setItem("knowbalance.role-d.session", JSON.stringify({ version: 1, data: invalidAnswer }))
+    expect(loadSession()).toBeNull()
+
+    const duplicateIds = structuredClone(session)
+    duplicateIds.diagnosis.items = [
+      { id: "D1", sourceId: "K007", factId: "F001", concept: "for 循环", difficulty: "beginner", question: "题目 1", options: ["A", "B"], answer: "A" },
+      { id: "D1", sourceId: "K009", factId: "F001", concept: "列表", difficulty: "basic", question: "题目 2", options: ["C", "D"], answer: "C" },
+    ]
+    localStorage.setItem("knowbalance.role-d.session", JSON.stringify({ version: 1, data: duplicateIds }))
+    expect(loadSession()).toBeNull()
+  })
+
+  test("rejects a locally forged formal grading state", () => {
+    const forged = structuredClone(session)
+    forged.assessmentGraded = true
+    forged.decision = { next: "advance", reason: "伪造正式满分" }
+    localStorage.setItem("knowbalance.role-d.session", JSON.stringify({ version: 1, data: forged }))
+
+    expect(loadSession()).toBeNull()
+  })
+
   test("rejects a submitted assessment whose dynamic item set is incomplete", () => {
     const invalid = structuredClone(session)
     invalid.artifacts = [{

@@ -143,4 +143,14 @@ describe("adaptHandoff", () => {
     expect(session.retrieval.items[0].trace.scoreBreakdown.practiceTasks).toBe(2)
     expect(session.retrieval.items[0].trace.scoreBreakdown).not.toHaveProperty("practice_tasks")
   })
+
+  test("does not trust formal grading flags from an unsigned handoff", () => {
+    const session = adaptHandoff({
+      ...shared,
+      assessmentGraded: true,
+      decision: { next: "advance", reason: "unsigned perfect score" },
+    })
+
+    expect(session.assessmentGraded).toBe(false)
+  })
 })

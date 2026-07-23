@@ -1,5 +1,6 @@
 import type { RoleDSession } from "./types"
 import { isAssessmentAnswerValid, isAssessmentComplete } from "./assessment-responses"
+import { diagnosisItems } from "./diagnosis"
 import { isGuidedStage } from "./guided-flow"
 
 const STORAGE_KEY = "knowbalance.role-d.session"
@@ -89,6 +90,7 @@ export function isValidRoleDSession(value: unknown): value is RoleDSession {
     && typeof planInput.learnerId === "string"
     && typeof planInput.educationContext === "string"
     && typeof planInput.timeBudget === "string"
+    && (planInput.priorLanguages === undefined || isStringArray(planInput.priorLanguages))
     && isStringArray(planInput.knownConcepts)
     && isStringArray(planInput.weakConcepts)
     && isRecord(diagnosis)
@@ -99,6 +101,7 @@ export function isValidRoleDSession(value: unknown): value is RoleDSession {
     && typeof diagnosis.question === "string"
     && isStringArray(diagnosis.options)
     && typeof diagnosis.answer === "string"
+    && (diagnosis.items === undefined || (Array.isArray(diagnosis.items) && diagnosis.items.length > 0 && diagnosis.items.every(isDiagnosisItem)))
     && isRecord(view)
     && isGuidedStage(view.currentStage)
     && isGuidedStage(view.maxUnlockedStage)
@@ -108,9 +111,11 @@ export function isValidRoleDSession(value: unknown): value is RoleDSession {
     && typeof view.goalDraft === "string"
     && isDifficulty(view.selfRatingDraft)
     && typeof view.diagnosisAnswer === "string"
+    && (view.diagnosisAnswers === undefined || isStringRecord(view.diagnosisAnswers))
     && typeof view.diagnosisSubmitted === "boolean"
     && (view.assessmentAnswers === undefined || isStringRecord(view.assessmentAnswers))
     && (view.assessmentSubmitted === undefined || typeof view.assessmentSubmitted === "boolean")
+    && value.assessmentGraded !== true
     && (view.detailDrawer === "none" || view.detailDrawer === "agents" || view.detailDrawer === "evidence")
 
   return structurallyValid && hasValidReferences(value as unknown as RoleDSession)
@@ -176,6 +181,22 @@ function isAssessmentItem(value: unknown): boolean {
     && (value.starterCode === undefined || typeof value.starterCode === "string")
     && Array.isArray(value.citations)
     && value.citations.every(isCitation)
+}
+
+function isDiagnosisItem(value: unknown): boolean {
+  if (!isRecord(value) || !isStringArray(value.options)) return false
+  const optionSet = new Set(value.options)
+  return typeof value.id === "string"
+    && value.id.length > 0
+    && typeof value.sourceId === "string"
+    && typeof value.factId === "string"
+    && typeof value.concept === "string"
+    && isDifficulty(value.difficulty)
+    && typeof value.question === "string"
+    && value.options.length > 1
+    && optionSet.size === value.options.length
+    && typeof value.answer === "string"
+    && optionSet.has(value.answer)
 }
 
 function isRetrievalFact(value: unknown): boolean {
@@ -252,7 +273,33 @@ function hasValidReferences(session: RoleDSession): boolean {
   const sourceIds = new Set(session.retrieval.items.map((item) => item.sourceId))
   const factIds = new Set(session.retrieval.items.flatMap((item) => item.facts.map((fact) => `${fact.sourceId}-${fact.factId}`)))
   const selectedSourceIsValid = session.view.selectedSourceId === "" || sourceIds.has(session.view.selectedSourceId)
-  const diagnosisIsValid = session.planSource === "demo" || factIds.has(`${session.diagnosis.sourceId}-${session.diagnosis.factId}`)
+  const currentDiagnosisItems = diagnosisItems(session.diagnosis)
+  const diagnosisIds = new Set(currentDiagnosisItems.map((item) => item.id))
+  const firstDiagnosis = currentDiagnosisItems[0]
+  const legacyAliasIsValid = !session.diagnosis.items?.length || (firstDiagnosis
+    && session.diagnosis.sourceId === firstDiagnosis.sourceId
+    && session.diagnosis.factId === firstDiagnosis.factId
+    && session.diagnosis.concept === firstDiagnosis.concept
+    && session.diagnosis.difficulty === firstDiagnosis.difficulty
+    && session.diagnosis.question === firstDiagnosis.question
+    && session.diagnosis.answer === firstDiagnosis.answer
+    && session.diagnosis.options.length === firstDiagnosis.options.length
+    && session.diagnosis.options.every((option, index) => option === firstDiagnosis.options[index]))
+  const diagnosisIsValid = diagnosisIds.size === currentDiagnosisItems.length
+    && Boolean(legacyAliasIsValid)
+    && (session.planSource === "demo" || currentDiagnosisItems.every((item) => factIds.has(`${item.sourceId}-${item.factId}`)))
+  const storedDiagnosisAnswers = session.view.diagnosisAnswers ?? {}
+  const effectiveDiagnosisAnswers = Object.keys(storedDiagnosisAnswers).length > 0
+    ? storedDiagnosisAnswers
+    : session.view.diagnosisAnswer && currentDiagnosisItems[0]
+      ? { [currentDiagnosisItems[0].id]: session.view.diagnosisAnswer }
+      : {}
+  const diagnosisAnswersAreValid = Object.entries(effectiveDiagnosisAnswers).every(([itemId, answer]) => {
+    const item = currentDiagnosisItems.find((candidate) => candidate.id === itemId)
+    return Boolean(item?.options.includes(answer))
+  })
+  const diagnosisSubmissionIsValid = !session.view.diagnosisSubmitted
+    || currentDiagnosisItems.every((item) => item.options.includes(effectiveDiagnosisAnswers[item.id] ?? ""))
   const citationsAreValid = session.artifacts.every((artifact) => artifact.evidenceStatus !== "grounded"
     || (artifact.citations.length > 0
       && artifact.citations.every((citation) => factIds.has(`${citation.sourceId}-${citation.factId}`))
@@ -266,5 +313,5 @@ function hasValidReferences(session: RoleDSession): boolean {
     return item ? isAssessmentAnswerValid(item, answer) : false
   })
   const submissionIsValid = session.view.assessmentSubmitted !== true || isAssessmentComplete(assessmentItems, answers)
-  return selectedSourceIsValid && diagnosisIsValid && citationsAreValid && answersAreValid && submissionIsValid
+  return selectedSourceIsValid && diagnosisIsValid && diagnosisAnswersAreValid && diagnosisSubmissionIsValid && citationsAreValid && answersAreValid && submissionIsValid
 }

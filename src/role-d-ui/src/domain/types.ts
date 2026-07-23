@@ -124,10 +124,21 @@ export interface RoleDSession {
     learnerId: string
     educationContext: string
     timeBudget: string
+    priorLanguages?: string[]
     knownConcepts: string[]
     weakConcepts: string[]
   }
   diagnosis: {
+    items?: Array<{
+      id: string
+      sourceId: string
+      factId: string
+      concept: string
+      difficulty: Difficulty
+      question: string
+      options: string[]
+      answer: string
+    }>
     sourceId: string
     factId: string
     concept: string
@@ -145,6 +156,7 @@ export interface RoleDSession {
     goalDraft: string
     selfRatingDraft: Difficulty
     diagnosisAnswer: string
+    diagnosisAnswers?: Record<string, string>
     diagnosisSubmitted: boolean
     assessmentAnswers?: Record<string, string>
     assessmentSubmitted?: boolean

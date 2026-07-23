@@ -1,132 +1,170 @@
 # Role D 前端与联调指南
 
-Role D 提供 KnowBalance 的独立 Web 学习应用，负责将 B 的学习者画像、A 的 RAG 检索证据以及 C 的个性化学习资源整合为可操作、可解释、可恢复的学习闭环。
+Role D 提供 KnowBalance 的独立 Web 学习应用，负责把本机用户资料、B 学习者画像、A RAG 检索证据及 C 的公开学习资源整合为可操作、可解释、可恢复的学习流程。
 
-## 当前能力
+## 当前产品入口
 
-- React + Vite + TypeScript 独立前端。
-- 面向大学生的六阶段引导流程：学习建档 → 客观诊断 → 学情画像 → 定制方案 → 学习实操 → 反馈调整。
-- 单任务画布设计；Agent 协同和知识证据通过按需抽屉查看，不与主任务堆叠。
-- 学习者等级、已掌握知识、薄弱知识与画像冲突展示。
-- 个性化学习路径与资源难度匹配展示。
-- 真实事件数据驱动的多 Agent 协同时间线。
-- A 角色 `rag_result` 的推荐理由、检索轨迹、分数构成和知识事实展示。
-- `source_id/fact_id` 引用跳转与来源文件展示。
-- 版本化 `localStorage` 会话保存、恢复和损坏状态安全回退。
-- 自动保存当前阶段、已解锁阶段、学习目标、自评、诊断答案、资源标签和证据选择。
-- 支持导出版本化进度 JSON，并在另一浏览器中导入恢复完整会话；导入前会校验格式、版本、嵌套结构和引用一致性，失败不会覆盖当前进度。
-- 支持“新建学习计划”：输入学习者编号、背景、时间预算、已学知识、薄弱知识和目标后，直接运行 B 画像合成器、A RAG 检索器和 C 官方内容流水线。
-- Week 1 成绩统计金标路径会生成并发布真实讲义、代码实验和 5 道分阶测评公开题面；提交诊断后会重新执行 B、A 和 C。
-- 分阶测评根据 C 返回的动态题型渲染选择、判断、代码追踪、简答和代码输入；整套完成后可在 D 端提交，答案支持自动保存、刷新恢复和进度文件迁移。
-- D 端提交后明确显示“等待 C 正式评分”；在评分接口与安全代码执行器接入前，不提前展示正确答案、分数或动态路径决策。
-- 支持“重新开始当前计划”：清空阶段和答案，但真实 A/B 新计划会保留当前学习者及其检索结果。
-- 兼容上游 camelCase / snake_case 两种字段命名。
+1. **首次本机建档**：用户主动填写称呼、专业/年级/职业、Python 了解程度、每周学习时间和接触过的编程语言。
+2. **用户切换**：同一浏览器可创建和切换多个本机用户；这些不是云端账号。
+3. **学习计划单**：每个用户拥有独立计划列表，可新建计划、选择计划继续上次阶段、删除当前计划。
+4. **学习流程**：客观诊断 → 学情画像 → 定制方案 → 学习实操 → 反馈状态。
 
-## 数据真实性边界
+用户资料与计划资料分开：专业、总体 Python 自评和时间预算属于用户档案；计划名、目标、已学知识、薄弱知识、画像、检索、资源、作答及当前阶段属于单个计划。新建计划不会覆盖旧计划，也不要求重复填写用户背景。
 
-首页预填案例中的以下数据来自仓库已有的 A/B 契约和示例：
+## 真实 A/B/C/D 执行链
 
-- 学习者画像与画像冲突。
-- RAG 推荐知识点。
-- `retrieval_trace`。
-- 知识事实、来源文件及 `source_id/fact_id`。
+- **A：知识与检索**：Python 基础知识库、真实 facts/examples/quiz seeds 和规则检索。当前是关键词、同义词及规则扩展，不是 embedding 服务。
+- **B：画像构建**：`background-collector → self-assessor → objective-diagnostician → profile-builder` 的真实 prompt 与确定性参考实现。B 按 `objective > self > background` 合并证据并记录冲突。
+- **C：资源生成**：`concept-tutor`、`code-lab`、`tiered-evaluator` 通过服务端 `runCPipeline()` 生成并验证讲义、代码实验和分阶测评。
+- **D：学习交互**：采集用户/计划输入，展示画像、路径、检索证据、C 资源、Agent trace，保存作答和阶段，并提供本地恢复。
 
-知识证据抽屉按联调文档第 9 节逐项展示：推荐知识点、推荐原因、匹配证据、匹配字段、分数构成、知识来源和生成内容引用。资源难度匹配图是基于 `difficulty` 与画像等级的增强展示，不是联调文档规定的必做图表，也不会把检索分解释为能力百分比。
+浏览器只接收 public artifacts、公开 citations 和 trace。以下安全信息不会进入前端：
 
-首页加载时保留明确的案例预览数据，方便用户先检查目标和证据；这些预览资源仍标为 MOCK。用户点击首页“下一步：客观诊断”或顶部“新建计划”后，系统会真实执行 B 画像、A 检索，并通过 Vite 本地服务端调用 C 官方 `runCPipeline()`。从诊断阶段起使用本次真实运行的数据；浏览器只接收 public artifacts 与 trace，不接收参考实现、隐藏测试、答案规范或 secure refs。
+- `answer_spec`
+- `hidden_tests`
+- `reference_solution`
+- `correct_option_id`
+- secure artifact references
 
-当前 Week 1 联调使用 C 官方确定性 Provider、运行时 Schema、可信 verifier 和 public/secure 发布门禁，不需要模型 API Key，也不等同于实时大模型生成。C 的离线代码实验基准当前只支持 K007 + K009 + K018 三目标成绩统计任务；其他 Python 目标仍可完成 A/B 建档与检索，但 C 会明确返回 blocked，不会回退成伪造内容。
+## 动态入学诊断
 
-正式整套测评提交、服务端评分、学习证据、掌握度和动态反馈尚未接入学生前端。因此第 6 阶段只显示 PENDING，不展示虚构分数或决策。
+D 不再固定只展示一道题，也不会硬编码固定数量：
 
-## 用户操作流程
+1. 先检查 A 的 retrieval trace，只有关键词、标题、事实、任务意图等真实语义命中的结果才作为诊断锚点；仅有难度加分的弱结果不会出题；
+2. 如果不足，则沿这些语义锚点的 `prerequisites` 关系补充前置知识题；
+3. 只使用知识库中带真实选项和答案的题；
+4. 有多少有效题就展示多少，最多 5 道；没有语义相关锚点时直接阻止创建并要求更换知识库支持的目标；
+5. 前置扩展在证据抽屉中明确标记，检索分为 0，不伪装成高相关结果。
 
-1. **学习建档**：确认学习目标和自评水平。
-2. **客观诊断**：回答知识库支持的诊断题。
-3. **学情画像**：查看已掌握、薄弱知识和自评冲突。
-4. **定制方案**：确认先修路径、推荐理由和匹配资源。
-5. **学习实操**：依次使用讲义、代码实验和分阶测评。
-6. **反馈调整**：根据测评结果进入补救、巩固、进阶或重新画像。
+提交后，所有作答交给 B 的 `ObjectiveDiagnosisEvidence.items`。画像页显示：
 
-页面顶部的 Agent 与知识证据入口是辅助检查工具，不是主流程的必经步骤。
+- 正确数 / 总题数；
+- 证据是否充分；
+- 当前**教学起点**，并明确不是最终能力评分；
+- 已掌握和优先补强概念；
+- 自评与客观证据冲突。
 
-## Week 1 进度文件
+B 还会用诊断题的 `source_id` 对齐概念表述，避免“循环”和“for 循环”因措辞不同同时出现在已掌握与待补强中。
 
-页面顶部默认只保留一个低干扰的“进度管理”入口。展开后点击“导出 JSON”会下载 `knowbalance-progress-<learner-id>.json`；文件包含学习者、当前阶段、画像、检索结果、诊断答案、资源选择和引用状态，可通过同一菜单中的“导入 JSON”在另一浏览器恢复。
+等级更新保持保守但不再“只降不升”：任一答错仍触发客观封顶；至少 3 道真实客观题全部答对时，教学起点可在自评基础上最多上调一档，且不会超过本轮题目实际覆盖的最高难度。
 
-进度文件用于本地迁移和断点续传，不是云同步。格式错误、版本不兼容、字段损坏或引用不一致的文件会被拒绝，当前会话不会被替换。
+## C 分阶测评作答
 
-## 安装与运行
+Role D 按 C 返回的动态 `modality` 渲染：
+
+- `mcq`：选项按钮；
+- `true_false`：判断选项；
+- `trace`：代码追踪文本输入；
+- `short_answer`：简答输入；
+- `code`：基于 `starter_code` 的代码编辑区。
+
+所有公开题完成后才允许“提交整套测评”。答案支持：
+
+- 自动保存；
+- 刷新恢复；
+- 切换计划后恢复；
+- JSON 导出与导入；
+- 题目 ID 和选项 ID 外键校验。
+
+当前提交是 **D 端本地提交**，提交后显示“等待 C 正式评分”。正式 `SubmissionEnvelope → gradeSubmission()`、隔离代码执行、掌握度更新和动态下一步决策仍待 Week 2 接入；前端不会伪造分数或正确答案。
+
+## 本地用户与计划存储
+
+`localStorage` 使用版本化 workspace：
+
+```text
+LearningWorkspaceState
+├── activeUserId
+├── activePlanId
+├── users[]
+└── plans[]
+    ├── userId
+    ├── title
+    ├── updatedAt
+    └── session (完整 RoleDSession)
+```
+
+安全与迁移规则：
+
+- 旧版 `knowbalance.role-d.session` 单会话会自动迁移成一个本机用户和一个计划；
+- 用户只能选择或删除自己的计划；
+- 计划切换不会串联阶段、答案或 citations；
+- workspace 中计划归属与内部 learner ID 必须一致；身份冲突会拒绝，损坏 workspace 会回退到仍有效的 legacy 会话迁移；
+- 首次进入和刷新后先显示计划单，由用户选择继续哪个计划；
+- 当前没有真实登录、服务端账号或跨设备云同步。
+
+## 进度 JSON
+
+“进度管理”是团队联调、手动备份和换浏览器恢复的低优先级功能：
+
+- 导出当前选中的单个计划；
+- 导入成功后作为当前用户的**新计划**加入计划单，不覆盖其他计划；
+- 导入计划的内部 learner ID 会重新绑定当前本机用户，避免跨用户身份混入；
+- 导入前严格校验格式、版本、嵌套结构、citations、诊断答案和测评答案；伪造 `assessmentGraded` 等正式评分字段会被拒绝；
+- 导入失败不会改变现有计划。
+
+## Week 1 / Week 2 边界
+
+根据项目行动计划：
+
+### Week 1 已完成
+
+- 学习者背景与自评输入；
+- B 画像构建；
+- A 知识检索和可追溯证据；
+- 路径规划；
+- C 真实讲义、代码实验、分阶题；
+- D 本机用户、多计划、断点恢复、资源展示和完整公开题型作答；
+- 成绩统计金标路径端到端跑通。
+
+### Week 2 仍需完成
+
+- 正式服务端评分；
+- digest-pinned OCI 学生代码执行；
+- 学习证据与掌握度更新；
+- 根据正确率自动选择补救、巩固或进阶；
+- 更完整的事实/教学审核与仲裁可视化；
+- 扩展确定性 C Provider，使更多自由 Python 目标不再 blocked。
+
+当前 C 使用官方确定性 Provider、运行时 Schema、可信 verifier 和 public/secure 发布门禁，不需要模型 API Key，也不等同于实时大模型生成。顶部“A/B/C 本次实跑”表示一次同步调用已真实执行，不代表已接入实时事件流。K007 + K009 + K018 成绩统计目标是已验证金标路径；不支持的目标会明确 blocked，不回退成伪造内容。
+
+## 运行与验证
 
 ```bash
 bun install
 bun run role-d:dev
-```
-
-Vite 会输出本地访问地址。生产构建：
-
-```bash
-bun run role-d:build
-```
-
-构建产物位于 `dist/role-d-ui/`。
-
-## 验证
-
-```bash
 bun run check
 bun run role-d:test
 bun x tsc -p src/role-d-ui/tsconfig.json --noEmit
 bun run role-d:build
+bun audit
 ```
 
-## 目录说明
+生产构建位于 `dist/role-d-ui/`。当前 Vite 开发服务提供 `/api/role-c/generate`；部署纯静态 `dist` 时需要另行部署等价的服务端 API，不能把 C 的安全逻辑打包进浏览器。
+
+## 主要目录
 
 ```text
-src/role-d-ui/
-├── index.html
-├── vite.config.ts
-├── tsconfig.json
-└── src/
-    ├── components/       # 阶段导航、详情抽屉和复用组件
-    ├── data/             # 明确标注的演示 handoff
-    ├── domain/           # 统一视图类型、流程状态、适配器、会话存储
-    ├── screens/          # 六个聚焦式用户操作页面
-    ├── test/             # 测试环境
-    ├── App.tsx
-    ├── main.tsx
-    └── styles.css
+src/role-d-ui/src/
+├── components/       # 用户建档、用户切换、计划单、阶段组件、详情抽屉
+├── data/             # 明确标注的兼容演示 handoff
+├── domain/           # workspace、session、诊断、进度文件、A/B/C 适配
+├── screens/          # 聚焦式学习阶段页面
+├── test/             # 测试环境
+├── App.tsx
+└── styles.css
 ```
 
-## 上游输入要求
+## 上游兼容
 
-Role D 的 `adaptHandoff()` 当前可消费：
+`adaptHandoff()` 同时兼容 camelCase / snake_case，例如：
 
 - `b_profile` / `profile`
-- `b_provenance` / `provenance`
 - `a_rag_result` / `rag_result`
-- `c_artifacts` / `artifacts`
 - `workflow_events` / `workflowEvents`
 - `learning_path` / `learningPath`
-- `decision`
-
-A 角色字段同时兼容：
-
 - `sourceId` / `source_id`
 - `factId` / `fact_id`
 - `retrievalTrace` / `retrieval_trace`
-- `matchedKeywords` / `matched_keywords`
-- `matchedFields` / `matched_fields`
-- `scoreBreakdown` / `score_breakdown`
 
-缺少引用的学习资源不会被自动补造引用，而会进入 `evidenceGaps`，供界面和审核流程显式提示。
-
-## Role C 后续对接
-
-讲义、代码实验、分阶测评、citations 和 Agent trace 已完成 Week 1 对接。后续仍需接入：
-
-1. 学生对完整 assessment form 的作答状态和 `SubmissionEnvelope`。
-2. `gradeSubmission()` 与冻结后的公开评分结果。
-3. 学习证据、掌握度更新和下一步决策。
-4. 生产环境独立 API 服务与 digest-pinned OCI Python runner。
-5. 可选的真实模型 Provider；不能将模型密钥放入浏览器。
+缺少引用的学习资源不会被自动补造引用，而会进入 `evidenceGaps` 并在界面中明确提示。

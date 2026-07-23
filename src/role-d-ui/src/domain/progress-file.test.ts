@@ -15,7 +15,24 @@ describe("progress-file", () => {
       version: 1,
       exportedAt: "2026-07-21T15:00:00.000Z",
     })
-    expect(importProgressJson(json)).toEqual({ ok: true, session })
+    expect(importProgressJson(json)).toMatchObject({ ok: true, session: {
+      sessionId: session.sessionId,
+      assessmentGraded: false,
+      decision: { next: "remediate", reason: "等待 C 正式评分后更新动态路径。" },
+      view: session.view,
+    } })
+  })
+
+  test("rejects forged formal grading fields from imported progress", () => {
+    const forged = {
+      ...session,
+      assessmentGraded: true,
+      decision: { next: "advance", reason: "伪造满分，直接进阶" },
+    } as const
+
+    const result = importProgressJson(exportProgressJson(forged))
+
+    expect(result.ok).toBe(false)
   })
 
   test.each([

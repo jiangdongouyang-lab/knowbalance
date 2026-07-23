@@ -3,8 +3,9 @@
 // 合成规则（与 prompts.ts 中给 LLM 的规则同源，本文件是唯一可验证实现）:
 //   1. 证据强度 objective(3) > self(2) > background(1)，强证据覆盖弱证据
 //   2. 自评与客观冲突时客观获胜，且冲突必须显式记录（交给 D 展示，不静默消化）
-//   3. level 只降不升: 客观答错某难度 → 封顶到该难度前一档（floor=beginner）；
-//      无客观封顶用自评；都没有默认 beginner（保守起点，remediate 循环代价低）
+//   3. level 保守更新: 客观答错某难度 → 封顶到该难度前一档（floor=beginner）；
+//      至少 3 道客观题全部答对时，可在自评基础上最多上调一档且不超过已覆盖难度；
+//      其余情况用自评，都没有则默认 beginner
 //   4. goal 缺失直接报错：宁可让 orchestrator 用 question 补问，禁止编造目标
 import { canonicalizeConcept } from "./concept-canonicalizer"
 import type { KnowledgeBase, KnowledgeDifficulty } from "../knowledge/types"
@@ -53,12 +54,16 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
 
   // 第一步：把三类证据统一成概念主张列表（全部先过词表规范化）
   const claims: ConceptClaim[] = []
+  const objectiveCanonicalBySource = new Map<string, Set<string>>()
 
   for (const item of objectiveDiagnosis.items) {
     if (item.verdict === "unanswered") continue // 未作答不构成证据
     const mapped = canonicalizeConcept(item.concept, knowledgeBase)
     // 诊断题自带的 source_id 是硬事实（题就是从那个知识点抽的），必须并入映射结果
     const sourceIds = [...new Set([...(mapped.matched ? mapped.sourceIds : []), item.source_id])].sort()
+    const sourceCanonicals = objectiveCanonicalBySource.get(item.source_id) ?? new Set<string>()
+    sourceCanonicals.add(mapped.canonical)
+    objectiveCanonicalBySource.set(item.source_id, sourceCanonicals)
     claims.push({
       canonical: mapped.canonical,
       bucket: item.verdict === "correct" ? "known" : "weak",
@@ -69,16 +74,16 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
   }
 
   for (const raw of selfAssessment.claimed_known) {
-    const mapped = canonicalizeConcept(raw, knowledgeBase)
+    const mapped = alignToObjectiveSource(raw, knowledgeBase, objectiveCanonicalBySource)
     claims.push({ canonical: mapped.canonical, bucket: "known", source: "self", matched: mapped.matched, sourceIds: mapped.sourceIds })
   }
   for (const raw of selfAssessment.claimed_weak) {
-    const mapped = canonicalizeConcept(raw, knowledgeBase)
+    const mapped = alignToObjectiveSource(raw, knowledgeBase, objectiveCanonicalBySource)
     claims.push({ canonical: mapped.canonical, bucket: "weak", source: "self", matched: mapped.matched, sourceIds: mapped.sourceIds })
   }
 
   for (const raw of background.prior_topics) {
-    const mapped = canonicalizeConcept(raw, knowledgeBase)
+    const mapped = alignToObjectiveSource(raw, knowledgeBase, objectiveCanonicalBySource)
     claims.push({ canonical: mapped.canonical, bucket: "known", source: "background", matched: mapped.matched, sourceIds: mapped.sourceIds })
   }
 
@@ -106,10 +111,10 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
     if (item.verdict === "unanswered") continue
     const canonical = canonicalizeConcept(item.concept, knowledgeBase).canonical
     const selfSaysKnown = selfAssessment.claimed_known.some(
-      (raw) => canonicalizeConcept(raw, knowledgeBase).canonical === canonical,
+      (raw) => alignToObjectiveSource(raw, knowledgeBase, objectiveCanonicalBySource).canonical === canonical,
     )
     const selfSaysWeak = selfAssessment.claimed_weak.some(
-      (raw) => canonicalizeConcept(raw, knowledgeBase).canonical === canonical,
+      (raw) => alignToObjectiveSource(raw, knowledgeBase, objectiveCanonicalBySource).canonical === canonical,
     )
     if (selfSaysKnown && item.verdict === "incorrect") {
       conflicts.push({
@@ -167,9 +172,22 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
   return { profile, provenance, rag_request: buildRagRequest(profile) }
 }
 
-// level 级联：客观封顶 → 自评 → 默认 beginner。
-// 只降不升的理由：当前诊断题量小（覆盖不足），答对不足以证明更高档位；
-// 答错是强信号（该难度未稳固 → 至多前一档）。诊断覆盖增大后可放宽为按层通过率。
+function alignToObjectiveSource(
+  raw: string,
+  knowledgeBase: KnowledgeBase,
+  objectiveCanonicalBySource: Map<string, Set<string>>,
+): ReturnType<typeof canonicalizeConcept> {
+  const mapped = canonicalizeConcept(raw, knowledgeBase)
+  const objectiveCanonicals = new Set(mapped.sourceIds.flatMap((sourceId) => [...(objectiveCanonicalBySource.get(sourceId) ?? [])]))
+  if (objectiveCanonicals.size !== 1) return mapped
+  return {
+    ...mapped,
+    canonical: [...objectiveCanonicals][0]!,
+  }
+}
+
+// level 级联：客观封顶 → 多题全对的保守上调 → 自评 → 默认 beginner。
+// 答错仍是强信号；答对只有在至少 3 道真实题全部通过时才允许上调，且单轮最多一档。
 function resolveLevel(
   selfRating: KnowledgeDifficulty | null,
   objectiveDiagnosis: ObjectiveDiagnosisEvidence,
@@ -189,6 +207,20 @@ function resolveLevel(
       value: LEVEL_ORDER[finalIndex],
       source: "objective_cap",
       rule: `客观答错难度 ${LEVEL_ORDER[easiestFailure]} → level 封顶 ${LEVEL_ORDER[cap]}；自评 ${selfRating ?? "无"} 取两者较低`,
+    }
+  }
+
+  const answeredItems = objectiveDiagnosis.items.filter((item) => item.verdict !== "unanswered")
+  if (answeredItems.length >= 3 && answeredItems.every((item) => item.verdict === "correct")) {
+    const coveredLevel = Math.max(...answeredItems.map((item) => LEVEL_ORDER.indexOf(item.difficulty)).filter((index) => index >= 0))
+    const baseline = selfIndex ?? 0
+    const promoted = Math.min(baseline + 1, coveredLevel)
+    if (promoted > baseline) {
+      return {
+        value: LEVEL_ORDER[promoted],
+        source: "objective_promotion",
+        rule: `至少 3 道客观题全部答对 → 在自评 ${selfRating ?? "无"} 基础上最多上调一档，且不超过已覆盖难度 ${LEVEL_ORDER[coveredLevel]}`,
+      }
     }
   }
 

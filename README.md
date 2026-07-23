@@ -1,16 +1,17 @@
-# OpenCode Personalized Learning Workflow
+# KnowBalance Personalized Learning Workflow
 
-This project is a minimal OpenCode plugin inspired by OMO's base agent-definition pattern. It registers one primary orchestration agent and eight worker agents. The workers are wiring stubs; they only confirm that the expected workflow stage ran.
+KnowBalance is a personalized Python learning system built around one OpenCode orchestration agent and eight role-specific workers. The repository still includes the native OpenCode registration and ordered worker ledger, but the Week 1 business path is no longer a wiring-only scaffold: Role A provides a traceable Python knowledge base and rule-based RAG, Role B synthesizes evidence-grounded learner profiles, Role C publishes verified lesson/lab/assessment artifacts, and Role D provides the learner-facing Web application.
 
 ## Workflow
 
-1. Collect background, self-assessment, and objective-diagnostic evidence.
-2. Synthesize a learner profile.
-3. Plan a personalized learning path.
-4. Run a concept instruction, code lab, and tiered assessment cycle.
-5. Advance, remediate, or rebuild the profile based on assessment output.
+1. Create or switch a local learner profile and choose one of that learner's plans.
+2. Collect background, self-assessment, and knowledge-base diagnostic evidence.
+3. Synthesize a learner profile and retrieve a traceable learning path.
+4. Generate and verify a concept lesson, code lab, and tiered assessment.
+5. Capture learner responses and preserve the plan checkpoint.
+6. Grade, update mastery, and decide advance/remediate/reprofile after the remaining Week 2 integration.
 
-The `learning-orchestrator` agent only uses OpenCode's native `task` and `question` tools. Its task permission is limited to the eight registered workers. Worker agents cannot use tools or delegate further work. Evidence collection is deliberately sequential in this minimal scaffold because parallel native subagent completion can make a headless OpenCode parent session become idle before synthesis resumes.
+The `learning-orchestrator` agent only uses OpenCode's native `task` and `question` tools. Its task permission is limited to the eight registered workers. Worker agents cannot delegate further work. The native OpenCode path remains sequential because some anonymous OpenCode model/provider combinations can close the parent stream after a subagent finishes; the deterministic TypeScript implementations are the reproducible Week 1 verification path.
 
 ## Setup
 
@@ -57,6 +58,10 @@ The four evidence workers (`background-collector`, `self-assessor`, `objective-d
 bun src/role-b-profile/profile-demo.ts   # end-to-end B chain demo, no model credentials needed
 ```
 
+## Role A: Python knowledge and traceable retrieval
+
+Role A provides a versioned Python-basics knowledge slice, knowledge facts, examples, practice tasks, real quiz seeds, and a rule-based retriever with beginner-synonym expansion. Results preserve `source_id`, `fact_id`, retrieval reasons, matched fields, and score breakdowns. This is currently deterministic keyword/rule retrieval, not an embedding service.
+
 ## Role C: evidence-constrained content generation
 
 Role C implements `concept-tutor`, `code-lab`, and `tiered-evaluator` with a frozen `GenerationSpec`, runtime JSON Schemas, public/secure separation, independent verification, cross-artifact alignment, mixed grading, frozen feedback, idempotent mastery updates, checkpoint recovery and append-only traces. Model-backed Authors use staged generation and deterministic composition. See `docs/role_c_design.md` and `docs/role_c_prompt_index.md`.
@@ -83,7 +88,11 @@ bun run smoke:role-c:model
 
 ## Role D: guided personalized learning app
 
-Role D now provides a React/Vite application with a six-stage learner journey: onboarding, objective diagnosis, learner profile, personalized plan, learning workspace, and feedback-driven adjustment. The Week 1 score-project path runs the repository B profile synthesis, A retrieval, and official Role C deterministic content pipeline, publishing verified lesson, code-lab, and five-item assessment public artifacts with `source_id/fact_id` traceability. Secure answers, hidden tests, and reference solutions remain server-side. Versioned local recovery and validated JSON progress export/import support checkpoint continuation. Full assessment submission, grading, mastery updates, and dynamic feedback remain pending. See `docs/role_d_frontend_guide.md`.
+Role D provides a React/Vite application with local learner profiles and a per-user learning-plan list. First use collects the background fields required by B; users can switch local profiles, create multiple plans, resume each plan's independent stage and answers, and delete only the selected plan. Existing single-session browser progress migrates into the versioned local workspace.
+
+The Week 1 score-project path runs B profile synthesis, A retrieval, A-prerequisite expansion for a dynamic diagnosis of up to five traceable questions, and the official Role C deterministic pipeline. The verified score-project path currently yields five questions; other goals show only the real answerable questions available from A and its prerequisites rather than padding the set with invented items. Role D renders the verified lesson, code lab, five-item tiered assessment, citations, and agent trace. Selection, true/false, trace, short-answer, and code responses can be entered, saved, refreshed, exported, imported as a sibling plan, and submitted locally. Secure answers, hidden tests, reference solutions, and code suites remain server-side.
+
+Local assessment submission is complete, but formal `gradeSubmission()` delivery, isolated learner-code execution, mastery updates, and automatic remediate/advance decisions remain Week 2 integration work. Local profiles are not cloud accounts and there is no cross-device synchronization yet. See `docs/role_d_frontend_guide.md`.
 
 ```bash
 bun run role-d:dev
@@ -93,6 +102,9 @@ bun run role-d:build
 
 Repository tests use `bun test --isolate ./tests` so Role C's schema and frozen-fixture tests run in separate globals on Windows/Bun.
 
-## Extension points
+## Current milestone boundary
 
-Replace the prompts generated by `src/prompts/worker-stub.ts` with real worker logic one stage at a time. When code experiments become executable, grant shell access only to `code-lab`. Cross-device cloud synchronization, if needed later, should use dedicated tools or hooks rather than expanding the orchestrator's permissions.
+- **Week 1 complete path:** learner input → B profile → A retrieval → C verified lesson/lab/assessment → D display, response capture, local submission, and checkpoint recovery.
+- **Gold path limitation:** the deterministic C provider currently supports the K007/K009/K018 score-project target. Unsupported goals are blocked honestly instead of receiving fabricated artifacts.
+- **Week 2 remaining:** formal grading delivery, isolated code execution, mastery evidence, automatic next-step decisions, and the broader review/arbitration visualization required by the project plan.
+- **Future product work:** real authentication and cloud synchronization should use a dedicated backend; they must not be simulated with local browser profiles or by widening worker permissions.

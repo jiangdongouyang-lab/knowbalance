@@ -4,13 +4,14 @@ import { StageRail } from "./StageRail"
 
 interface AppSidebarProps {
   profile: LearnerProfileView
+  learnerName?: string
   currentStage: GuidedStage
   maxUnlockedStage: GuidedStage
   onStageSelect: (stage: GuidedStage) => void
 }
 
-export function AppSidebar({ profile, currentStage, maxUnlockedStage, onStageSelect }: AppSidebarProps) {
-  const learnerName = profile.learnerId.replace("demo_", "")
+export function AppSidebar({ profile, learnerName: providedName, currentStage, maxUnlockedStage, onStageSelect }: AppSidebarProps) {
+  const learnerName = providedName ?? profile.learnerId.replace("demo_", "")
   const avatar = learnerName.trim().charAt(0).toUpperCase() || "学"
   return (
     <aside className="sidebar">
