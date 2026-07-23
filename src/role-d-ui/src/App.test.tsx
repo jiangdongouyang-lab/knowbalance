@@ -180,4 +180,28 @@ describe("Role D guided learning app", () => {
     expect(screen.getByRole("heading", { name: "完成正式测评后生成反馈" })).toBeInTheDocument()
     expect(screen.getByText("评分与动态反馈 · PENDING")).toBeInTheDocument()
   })
+
+  test("selects and restores public C assessment answers without grading them", async () => {
+    const { unmount } = render(<App />)
+    await userEvent.click(screen.getByRole("button", { name: "下一步：客观诊断" }))
+    await userEvent.click(await screen.findByLabelText("遍历序列"))
+    await userEvent.click(screen.getByRole("button", { name: "提交诊断" }))
+    await userEvent.click(screen.getByRole("button", { name: "查看学情画像" }))
+    await userEvent.click(screen.getByRole("button", { name: "生成个性化方案" }))
+    await userEvent.click(screen.getByRole("button", { name: "进入学习实操" }))
+    await userEvent.click(screen.getByRole("tab", { name: "分阶测评" }))
+
+    const first = screen.getByRole("button", { name: "A. 依次处理列表中的每个元素" })
+    const second = screen.getByRole("button", { name: "B. 安装第三方包" })
+    await userEvent.click(first)
+    expect(first).toHaveAttribute("aria-pressed", "true")
+    await userEvent.click(second)
+    expect(first).toHaveAttribute("aria-pressed", "false")
+    expect(second).toHaveAttribute("aria-pressed", "true")
+    expect(screen.queryByText(/回答正确|回答错误|得分/)).not.toBeInTheDocument()
+
+    unmount()
+    render(<App />)
+    expect(screen.getByRole("button", { name: "B. 安装第三方包" })).toHaveAttribute("aria-pressed", "true")
+  })
 })

@@ -108,6 +108,7 @@ export function isValidRoleDSession(value: unknown): value is RoleDSession {
     && isDifficulty(view.selfRatingDraft)
     && typeof view.diagnosisAnswer === "string"
     && typeof view.diagnosisSubmitted === "boolean"
+    && (view.assessmentAnswers === undefined || isStringRecord(view.assessmentAnswers))
     && (view.detailDrawer === "none" || view.detailDrawer === "agents" || view.detailDrawer === "evidence")
 
   return structurallyValid && hasValidReferences(value as unknown as RoleDSession)
@@ -119,6 +120,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((item) => typeof item === "string")
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((item) => typeof item === "string")
 }
 
 function isDifficulty(value: unknown): boolean {
@@ -165,6 +170,7 @@ function isAssessmentItem(value: unknown): boolean {
     && (value.modality === "mcq" || value.modality === "true_false" || value.modality === "trace" || value.modality === "short_answer" || value.modality === "code")
     && typeof value.prompt === "string"
     && isStringArray(value.options)
+    && (value.optionIds === undefined || (isStringArray(value.optionIds) && value.optionIds.length === value.options.length))
     && (value.starterCode === undefined || typeof value.starterCode === "string")
     && Array.isArray(value.citations)
     && value.citations.every(isCitation)
@@ -250,5 +256,8 @@ function hasValidReferences(session: RoleDSession): boolean {
       && artifact.citations.every((citation) => factIds.has(`${citation.sourceId}-${citation.factId}`))
       && (artifact.items ?? []).every((item) => item.citations.length > 0
         && item.citations.every((citation) => factIds.has(`${citation.sourceId}-${citation.factId}`)))))
-  return selectedSourceIsValid && diagnosisIsValid && citationsAreValid
+  const assessmentItems = session.artifacts.flatMap((artifact) => artifact.kind === "assessment" ? artifact.items ?? [] : [])
+  const itemOptions = new Map(assessmentItems.map((item) => [item.id, new Set(item.optionIds?.length ? item.optionIds : item.options)]))
+  const answersAreValid = Object.entries(session.view.assessmentAnswers ?? {}).every(([itemId, optionId]) => itemOptions.get(itemId)?.has(optionId) === true)
+  return selectedSourceIsValid && diagnosisIsValid && citationsAreValid && answersAreValid
 }

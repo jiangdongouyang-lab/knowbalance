@@ -251,6 +251,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:fo
 .resource-body pre { margin: 0; padding: 20px; overflow: auto; color: #b4ded3; border: 1px solid var(--border); border-radius: 10px; background: #090d11; font: 14px/1.75 Consolas, monospace; }
 .answer-options { display: grid; gap: 9px; margin-top: 20px; }
 .answer-options button { min-height: 48px; padding: 12px 15px; color: #a6b0ad; border: 1px solid var(--border); border-radius: 9px; background: rgba(255,255,255,.015); text-align: left; cursor: pointer; font-size: 14px; }
+.answer-options button:hover { color: #dce5e2; border-color: rgba(81,213,177,.32); }
+.answer-options button.is-selected { color: #dff8f0; border-color: rgba(81,213,177,.6); background: rgba(81,213,177,.13); box-shadow: inset 3px 0 0 var(--mint); }
 .resource-guidance { margin-top: 27px; padding: 17px; border: 1px solid var(--border); border-radius: 10px; background: rgba(255,255,255,.014); }
 .resource-guidance strong { color: #b0bab7; font-size: 14px; }
 .resource-guidance p { margin: 7px 0 0; color: #87928f; font-size: 14px; line-height: 1.65; }

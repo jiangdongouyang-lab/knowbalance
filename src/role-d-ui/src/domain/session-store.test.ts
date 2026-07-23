@@ -229,4 +229,31 @@ describe("session-store", () => {
 
     expect(loadSession()).toBeNull()
   })
+
+  test("rejects assessment answers that do not reference a published item option", () => {
+    const invalid = structuredClone(session)
+    invalid.artifacts = [{
+      id: "assessment",
+      kind: "assessment",
+      title: "分阶测评",
+      status: "real",
+      content: "公开题面",
+      options: ["A. 遍历序列"],
+      citations: [],
+      evidenceStatus: "gap",
+      items: [{
+        id: "I1",
+        tier: 1,
+        modality: "mcq",
+        prompt: "题目",
+        options: ["A. 遍历序列"],
+        optionIds: ["OPT-A"],
+        citations: [],
+      }],
+    }]
+    invalid.view.assessmentAnswers = { I1: "OPT-MISSING" }
+    localStorage.setItem("knowbalance.role-d.session", JSON.stringify({ version: 1, data: invalid }))
+
+    expect(loadSession()).toBeNull()
+  })
 })

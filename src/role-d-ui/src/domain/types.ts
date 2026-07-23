@@ -73,6 +73,7 @@ export interface LearningArtifactView {
     modality: "mcq" | "true_false" | "trace" | "short_answer" | "code"
     prompt: string
     options: string[]
+    optionIds?: string[]
     starterCode?: string
     citations: CitationView[]
   }>
@@ -145,6 +146,7 @@ export interface RoleDSession {
     selfRatingDraft: Difficulty
     diagnosisAnswer: string
     diagnosisSubmitted: boolean
+    assessmentAnswers?: Record<string, string>
     detailDrawer: "none" | "agents" | "evidence"
   }
 }

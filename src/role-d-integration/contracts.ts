@@ -12,6 +12,7 @@ export interface RoleDAssessmentItem {
   modality: "mcq" | "true_false" | "trace" | "short_answer" | "code"
   prompt: string
   options: string[]
+  option_ids: string[]
   starter_code?: string
   citations: RoleDPublicCitation[]
 }

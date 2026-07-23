@@ -186,6 +186,7 @@ function buildSession(
       selfRatingDraft: input.selfRating,
       diagnosisAnswer: "",
       diagnosisSubmitted: false,
+      assessmentAnswers: {},
       detailDrawer: "none",
     },
   })

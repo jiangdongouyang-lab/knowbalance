@@ -139,6 +139,7 @@ function toRoleDArtifacts(publicArtifacts: {
     modality: item.modality,
     prompt: item.prompt,
     options: item.options?.map((option) => `${option.label}. ${option.text}`) ?? [],
+    option_ids: item.options?.map((option) => option.option_id) ?? [],
     ...(item.starter_code ? { starter_code: item.starter_code } : {}),
     citations: simplifyCitations(item.citations),
   }))

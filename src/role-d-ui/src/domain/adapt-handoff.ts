@@ -77,6 +77,7 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
       selfRatingDraft: normalizeDifficulty(input.view?.selfRatingDraft ?? profile.level),
       diagnosisAnswer: input.view?.diagnosisAnswer ?? "",
       diagnosisSubmitted: input.view?.diagnosisSubmitted ?? false,
+      assessmentAnswers: input.view?.assessmentAnswers ?? {},
       detailDrawer: input.view?.detailDrawer === "agents" || input.view?.detailDrawer === "evidence" ? input.view.detailDrawer : "none",
     },
   }
@@ -143,6 +144,7 @@ function normalizeArtifact(artifact: LooseRecord, validCitationIds: Set<string>)
       modality: item.modality,
       prompt: item.prompt ?? "",
       options: item.options ?? [],
+      ...(item.optionIds || item.option_ids ? { optionIds: item.optionIds ?? item.option_ids } : {}),
       ...(item.starterCode || item.starter_code ? { starterCode: item.starterCode ?? item.starter_code } : {}),
       citations: (item.citations ?? []).map((citation: LooseRecord) => ({
         sourceId: citation.sourceId ?? citation.source_id ?? "UNKNOWN",
