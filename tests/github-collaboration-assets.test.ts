@@ -44,16 +44,30 @@ describe("GitHub collaboration package", () => {
     expect(codeowners).toContain("/src/role-d-ui/")
   })
 
-  test("creates role directory skeletons for teammates", () => {
-    const roleDirectories = [
+  test("creates role directory skeletons for teammates and verifies Role D has a real frontend", () => {
+    const rolePlaceholders = [
       "src/role-a-knowledge/.gitkeep",
       "src/role-b-profile/.gitkeep",
       "src/role-c-content/.gitkeep",
-      "src/role-d-ui/.gitkeep",
     ]
 
-    for (const file of roleDirectories) {
+    for (const file of rolePlaceholders) {
       expect(existsSync(file)).toBe(true)
+    }
+
+    const roleDFiles = [
+      "src/role-d-ui/index.html",
+      "src/role-d-ui/vite.config.ts",
+      "src/role-d-ui/src/App.tsx",
+      "src/role-d-ui/src/main.tsx",
+      "src/role-d-ui/src/domain/workspace-store.ts",
+      "src/role-d-ui/src/domain/progress-file.ts",
+      "src/role-d-ui/src/components/EvidenceInspector.tsx",
+    ]
+
+    for (const file of roleDFiles) {
+      expect(existsSync(file)).toBe(true)
+      expect(text(file).trim().length).toBeGreaterThan(0)
     }
   })
 })

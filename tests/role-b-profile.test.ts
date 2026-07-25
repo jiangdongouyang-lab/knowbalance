@@ -117,6 +117,52 @@ describe("profile synthesizer", () => {
     })
   })
 
+  test("objective source identity reconciles generic self wording with a specific knowledge title", async () => {
+    const kb = await loadKnowledgeBase()
+    const synthesis = synthesizeProfile({
+      background: {
+        evidence_type: "background",
+        learner_id: "alias-learner",
+        education_context: null,
+        prior_languages: ["Python"],
+        prior_topics: [],
+        goal_raw: "掌握循环",
+        time_budget: null,
+        quotes: [],
+      },
+      selfAssessment: {
+        evidence_type: "self_assessment",
+        self_rating: "basic",
+        claimed_known: [],
+        claimed_weak: ["循环"],
+        quotes: [],
+      },
+      objectiveDiagnosis: {
+        evidence_type: "objective_diagnosis",
+        items: [{
+          source_id: "K007",
+          fact_id: "F001",
+          question: "for 循环最适合用于什么场景？",
+          learner_answer: "遍历序列",
+          verdict: "correct",
+          concept: "for 循环",
+          difficulty: "beginner",
+        }],
+        quotes: [],
+      },
+      knowledgeBase: kb,
+    })
+
+    expect(synthesis.profile.known_concepts).toContain("for 循环")
+    expect(synthesis.profile.weak_concepts).not.toContain("循环")
+    expect(synthesis.provenance.conflicts).toContainEqual(expect.objectContaining({
+      concept: "for 循环",
+      self_claim: "weak",
+      objective_verdict: "correct",
+      resolution: "known",
+    }))
+  })
+
   test("diagnosis items carry their own source_id into provenance", async () => {
     const bundle = await loadFixture()
     const kb = await loadKnowledgeBase()
@@ -166,6 +212,29 @@ describe("profile synthesizer", () => {
     })
     expect(noSignal.provenance.level.source).toBe("default")
     expect(noSignal.profile.level).toBe("beginner")
+  })
+
+  test("three or more fully correct objective items can raise the conservative teaching start by one level", async () => {
+    const bundle = await loadFixture()
+    const kb = await loadKnowledgeBase()
+    const synthesis = synthesizeProfile({
+      background: bundle.background,
+      selfAssessment: { ...bundle.self_assessment, self_rating: "beginner", claimed_known: [], claimed_weak: ["循环", "列表"] },
+      objectiveDiagnosis: {
+        evidence_type: "objective_diagnosis",
+        quotes: [],
+        items: [
+          { source_id: "K007", fact_id: "F001", question: "for", learner_answer: "遍历序列", verdict: "correct", concept: "for 循环", difficulty: "beginner" },
+          { source_id: "K009", fact_id: "F001", question: "list", learner_answer: "append", verdict: "correct", concept: "列表", difficulty: "basic" },
+          { source_id: "K013", fact_id: "F001", question: "function", learner_answer: "def", verdict: "correct", concept: "函数定义与调用", difficulty: "basic" },
+        ],
+      },
+      knowledgeBase: kb,
+    })
+
+    expect(synthesis.profile.level).toBe("basic")
+    expect(synthesis.provenance.level.source).toBe("objective_promotion")
+    expect(synthesis.provenance.level.rule).toContain("至少 3 道客观题全部答对")
   })
 
   test("missing goal fails loudly instead of being invented", async () => {

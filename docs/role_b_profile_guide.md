@@ -43,7 +43,7 @@ B 把学习者的自然语言描述变成三份可溯源证据，合成标准画
 | 证据优先级 | objective(3) > self(2) > background(1)，强者覆盖 | 客观测试噪声最小；自评常过度自信或过度悲观 |
 | 冲突显式记录 | 自评与客观矛盾 → 按优先级裁决 + 写入 `provenance.conflicts` | 不静默消化；D 可展示"系统为何这样判"，对齐 A 的 retrieval_trace 透明化 |
 | 同强度 weak 优先 | 同来源既说会又说不会 → weak | 漏诊代价 > 多补课代价（不对称） |
-| level 只降不升 | 答错难度 d → 封顶 d 前一档（floor beginner）；无客观用自评；全无默认 beginner | 当前诊断题量小，答对不足以证明高档位；答错是强信号。诊断覆盖增大后可放宽为按层通过率 |
+| level 保守更新 | 答错难度 d → 封顶 d 前一档（floor beginner）；至少 3 道客观题全部答对时，可在自评基础上最多上调一档且不超过已覆盖难度；其余情况用自评；全无默认 beginner | 答错仍是强信号；多题全对也应能纠正过低自评，但单轮不能跨级过猛 |
 | goal 红线 | goal 缺失直接报错/blocked，让 orchestrator 用 question 补问 | schema 要求 goal 非空；编造目标会污染检索与教学 |
 | 词表规范化 | 概念全部过 canonicalizer 映射到知识库 keywords/title | A 的检索器按 keyword 子串打分，词表外概念检索得 0 分 |
 
@@ -87,6 +87,6 @@ demo 实跑检索 top5 = K018(50) / K009(43) / K007(41) / K006(28) / K002(15)，
 ## 8. 当前限制与下一步
 
 1. LLM 轨与确定性轨的一致性目前靠 prompt 软约束——下一步在工具层封装 `synthesizeProfile`+`retrieveKnowledge`，orchestrator 直接调用（与联调说明 §13 同方向）
-2. 诊断覆盖小（样例 3 题）——扩大出题策略后放宽 level 只降不升规则
+2. 当前 level 上调只接受“至少 3 道全部答对、最多上调一档”的保守信号；Week 2 可按分层通过率和题目覆盖度进一步校准
 3. 交互式诊断（question 工具中转追问）未实现——当前按 headless 场景设计，未答题诚实标 unanswered
 4. 概念同义词依赖 A 检索器内部 SYNONYMS——建议 A 导出共享（已列入协作事项）

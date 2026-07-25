@@ -60,5 +60,29 @@ describe("team integration assets", () => {
     expect(output.a_rag_result.results.length).toBeGreaterThanOrEqual(3)
     expect(output.c_content_contract.required_citations[0]).toHaveProperty("source_id")
     expect(output.d_display_contract.required_sections).toEqual(expect.arrayContaining(["profile", "rag_result", "retrieval_trace", "citations"]))
+    expect(output.d_display_contract.implementation).toContain("React + Vite")
+    expect(output.d_display_contract.ui_files).toEqual(expect.arrayContaining([
+      "src/role-d-ui/src/App.tsx",
+      "src/role-d-ui/src/domain/workspace-store.ts",
+      "src/role-d-ui/src/domain/progress-file.ts",
+      "src/role-d-ui/src/components/EvidenceInspector.tsx",
+    ]))
+    expect(output.d_display_contract.progress_file).toMatchObject({
+      format: "knowbalance-progress",
+      version: 1,
+      session_valid: true,
+    })
+    expect(output.d_display_contract.role_c_status).toBe("ready")
+    expect(output.d_display_contract.public_artifacts.map((artifact: { kind: string; status: string }) => `${artifact.kind}:${artifact.status}`)).toEqual([
+      "lesson:real",
+      "lab:real",
+      "assessment:real",
+    ])
+    expect(output.d_display_contract.role_d_session_summary).toMatchObject({
+      valid: true,
+      retrieval_items: expect.any(Number),
+      artifacts: 3,
+    })
+    expect(output.d_display_contract.role_d_session_summary.workflow_events).toBeGreaterThan(0)
   })
 })

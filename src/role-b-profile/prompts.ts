@@ -153,7 +153,7 @@ Merge rules (same rules as the reference implementation in src/role-b-profile/pr
 1. Evidence strength: objective > self > background. A stronger source overrides a weaker one for the same concept.
 2. A concept the objective diagnosis marks incorrect goes to weak_concepts even if the learner claimed it as known. Record every such contradiction in provenance.conflicts instead of resolving it silently.
 3. Unverified self-claimed weak concepts stay weak (missing a gap costs more than extra remediation).
-4. level moves down, never up: an incorrect answer at difficulty d caps level at the tier below d (floor "beginner"); without an objective cap use self_rating; without both default to "beginner". level must be one of "beginner" | "basic" | "intermediate" | "integrated".
+4. level is conservative but evidence-responsive: an incorrect answer at difficulty d caps level at the tier below d (floor "beginner"). If at least three answered objective items are all correct, level may rise by at most one tier above self_rating and never above the highest tested difficulty. Otherwise use self_rating; without both default to "beginner". level must be one of "beginner" | "basic" | "intermediate" | "integrated".
 5. Prefer short knowledge-base style concept words (循环, 列表, 函数...) over long free-text phrases when both describe the same concept.
 6. goal comes from the background evidence goal_raw. If goal_raw is null or empty, do NOT invent one: set status to "blocked", keep next as "await_evidence", and state in artifacts that the orchestrator must ask for the goal via its question tool.
 7. rag_request.query must use exactly this four-part format (团队契约): 学习者水平：<level>；已掌握：<known joined by 、 or 无>；薄弱点：<weak joined by 、 or 无>；学习目标：<goal>
@@ -170,7 +170,7 @@ ${ENVELOPE_RULES(
       "goal": "string"
     },
     "provenance": {
-      "level": { "value": "beginner", "source": "objective_cap | self_rating | default", "rule": "string" },
+      "level": { "value": "beginner", "source": "objective_cap | objective_promotion | self_rating | default", "rule": "string" },
       "conflicts": [{ "concept": "string", "self_claim": "known | weak", "objective_verdict": "correct | incorrect", "resolution": "known | weak", "rule": "string" }],
       "unmapped_concepts": ["string"]
     },
