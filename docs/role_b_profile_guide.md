@@ -90,3 +90,38 @@ demo 实跑检索 top5 = K018(50) / K009(43) / K007(41) / K006(28) / K002(15)，
 2. 当前 level 上调只接受“至少 3 道全部答对、最多上调一档”的保守信号；Week 2 可按分层通过率和题目覆盖度进一步校准
 3. 交互式诊断（question 工具中转追问）未实现——当前按 headless 场景设计，未答题诚实标 unanswered
 4. 概念同义词依赖 A 检索器内部 SYNONYMS——建议 A 导出共享（已列入协作事项）
+
+## 9. Week 2 教学审核与仲裁（新增）
+
+B 角色 Week 2 主线：对 C 生成的教学内容进行教学规范性审核，并与 A 的事实审核结果合并仲裁。
+
+### 审核维度
+
+| 维度 | 检查内容 | 不通过后果 |
+|---|---|---|
+| 难度匹配 | 教学内容最高难度 ≤ 学习者水平 +1 档 | reject（根本性不匹配） |
+| 前置知识 | 每个知识点的前置知识已被学习者掌握或在教学批次内 | reject（缺基础无法教） |
+| 薄弱点覆盖 | 学习者的薄弱点至少有一个被教学覆盖 | revise（可调整内容选择） |
+| 目标对齐 | 教学内容的关键词与学习目标有交集 | revise（可调整内容方向） |
+
+### 仲裁规则
+
+- 事实审核（A）与教学审核（B）任一 reject → 驳回
+- 任一 revise → 需修订（最多 2 轮）
+- 双 pass → 通过
+- 超过 2 轮修订仍 revise → 转为 reject
+
+### 代码位置
+
+- `src/role-b-profile/teaching-audit/types.ts` — 类型定义
+- `src/role-b-profile/teaching-audit/auditor.ts` — 教学审核器
+- `src/role-b-profile/teaching-audit/arbitrator.ts` — 仲裁机制
+- `tests/role-b-teaching-audit.test.ts` — 23 项契约测试
+- `scripts/teaching-audit-demo.ts` — 四种场景演示
+
+### 运行验证
+
+```bash
+bun test tests/role-b-teaching-audit.test.ts   # 23 tests
+bun scripts/teaching-audit-demo.ts               # 双通过/驳回/修订/仲裁上限
+```
