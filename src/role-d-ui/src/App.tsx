@@ -87,11 +87,17 @@ export function App() {
     setWorkspace({ ...workspace, activeUserId: user.id, activePlanId: null, users: [...workspace.users, user] })
   }} />
 
+  if (userSetupOpen) return <UserSetupScreen saved={saved} canCancel onCancel={() => setUserSetupOpen(false)} onCreate={(input) => {
+    const user = createLocalLearner(input)
+    setWorkspace((current) => ({ ...current, activeUserId: user.id, activePlanId: null, users: [...current.users, user] }))
+    setUserSetupOpen(false)
+    setShowPlanList(true)
+  }} />
+
   if (!session || showPlanList) return <>
     <PlanListScreen user={activeUser} plans={workspace.plans.filter((plan) => plan.userId === activeUser.id)} saved={saved} onCreate={() => setNewPlanOpen(true)} onOpen={(planId) => { setWorkspace((current) => selectPlan(current, planId)); setShowPlanList(false) }} onSwitchUser={() => setUserSwitcherOpen(true)} />
     {newPlanOpen && <NewPlanDialog user={activeUser} onCancel={() => setNewPlanOpen(false)} onCreate={createPlan} />}
     {userSwitcherOpen && <UserSwitcher users={workspace.users} activeUserId={activeUser.id} onClose={() => setUserSwitcherOpen(false)} onSelect={(userId) => { setWorkspace((current) => switchUser(current, userId)); setUserSwitcherOpen(false) }} onAdd={() => { setUserSwitcherOpen(false); setUserSetupOpen(true) }} />}
-    {userSetupOpen && <UserSetupScreen saved={saved} canCancel onCancel={() => setUserSetupOpen(false)} onCreate={(input) => { const user = createLocalLearner(input); setWorkspace((current) => ({ ...current, activeUserId: user.id, activePlanId: null, users: [...current.users, user] })); setUserSetupOpen(false) }} />}
   </>
 
   const drawer = session.view.detailDrawer
