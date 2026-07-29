@@ -37,12 +37,53 @@ export interface RoleDWorkflowEvent {
   timestamp: string
 }
 
+export type RoleDAuditStatus = "pass" | "revise" | "reject"
+
+export interface RoleDFactAuditSummary {
+  artifactId: string
+  artifactTitle: string
+  artifactKind: "lesson" | "lab" | "assessment"
+  status: RoleDAuditStatus
+  checkedClaims: number
+  conflicts: number
+  notes: string[]
+}
+
+export interface RoleDTeachingAuditSummary {
+  artifactId: string
+  status: RoleDAuditStatus
+  summary: string
+  revisionHints: string[]
+}
+
+export interface RoleDArbitrationSummary {
+  artifactId: string
+  decision: RoleDAuditStatus
+  revisionRound: number
+  maxRevisionRounds: number
+  canRevise: boolean
+  reason: string
+}
+
+export interface RoleDContentAuditSummary {
+  factStatus: RoleDAuditStatus
+  factAudits: RoleDFactAuditSummary[]
+  teachingAudit: RoleDTeachingAuditSummary
+  arbitration: RoleDArbitrationSummary
+}
+
 export type RoleCForRoleDResult =
   | {
       status: "ready"
       artifacts: RoleDGeneratedArtifact[]
       workflow: RoleDWorkflowEvent[]
       runId: string
+      learningSession: {
+        sessionId: string
+        formId: string
+        attemptNo: number
+      }
+      audit?: RoleDContentAuditSummary
     }
   | {
       status: "blocked" | "failed"
@@ -50,6 +91,7 @@ export type RoleCForRoleDResult =
       workflow: RoleDWorkflowEvent[]
       runId: string
       reason: string
+      audit?: RoleDContentAuditSummary
     }
 
 export interface GenerateRoleCForRoleDInput {

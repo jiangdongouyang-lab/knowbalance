@@ -42,6 +42,9 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
       items: retrievalItems,
     },
     artifacts,
+    ...(input.audit ? { audit: normalizeAudit(input.audit) } : {}),
+    ...(input.roleC ? { roleC: normalizeRoleCSession(input.roleC) } : {}),
+    ...(input.feedback ? { feedback: input.feedback } : {}),
     evidenceGaps: artifacts.filter((artifact: LearningArtifactView) => artifact.evidenceStatus === "gap").map((artifact: LearningArtifactView) => artifact.id),
     workflow: (input.workflow_events ?? input.workflowEvents ?? []).map(normalizeWorkflowEvent),
     path: (input.learning_path ?? input.learningPath ?? []).map(normalizePathNode),
@@ -49,7 +52,7 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
       next: input.decision?.next ?? "remediate",
       reason: input.decision?.reason ?? "等待测评结果后由决策策略更新。",
     },
-    assessmentGraded: false,
+    assessmentGraded: input.assessmentGraded === true && Boolean(input.feedback),
     planSource: input.planSource === "real-ab" ? "real-ab" : "demo",
     planInput: {
       learnerId: input.planInput?.learnerId ?? profile.learner_id ?? profile.learnerId ?? "anonymous_learner",
@@ -61,22 +64,22 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
     },
     diagnosis: {
       items: input.diagnosis?.items?.map((item: LooseRecord, index: number) => ({
-        id: item.id ?? `${item.sourceId ?? item.source_id ?? "K007"}-${item.factId ?? item.fact_id ?? "F001"}-${index + 1}`,
-        sourceId: item.sourceId ?? item.source_id ?? "K007",
-        factId: item.factId ?? item.fact_id ?? "F001",
-        concept: item.concept ?? "for 循环",
+        id: item.id ?? `${item.sourceId ?? item.source_id ?? "UNKNOWN"}-${item.factId ?? item.fact_id ?? "UNKNOWN"}-${index + 1}`,
+        sourceId: item.sourceId ?? item.source_id ?? "UNKNOWN",
+        factId: item.factId ?? item.fact_id ?? "UNKNOWN",
+        concept: item.concept ?? "未提供诊断知识点",
         difficulty: normalizeDifficulty(item.difficulty ?? "beginner"),
         question: item.question ?? "",
         options: item.options ?? [],
         answer: item.answer ?? "",
       })),
-      sourceId: input.diagnosis?.sourceId ?? "K007",
-      factId: input.diagnosis?.factId ?? "F001",
-      concept: input.diagnosis?.concept ?? "for 循环",
+      sourceId: input.diagnosis?.sourceId ?? "UNKNOWN",
+      factId: input.diagnosis?.factId ?? "UNKNOWN",
+      concept: input.diagnosis?.concept ?? "未提供诊断知识点",
       difficulty: normalizeDifficulty(input.diagnosis?.difficulty ?? "beginner"),
-      question: input.diagnosis?.question ?? "for 循环最适合用于什么场景？",
-      options: input.diagnosis?.options ?? ["遍历序列", "定义变量", "捕获异常", "导入模块"],
-      answer: input.diagnosis?.answer ?? "遍历序列",
+      question: input.diagnosis?.question ?? "",
+      options: input.diagnosis?.options ?? [],
+      answer: input.diagnosis?.answer ?? "",
     },
     view: {
       currentStage: input.view?.currentStage ?? "onboarding",
@@ -87,13 +90,61 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
       goalDraft: input.view?.goalDraft ?? profile.goal ?? "",
       selfRatingDraft: normalizeDifficulty(input.view?.selfRatingDraft ?? profile.level),
       diagnosisAnswer: input.view?.diagnosisAnswer ?? "",
-      diagnosisAnswers: input.view?.diagnosisAnswers ?? (input.view?.diagnosisAnswer ? { [`${input.diagnosis?.sourceId ?? "K007"}-${input.diagnosis?.factId ?? "F001"}-1`]: input.view.diagnosisAnswer } : {}),
+      diagnosisAnswers: input.view?.diagnosisAnswers ?? (input.view?.diagnosisAnswer ? { [`${input.diagnosis?.sourceId ?? "UNKNOWN"}-${input.diagnosis?.factId ?? "UNKNOWN"}-1`]: input.view.diagnosisAnswer } : {}),
       diagnosisSubmitted: input.view?.diagnosisSubmitted ?? false,
       assessmentAnswers: input.view?.assessmentAnswers ?? {},
       assessmentSubmitted: input.view?.assessmentSubmitted ?? false,
+      assessmentStatus: input.view?.assessmentStatus ?? "idle",
+      assessmentMessage: input.view?.assessmentMessage ?? "",
       detailDrawer: input.view?.detailDrawer === "agents" || input.view?.detailDrawer === "evidence" ? input.view.detailDrawer : "none",
     },
   }
+}
+
+function normalizeRoleCSession(value: LooseRecord) {
+  return {
+    runId: value.runId ?? value.run_id ?? "",
+    learningSessionId: value.learningSessionId ?? value.learning_session_id ?? value.sessionId ?? value.session_id ?? "",
+    formId: value.formId ?? value.form_id ?? "",
+    attemptNo: value.attemptNo ?? value.attempt_no ?? 1,
+  }
+}
+
+function normalizeAudit(audit: LooseRecord) {
+  return {
+    factStatus: normalizeAuditStatus(audit.factStatus ?? audit.fact_status),
+    factAudits: (audit.factAudits ?? audit.fact_audits ?? []).map((item: LooseRecord) => ({
+      artifactId: item.artifactId ?? item.artifact_id ?? "",
+      artifactTitle: item.artifactTitle ?? item.artifact_title ?? "未命名内容",
+      artifactKind: normalizeArtifactKind(item.artifactKind ?? item.artifact_kind),
+      status: normalizeAuditStatus(item.status),
+      checkedClaims: item.checkedClaims ?? item.checked_claims ?? 0,
+      conflicts: item.conflicts ?? 0,
+      notes: item.notes ?? [],
+    })),
+    teachingAudit: {
+      artifactId: audit.teachingAudit?.artifactId ?? audit.teaching_audit?.artifact_id ?? "",
+      status: normalizeAuditStatus(audit.teachingAudit?.status ?? audit.teaching_audit?.status),
+      summary: audit.teachingAudit?.summary ?? audit.teaching_audit?.summary ?? "教学审核未返回摘要。",
+      revisionHints: audit.teachingAudit?.revisionHints ?? audit.teaching_audit?.revision_hints ?? [],
+    },
+    arbitration: {
+      artifactId: audit.arbitration?.artifactId ?? audit.arbitration?.artifact_id ?? "",
+      decision: normalizeAuditStatus(audit.arbitration?.decision),
+      revisionRound: audit.arbitration?.revisionRound ?? audit.arbitration?.revision_round ?? 0,
+      maxRevisionRounds: audit.arbitration?.maxRevisionRounds ?? audit.arbitration?.max_revision_rounds ?? 2,
+      canRevise: audit.arbitration?.canRevise ?? audit.arbitration?.can_revise ?? false,
+      reason: audit.arbitration?.reason ?? "仲裁未返回说明。",
+    },
+  }
+}
+
+function normalizeAuditStatus(value: unknown): "pass" | "revise" | "reject" {
+  return value === "pass" || value === "revise" || value === "reject" ? value : "revise"
+}
+
+function normalizeArtifactKind(value: unknown): "lesson" | "lab" | "assessment" {
+  return value === "lesson" || value === "lab" || value === "assessment" ? value : "lesson"
 }
 
 function normalizeRetrievalItem(item: LooseRecord): RetrievalItemView {

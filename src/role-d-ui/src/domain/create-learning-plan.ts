@@ -57,7 +57,7 @@ export async function createLearningPlan(input: NewLearningPlanInput, requestRol
   const synthesis = synthesizeProfile({ ...evidence, knowledgeBase })
   const { rag_result: ragResult } = await executeProfileRetrieval(synthesis.profile)
   const diagnosisRagResult = expandDiagnosisEvidence(ragResult, knowledgeBase)
-  const diagnosis = selectDiagnosis(diagnosisRagResult)
+  const diagnosis = selectDiagnosis(diagnosisRagResult, knowledgeBase)
   const sessionId = `session-${input.learnerId}-${Date.now()}`
   const roleC = await requestRoleC({
     profile: synthesis.profile,
@@ -135,7 +135,13 @@ function buildEvidence(input: NewLearningPlanInput, items: ObjectiveDiagnosisEvi
 
 function expandDiagnosisEvidence(ragResult: RagResult, knowledgeBase: KnowledgeBase): RagResult {
   const byId = new Map(knowledgeBase.items.map((item) => [item.sourceId, item]))
-  const anchors = ragResult.results.filter(hasSemanticMatch)
+  const targetText = extractDiagnosisTargetText(ragResult.query)
+  const anchors = ragResult.results.filter((item) => {
+    if (!hasSemanticMatch(item)) return false
+    if (targetText.length === 0) return true
+    const knowledge = byId.get(item.sourceId)
+    return Boolean(knowledge && knowledgeMatchesTarget(knowledge, targetText))
+  })
   if (anchors.length === 0) throw new Error("A 检索结果中没有语义相关的可诊断知识点，请换一个知识库支持的学习目标")
   const included = new Set(anchors.map((item) => item.sourceId))
   const expanded = [...anchors]
@@ -196,18 +202,108 @@ function hasSemanticMatch(item: RagResultItem): boolean {
     || scores.bonus > 0
 }
 
-function selectDiagnosis(ragResult: RagResult): PlanDiagnosis {
+const MAX_DIAGNOSIS_ITEMS = 5
+
+type DiagnosisCandidate = Pick<RagResultItem, "sourceId" | "title" | "difficulty" | "quizItems">
+
+function selectDiagnosis(ragResult: RagResult, knowledgeBase: KnowledgeBase): PlanDiagnosis {
   const items: PlanDiagnosisItem[] = []
-  for (const item of ragResult.results) {
-    const quiz = item.quizItems.find((candidate) => candidate.options && candidate.options.length > 1)
-    if (quiz) items.push(normalizeDiagnosis(item, quiz, items.length))
-    if (items.length === 5) break
+  const usedQuizKeys = new Set<string>()
+  const supplemental = supplementalDiagnosisCandidates(ragResult.results, knowledgeBase)
+
+  const targetMatches = ragResult.results.filter((item) => hasDiagnosisTargetMatch(item, ragResult.query, knowledgeBase))
+  const focusedTarget = targetMatches.length === 1 ? targetMatches[0] : undefined
+  if (focusedTarget) {
+    addDiagnosisCandidates(items, [focusedTarget], usedQuizKeys, "all")
+    if (items.length === 0) throw new Error("A 精确命中的知识点没有可直接作答的选择题，请让 A 补充该知识点的 quizItems")
   }
+  if (items.length > 0) return { ...items[0]!, items }
+  addDiagnosisCandidates(items, ragResult.results, usedQuizKeys, "one-per-source")
+  if (items.length === 0) {
+    addDiagnosisCandidates(items, supplemental, usedQuizKeys, "one-per-source")
+  }
+
   if (items.length > 0) return { ...items[0]!, items }
   throw new Error("A 检索结果中没有可直接作答的知识库选择题，请补充已学或薄弱知识后重试")
 }
 
-function normalizeDiagnosis(item: RagResultItem, quiz: KnowledgeQuizItem, index: number): PlanDiagnosisItem {
+function hasDiagnosisTargetMatch(item: RagResultItem, query: string, knowledgeBase: KnowledgeBase): boolean {
+  const targetText = extractDiagnosisTargetText(query)
+  if (targetText.length === 0) return hasDirectTargetMatch(item)
+  const knowledge = knowledgeBase.items.find((candidate) => candidate.sourceId === item.sourceId)
+  if (!knowledge) return hasDirectTargetMatch(item)
+  return knowledgeMatchesTarget(knowledge, targetText)
+}
+
+function extractDiagnosisTargetText(query: string): string {
+  return query
+    .split("；")
+    .filter((part) => part.startsWith("薄弱点：") || part.startsWith("学习目标："))
+    .map((part) => part.replace(/^[^：]+：/, "").trim())
+    .filter((part) => part.length > 0 && part !== "无")
+    .join("；")
+}
+
+function knowledgeMatchesTarget(item: KnowledgeItem, targetText: string): boolean {
+  const target = normalize(targetText)
+  return [
+    item.title,
+    ...item.keywords,
+    item.snippet,
+    ...item.facts.map((fact) => fact.content),
+    ...item.practiceTasks,
+    ...item.quizItems.map((quiz) => quiz.question),
+  ].some((value) => {
+    const candidate = normalize(value)
+    return candidate.length >= 2 && (target.includes(candidate) || candidate.includes(target))
+  })
+}
+
+function addDiagnosisCandidates(items: PlanDiagnosisItem[], candidates: DiagnosisCandidate[], usedQuizKeys: Set<string>, mode: "all" | "one-per-source"): void {
+  for (const item of candidates) {
+    for (const quiz of item.quizItems.filter((candidate) => candidate.options && candidate.options.length > 1)) {
+      const quizKey = `${quiz.sourceId}:${quiz.factId}:${quiz.question}`
+      if (usedQuizKeys.has(quizKey)) continue
+      items.push(normalizeDiagnosis(item, quiz, items.length))
+      usedQuizKeys.add(quizKey)
+      if (mode === "one-per-source") break
+      if (items.length === MAX_DIAGNOSIS_ITEMS) break
+    }
+    if (items.length === MAX_DIAGNOSIS_ITEMS) break
+  }
+}
+
+function hasDirectTargetMatch(item: RagResultItem): boolean {
+  const directFields = item.retrievalTrace.matchedFields.filter((field) => field !== "difficulty" && field !== "prerequisite")
+  const scores = item.retrievalTrace.scoreBreakdown
+  return item.retrievalTrace.matchedKeywords.length > 0 || directFields.length > 0 || scores.keyword > 0 || scores.title > 0 || scores.facts > 0 || scores.practiceTasks > 0 || scores.bonus > 0
+}
+
+function supplementalDiagnosisCandidates(ragItems: RagResultItem[], knowledgeBase: KnowledgeBase): DiagnosisCandidate[] {
+  const byId = new Map(knowledgeBase.items.map((item) => [item.sourceId, item]))
+  const dependents = new Map<string, string[]>()
+  for (const item of knowledgeBase.items) {
+    for (const prerequisite of item.prerequisites) {
+      dependents.set(prerequisite, [...(dependents.get(prerequisite) ?? []), item.sourceId])
+    }
+  }
+
+  const ordered: DiagnosisCandidate[] = []
+  const visited = new Set<string>()
+  const queue = ragItems.map((item) => item.sourceId)
+  while (queue.length > 0 && visited.size < knowledgeBase.items.length) {
+    const sourceId = queue.shift()!
+    if (visited.has(sourceId)) continue
+    visited.add(sourceId)
+    const item = byId.get(sourceId)
+    if (!item) continue
+    ordered.push(item)
+    queue.push(...item.prerequisites, ...(dependents.get(sourceId) ?? []))
+  }
+  return ordered
+}
+
+function normalizeDiagnosis(item: DiagnosisCandidate, quiz: KnowledgeQuizItem, index: number): PlanDiagnosisItem {
   return {
     id: `${quiz.sourceId}-${quiz.factId}-${index + 1}`,
     sourceId: quiz.sourceId,
@@ -259,8 +355,18 @@ function buildSession(
       { id: "ab-profile", agent: "synthesizeProfile()", stage: "B 画像合成", status: "completed", summary: `B 本地函数已生成 ${synthesis.profile.level} 画像。`, timestamp: "刚刚" },
       { id: "ab-rag", agent: "executeProfileRetrieval()", stage: "A 知识检索", status: "completed", summary: `A 本地检索器已返回 ${ragResult.results.length} 个候选知识点。`, timestamp: "刚刚" },
       ...roleCWorkflow,
+      ...auditWorkflowEvents(roleC),
     ],
     c_artifacts: artifacts,
+    ...(roleC.audit ? { audit: roleC.audit } : {}),
+    ...(roleC.status === "ready" && roleC.learningSession ? {
+      roleC: {
+        runId: roleC.runId,
+        learningSessionId: roleC.learningSession.sessionId,
+        formId: roleC.learningSession.formId,
+        attemptNo: roleC.learningSession.attemptNo,
+      },
+    } : {}),
     assessmentGraded: false,
     decision: { next: "remediate", reason: `等待完成 ${diagnosis.concept} 的客观诊断后更新决策。` },
     view: {
@@ -276,9 +382,47 @@ function buildSession(
       diagnosisSubmitted: false,
       assessmentAnswers: {},
       assessmentSubmitted: false,
+      assessmentStatus: "idle",
+      assessmentMessage: "",
       detailDrawer: "none",
     },
   })
+}
+
+function auditWorkflowEvents(roleC: RoleCForRoleDResult): RoleDSession["workflow"] {
+  if (!roleC.audit) return []
+  return [
+    {
+      id: `${roleC.runId}-fact-audit`,
+      agent: "auditGeneratedContent()",
+      stage: "A 事实审核",
+      status: auditStatusToWorkflow(roleC.audit.factStatus),
+      summary: `A 已检查 ${roleC.audit.factAudits.reduce((sum, item) => sum + item.checkedClaims, 0)} 条内容声明，冲突 ${roleC.audit.factAudits.reduce((sum, item) => sum + item.conflicts, 0)} 个。`,
+      timestamp: "刚刚",
+    },
+    {
+      id: `${roleC.runId}-teaching-audit`,
+      agent: "auditTeaching()",
+      stage: "B 教学审核",
+      status: auditStatusToWorkflow(roleC.audit.teachingAudit.status),
+      summary: roleC.audit.teachingAudit.summary,
+      timestamp: "刚刚",
+    },
+    {
+      id: `${roleC.runId}-arbitration`,
+      agent: "arbitrate()",
+      stage: "B 仲裁",
+      status: auditStatusToWorkflow(roleC.audit.arbitration.decision),
+      summary: roleC.audit.arbitration.reason,
+      timestamp: "刚刚",
+    },
+  ]
+}
+
+function auditStatusToWorkflow(status: "pass" | "revise" | "reject"): RoleDSession["workflow"][number]["status"] {
+  if (status === "pass") return "completed"
+  if (status === "revise") return "review"
+  return "blocked"
 }
 
 function buildPath(ragResult: RagResult, knownSourceIds: Set<string>) {

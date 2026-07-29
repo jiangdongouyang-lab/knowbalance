@@ -1,5 +1,5 @@
 import type { Difficulty, RoleDSession } from "./types"
-import { isValidRoleDSession } from "./session-store"
+import { downgradePersistedTrust, isValidRoleDSession } from "./session-store"
 
 const WORKSPACE_KEY = "knowbalance.role-d.workspace"
 const LEGACY_SESSION_KEY = "knowbalance.role-d.session"
@@ -103,7 +103,7 @@ export function loadWorkspace(): LearningWorkspaceState {
     if (raw) {
       try {
         const parsed: unknown = JSON.parse(raw)
-        if (isValidWorkspace(parsed)) return parsed
+        if (isValidWorkspace(parsed)) return downgradeWorkspaceTrust(parsed)
       } catch {
         // Fall through to the legacy migration path.
       }
@@ -118,6 +118,16 @@ export function loadWorkspace(): LearningWorkspaceState {
 export function isValidWorkspace(value: unknown): value is LearningWorkspaceState {
   return isStructurallyValidWorkspace(value)
     && value.plans.every((plan) => plan.session.profile.learnerId === plan.userId && plan.session.planInput.learnerId === plan.userId)
+}
+
+function downgradeWorkspaceTrust(workspace: LearningWorkspaceState): LearningWorkspaceState {
+  return {
+    ...workspace,
+    plans: workspace.plans.map((plan) => ({
+      ...plan,
+      session: downgradePersistedTrust(plan.session),
+    })),
+  }
 }
 
 function isStructurallyValidWorkspace(value: unknown): value is LearningWorkspaceState {

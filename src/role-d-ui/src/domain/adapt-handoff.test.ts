@@ -14,6 +14,17 @@ const shared = {
 }
 
 describe("adaptHandoff", () => {
+  test("does not invent the K007 demo diagnosis when a handoff omits diagnosis data", () => {
+    const session = adaptHandoff({
+      ...shared,
+      a_rag_result: { query: "变量", topK: 0, results: [] },
+    })
+
+    expect(session.diagnosis.sourceId).toBe("UNKNOWN")
+    expect(session.diagnosis.question).toBe("")
+    expect(session.diagnosis.options).toEqual([])
+  })
+
   test("normalizes camelCase and snake_case retrieval contracts into the same Role D model", () => {
     const camel = adaptHandoff({
       ...shared,
@@ -152,5 +163,34 @@ describe("adaptHandoff", () => {
     })
 
     expect(session.assessmentGraded).toBe(false)
+  })
+
+  test("preserves A/B audit and arbitration summaries for Role D reporting", () => {
+    const session = adaptHandoff({
+      ...shared,
+      a_rag_result: {
+        query: "循环",
+        topK: 1,
+        results: [{
+          source_id: "K007",
+          title: "for 循环",
+          difficulty: "beginner",
+          score: 1,
+          facts: [{ source_id: "K007", fact_id: "F001", content: "for 循环用于遍历序列" }],
+          retrieval_trace: { score_breakdown: {} },
+        }],
+      },
+      audit: {
+        fact_status: "pass",
+        fact_audits: [{ artifact_id: "lesson-1", artifact_title: "循环讲义", artifact_kind: "lesson", status: "pass", checked_claims: 1, conflicts: 0, notes: [] }],
+        teaching_audit: { artifact_id: "role-c-week2-content", status: "revise", summary: "需要调整讲解顺序。", revision_hints: ["先补变量"] },
+        arbitration: { artifact_id: "role-c-week2-content", decision: "revise", revision_round: 0, max_revision_rounds: 2, can_revise: true, reason: "允许再修订一轮。" },
+      },
+    })
+
+    expect(session.audit?.factStatus).toBe("pass")
+    expect(session.audit?.factAudits[0]).toMatchObject({ artifactId: "lesson-1", artifactTitle: "循环讲义", status: "pass" })
+    expect(session.audit?.teachingAudit.revisionHints).toEqual(["先补变量"])
+    expect(session.audit?.arbitration).toMatchObject({ decision: "revise", canRevise: true })
   })
 })

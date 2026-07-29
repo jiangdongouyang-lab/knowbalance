@@ -55,6 +55,21 @@ describe("session-store", () => {
     expect(loadSession()).toEqual(session)
   })
 
+  test("round-trips persisted A/B audit and arbitration summaries", () => {
+    const audited: RoleDSession = {
+      ...session,
+      audit: {
+        factStatus: "pass",
+        factAudits: [{ artifactId: "lesson-1", artifactTitle: "循环讲义", artifactKind: "lesson", status: "pass", checkedClaims: 1, conflicts: 0, notes: [] }],
+        teachingAudit: { artifactId: "role-c-week2-content", status: "revise", summary: "教学审核需要修订。", revisionHints: ["先补变量"] },
+        arbitration: { artifactId: "role-c-week2-content", decision: "revise", revisionRound: 0, maxRevisionRounds: 2, canRevise: true, reason: "允许再修订一轮。" },
+      },
+    }
+
+    expect(saveSession(audited)).toBe(true)
+    expect(loadSession()).toEqual(audited)
+  })
+
   test("reports browser storage failures instead of claiming the session was saved", () => {
     vi.spyOn(Storage.prototype, "setItem").mockImplementationOnce(() => { throw new DOMException("blocked") })
     expect(saveSession(session)).toBe(false)
@@ -189,6 +204,7 @@ describe("session-store", () => {
     ["view enum", { ...session, view: { ...session.view, activeArtifactKind: "video" } }],
     ["stale selected source", { ...session, view: { ...session.view, selectedSourceId: "K404" } }],
     ["decision enum", { ...session, decision: { next: "guess", reason: "原因" } }],
+    ["audit status", { ...session, audit: { factStatus: "maybe", factAudits: [], teachingAudit: { artifactId: "a", status: "pass", summary: "s", revisionHints: [] }, arbitration: { artifactId: "a", decision: "pass", revisionRound: 0, maxRevisionRounds: 2, canRevise: false, reason: "r" } } }],
     ["real plan diagnosis reference", { ...session, planSource: "real-ab" }],
     ["grounded artifact reference", {
       ...session,
@@ -197,6 +213,36 @@ describe("session-store", () => {
   ])("rejects malformed nested %s state", (_label, malformed) => {
     localStorage.setItem("knowbalance.role-d.session", JSON.stringify({ version: 1, data: malformed }))
     expect(loadSession()).toBeNull()
+  })
+
+  test("rejects forged formal grading restored from browser storage", () => {
+    const forged: RoleDSession = {
+      ...session,
+      roleC: { runId: "RUN-FORGED", learningSessionId: "SESSION-FORGED", formId: "FORM-FORGED", attemptNo: 1 },
+      assessmentGraded: true,
+      feedback: {
+        feedbackId: "DFR-FORGED",
+        submissionId: "SUB-FORGED",
+        learnerId: "learner-demo",
+        profileVersion: "RUN-FORGED-profile-v1",
+        pathNodeId: "RUN-FORGED-PATH-K018",
+        roundScore: { rawScore: 10, maxScore: 10, accuracy: 1, evidenceScore: 1 },
+        objectiveResults: [],
+        itemResults: [],
+        masterySnapshot: [],
+        finalDecision: { action: "advance", basis: "round_accuracy", confidence: 1, reasonCodes: ["forged"], targetObjectiveIds: [], policyRef: "role-c-round-accuracy-v1" },
+        feedbackSummary: "伪造正式满分",
+      },
+      decision: { next: "advance", reason: "伪造进阶" },
+    }
+    localStorage.setItem("knowbalance.role-d.session", JSON.stringify({ version: 1, data: forged }))
+
+    expect(loadSession()).toMatchObject({
+      assessmentGraded: false,
+      decision: { next: "remediate" },
+      view: { assessmentStatus: "blocked" },
+    })
+    expect(loadSession()?.feedback).toBeUndefined()
   })
 
   test("clears saved progress", () => {

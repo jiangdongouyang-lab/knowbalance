@@ -66,7 +66,9 @@ Role D 按 C 返回的动态 `modality` 渲染：
 - JSON 导出与导入；
 - 题目 ID 和选项 ID 外键校验。
 
-当前提交是 **D 端本地提交**，提交后显示“等待 C 正式评分”。正式 `SubmissionEnvelope → gradeSubmission()`、隔离代码执行、掌握度更新和动态下一步决策仍待 Week 2 接入；前端不会伪造分数或正确答案。
+当前 D 已把公开作答转换为 C 的 `SubmissionEnvelope`，并通过 `/api/role-c/submit` 消费 C 返回的公开正式评分、逐目标掌握度及 `remediate/reinforce/advance/reprofile` 决策。D 会校验 run/session/learner/form/attempt/submission 身份和响应结构，不在浏览器计算分数，也不会恢复本地缓存或导入文件中的“正式评分”。
+
+当前接线仍是本地 Vite dev/preview middleware：默认 deterministic Provider 使用进程内学习周期和参考 runner，服务重启后需要重新生成计划；真实 Docker 代码执行、持久化 C 后端、C→B 正式学习进展投递和下一轮自动生成仍由 C/后端负责，D 不伪造这些能力。
 
 ## 本地用户与计划存储
 
@@ -117,14 +119,11 @@ LearningWorkspaceState
 - D 本机用户、多计划、断点恢复、资源展示和完整公开题型作答；
 - 成绩统计金标路径端到端跑通。
 
-### Week 2 仍需完成
+### Week 2 当前接入状态
 
-- 正式服务端评分；
-- digest-pinned OCI 学生代码执行；
-- 学习证据与掌握度更新；
-- 根据正确率自动选择补救、巩固或进阶；
-- 更完整的事实/教学审核与仲裁可视化；
-- 扩展确定性 C Provider，使更多自由 Python 目标不再 blocked。
+- **已接入 D**：A/B 审核发布门禁与仲裁可视化；C 公开正式评分、逐目标掌握度和动态决策展示；评分响应身份/结构校验；跨计划异步隔离；浏览器缓存和进度导入的正式评分降级。
+- **仍由 C/后端完成**：digest-pinned OCI 学生代码执行和公开执行摘要；跨重启持久化会话/掌握度；C→B 正式学习进展投递；评分后自动准备、审核并发布下一轮；独立认证后端。
+- **范围限制**：默认 deterministic Provider 仍以 K007/K009/K018 成绩统计金标路径为主；其他目标不满足证据或审核要求时会诚实 blocked。
 
 当前 C 使用官方确定性 Provider、运行时 Schema、可信 verifier 和 public/secure 发布门禁，不需要模型 API Key，也不等同于实时大模型生成。顶部“A/B/C 本次实跑”表示一次同步调用已真实执行，不代表已接入实时事件流。K007 + K009 + K018 成绩统计目标是已验证金标路径；不支持的目标会明确 blocked，不回退成伪造内容。
 
@@ -140,7 +139,7 @@ bun run role-d:build
 bun audit
 ```
 
-生产构建位于 `dist/role-d-ui/`。当前 Vite 开发服务提供 `/api/role-c/generate`；部署纯静态 `dist` 时需要另行部署等价的服务端 API，不能把 C 的安全逻辑打包进浏览器。
+生产构建位于 `dist/role-d-ui/`。当前 Vite 开发/预览服务提供 `/api/role-c/generate` 与 `/api/role-c/submit`；部署纯静态 `dist` 时需要由 C/后端部署等价 API、可信 runner 和持久化存储，不能把 C 的安全逻辑打包进浏览器。
 
 ## 主要目录
 

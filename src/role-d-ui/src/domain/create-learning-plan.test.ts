@@ -28,6 +28,21 @@ describe("createLearningPlan", () => {
     expect(plan.diagnosis.items.every((item) => item.options.length > 1)).toBe(true)
   })
 
+  test("uses only the exact A-authored target quizzes without supplementing adjacent concepts", async () => {
+    const plan = await createLearningPlan({
+      ...input,
+      knownConcepts: ["Python 是什么"],
+      weakConcepts: ["变量"],
+      goal: "学会变量与赋值，能用变量保存和更新数据",
+      selfRating: "beginner",
+    })
+
+    expect(plan.diagnosis.items).toHaveLength(1)
+    expect(plan.diagnosis.items[0]).toMatchObject({ sourceId: "K002", question: "变量赋值在 Python 中使用哪个符号？" })
+    expect(new Set(plan.diagnosis.items.map((item) => item.question)).size).toBe(plan.diagnosis.items.length)
+    expect(plan.diagnosis.items.map((item) => item.sourceId)).not.toEqual(expect.arrayContaining(["K003", "K007", "K009", "K013"]))
+  })
+
   test("attaches official Role C real lesson, lab, and five-tiered assessment items", async () => {
     const plan = await createLearningPlan(input)
 
@@ -59,22 +74,17 @@ describe("createLearningPlan", () => {
     expect(updated.session.retrieval.items.length).toBeGreaterThan(0)
   })
 
-  test("skips short-answer items until it finds a real knowledge-base choice question", async () => {
-    const plan = await createLearningPlan({
+  test("rejects an exact target with no authored choice instead of borrowing unrelated questions", async () => {
+    await expect(createLearningPlan({
       ...input,
       knownConcepts: [],
       weakConcepts: ["Python 是什么"],
       goal: "了解 Python 是什么",
       selfRating: "beginner",
-    })
-
-    expect(plan.session.retrieval.items[0]?.sourceId).toBe("K001")
-    expect(plan.diagnosis.items.length).toBeGreaterThan(0)
-    expect(plan.diagnosis.items.every((item) => item.options.length > 1)).toBe(true)
-    expect(plan.diagnosis.items[0]?.sourceId).not.toBe("K001")
+    })).rejects.toThrow("A 精确命中的知识点没有可直接作答的选择题")
   })
 
-  test.each(["画一只猫", "学习装饰器"])("rejects diagnosis for an unrelated goal: %s", async (goal) => {
+  test.each(["画一只猫", "学习装饰器", "学习量子计算电路"])("rejects diagnosis for an unrelated goal: %s", async (goal) => {
     await expect(createLearningPlan({
       ...input,
       goal,

@@ -33,8 +33,12 @@ describe("ProgressFileControls", () => {
     expect(onImport).toHaveBeenCalledWith(expect.objectContaining({
       sessionId: session.sessionId,
       assessmentGraded: false,
-      decision: { next: "remediate", reason: "等待 C 正式评分后更新动态路径。" },
-      view: session.view,
+      decision: { next: "remediate", reason: "导入文件不能恢复正式评分；请重新提交给 C。" },
+      view: expect.objectContaining({
+        ...session.view,
+        assessmentStatus: "idle",
+        assessmentMessage: "",
+      }),
     }))
     expect(screen.getByRole("status")).toHaveTextContent("进度已导入")
     expect(screen.queryByRole("button", { name: "导入进度 JSON" })).not.toBeInTheDocument()

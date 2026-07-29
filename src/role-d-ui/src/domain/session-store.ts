@@ -35,10 +35,25 @@ export function loadSession(): RoleDSession | null {
       clearSession()
       return null
     }
-    return envelope.data
+    return downgradePersistedTrust(envelope.data)
   } catch {
     clearSession()
     return null
+  }
+}
+
+export function downgradePersistedTrust(session: RoleDSession): RoleDSession {
+  if (session.assessmentGraded !== true && session.feedback === undefined) return session
+  return {
+    ...session,
+    assessmentGraded: false,
+    feedback: undefined,
+    decision: { next: "remediate", reason: "浏览器缓存不能证明 C 正式评分，请重新提交验证。" },
+    view: {
+      ...session.view,
+      assessmentStatus: "blocked",
+      assessmentMessage: "已恢复公开作答状态，但正式评分需要重新向 C 验证。",
+    },
   }
 }
 
@@ -77,6 +92,9 @@ export function isValidRoleDSession(value: unknown): value is RoleDSession {
     && value.conflicts.every(isProfileConflict)
     && Array.isArray(value.artifacts)
     && value.artifacts.every(isLearningArtifact)
+    && (value.audit === undefined || isContentAudit(value.audit))
+    && (value.roleC === undefined || isRoleCSession(value.roleC))
+    && (value.feedback === undefined || isRoleCFeedback(value.feedback))
     && Array.isArray(value.evidenceGaps)
     && Array.isArray(value.workflow)
     && value.workflow.every(isWorkflowEvent)
@@ -115,7 +133,16 @@ export function isValidRoleDSession(value: unknown): value is RoleDSession {
     && typeof view.diagnosisSubmitted === "boolean"
     && (view.assessmentAnswers === undefined || isStringRecord(view.assessmentAnswers))
     && (view.assessmentSubmitted === undefined || typeof view.assessmentSubmitted === "boolean")
-    && value.assessmentGraded !== true
+    && (view.assessmentStatus === undefined || isAssessmentStatus(view.assessmentStatus))
+    && (view.assessmentMessage === undefined || typeof view.assessmentMessage === "string")
+    && (value.assessmentGraded !== true || (
+      value.roleC !== undefined
+      && isRecord(value.roleC)
+      && value.feedback !== undefined
+      && isRecord(value.feedback)
+      && typeof value.feedback.feedbackId === "string"
+      && typeof value.roleC.runId === "string"
+    ))
     && (view.detailDrawer === "none" || view.detailDrawer === "agents" || view.detailDrawer === "evidence")
 
   return structurallyValid && hasValidReferences(value as unknown as RoleDSession)
@@ -199,6 +226,81 @@ function isDiagnosisItem(value: unknown): boolean {
     && optionSet.has(value.answer)
 }
 
+function isContentAudit(value: unknown): boolean {
+  if (!isRecord(value)) return false
+  const teachingAudit = value.teachingAudit
+  const arbitration = value.arbitration
+  return isAuditStatus(value.factStatus)
+    && Array.isArray(value.factAudits)
+    && value.factAudits.every(isFactAudit)
+    && isRecord(teachingAudit)
+    && typeof teachingAudit.artifactId === "string"
+    && isAuditStatus(teachingAudit.status)
+    && typeof teachingAudit.summary === "string"
+    && isStringArray(teachingAudit.revisionHints)
+    && isRecord(arbitration)
+    && typeof arbitration.artifactId === "string"
+    && isAuditStatus(arbitration.decision)
+    && typeof arbitration.revisionRound === "number"
+    && typeof arbitration.maxRevisionRounds === "number"
+    && typeof arbitration.canRevise === "boolean"
+    && typeof arbitration.reason === "string"
+}
+
+function isFactAudit(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.artifactId === "string"
+    && typeof value.artifactTitle === "string"
+    && isArtifactKind(value.artifactKind)
+    && isAuditStatus(value.status)
+    && typeof value.checkedClaims === "number"
+    && typeof value.conflicts === "number"
+    && isStringArray(value.notes)
+}
+
+function isAuditStatus(value: unknown): boolean {
+  return value === "pass" || value === "revise" || value === "reject"
+}
+
+function isRoleCSession(value: unknown): boolean {
+  return isRecord(value)
+    && typeof value.runId === "string"
+    && typeof value.learningSessionId === "string"
+    && typeof value.formId === "string"
+    && typeof value.attemptNo === "number"
+}
+
+function isRoleCFeedback(value: unknown): boolean {
+  if (!isRecord(value) || !isRecord(value.roundScore) || !isRecord(value.finalDecision)) return false
+  return typeof value.feedbackId === "string"
+    && typeof value.submissionId === "string"
+    && typeof value.learnerId === "string"
+    && typeof value.profileVersion === "string"
+    && typeof value.pathNodeId === "string"
+    && typeof value.roundScore.rawScore === "number"
+    && typeof value.roundScore.maxScore === "number"
+    && typeof value.roundScore.accuracy === "number"
+    && typeof value.roundScore.evidenceScore === "number"
+    && Array.isArray(value.objectiveResults)
+    && Array.isArray(value.itemResults)
+    && Array.isArray(value.masterySnapshot)
+    && isRoleCDecision(value.finalDecision.action)
+    && (value.finalDecision.basis === "round_accuracy" || value.finalDecision.basis === "profile_drift")
+    && typeof value.finalDecision.confidence === "number"
+    && isStringArray(value.finalDecision.reasonCodes)
+    && isStringArray(value.finalDecision.targetObjectiveIds)
+    && typeof value.finalDecision.policyRef === "string"
+    && typeof value.feedbackSummary === "string"
+}
+
+function isAssessmentStatus(value: unknown): boolean {
+  return value === "idle" || value === "submitting" || value === "completed" || value === "needs_review" || value === "blocked"
+}
+
+function isRoleCDecision(value: unknown): boolean {
+  return value === "remediate" || value === "reinforce" || value === "advance" || value === "reprofile"
+}
+
 function isRetrievalFact(value: unknown): boolean {
   return isRecord(value)
     && typeof value.sourceId === "string"
@@ -266,7 +368,7 @@ function isArtifactKind(value: unknown): boolean {
 }
 
 function isDecision(value: unknown): boolean {
-  return value === "remediate" || value === "consolidate" || value === "advance" || value === "reprofile"
+  return value === "remediate" || value === "consolidate" || value === "reinforce" || value === "advance" || value === "reprofile"
 }
 
 function hasValidReferences(session: RoleDSession): boolean {
