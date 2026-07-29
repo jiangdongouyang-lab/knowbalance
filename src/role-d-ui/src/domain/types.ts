@@ -90,12 +90,91 @@ export interface WorkflowEventView {
   timestamp: string
 }
 
+export type AuditStatusView = "pass" | "revise" | "reject"
+
+export interface ContentAuditView {
+  factStatus: AuditStatusView
+  factAudits: Array<{
+    artifactId: string
+    artifactTitle: string
+    artifactKind: ArtifactKind
+    status: AuditStatusView
+    checkedClaims: number
+    conflicts: number
+    notes: string[]
+  }>
+  teachingAudit: {
+    artifactId: string
+    status: AuditStatusView
+    summary: string
+    revisionHints: string[]
+  }
+  arbitration: {
+    artifactId: string
+    decision: AuditStatusView
+    revisionRound: number
+    maxRevisionRounds: number
+    canRevise: boolean
+    reason: string
+  }
+}
+
 export interface LearningPathNodeView {
   id: string
   title: string
   difficulty: Difficulty
   status: "completed" | "current" | "upcoming"
   reason: string
+}
+
+export type RoleCDecisionView = "remediate" | "reinforce" | "advance" | "reprofile"
+
+export interface RoleCFeedbackView {
+  feedbackId: string
+  submissionId: string
+  learnerId: string
+  profileVersion: string
+  pathNodeId: string
+  roundScore: {
+    rawScore: number
+    maxScore: number
+    accuracy: number
+    evidenceScore: number
+  }
+  objectiveResults: Array<{
+    objectiveId: string
+    rawScore: number
+    maxScore: number
+    accuracy: number
+    evidenceScore: number
+    misconceptionTags: string[]
+  }>
+  itemResults: Array<{
+    itemId: string
+    objectiveId: string
+    modality: "mcq" | "true_false" | "trace" | "short_answer" | "code"
+    status: string
+    rawScore: number
+    maxScore: number
+    evidenceScore: number
+    misconceptionTags: string[]
+  }>
+  masterySnapshot: Array<{
+    objectiveId: string
+    mastery: number
+    evidenceBatches: number
+    observedModalities: string[]
+    revision: number
+  }>
+  finalDecision: {
+    action: RoleCDecisionView
+    basis: "round_accuracy" | "profile_drift"
+    confidence: number
+    reasonCodes: string[]
+    targetObjectiveIds: string[]
+    policyRef: string
+  }
+  feedbackSummary: string
 }
 
 export interface RoleDSession {
@@ -111,11 +190,19 @@ export interface RoleDSession {
     items: RetrievalItemView[]
   }
   artifacts: LearningArtifactView[]
+  audit?: ContentAuditView
+  roleC?: {
+    runId: string
+    learningSessionId: string
+    formId: string
+    attemptNo: number
+  }
+  feedback?: RoleCFeedbackView
   evidenceGaps: string[]
   workflow: WorkflowEventView[]
   path: LearningPathNodeView[]
   decision: {
-    next: "remediate" | "consolidate" | "advance" | "reprofile"
+    next: "remediate" | "consolidate" | "reinforce" | "advance" | "reprofile"
     reason: string
   }
   assessmentGraded?: boolean
@@ -160,6 +247,8 @@ export interface RoleDSession {
     diagnosisSubmitted: boolean
     assessmentAnswers?: Record<string, string>
     assessmentSubmitted?: boolean
+    assessmentStatus?: "idle" | "submitting" | "completed" | "needs_review" | "blocked"
+    assessmentMessage?: string
     detailDrawer: "none" | "agents" | "evidence"
   }
 }

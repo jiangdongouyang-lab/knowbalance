@@ -11,6 +11,8 @@ import { UserSetupScreen } from "./components/UserSetupScreen"
 import { UserSwitcher } from "./components/UserSwitcher"
 import { WorkflowTimeline } from "./components/WorkflowTimeline"
 import { createLearningPlan, evaluatePlanDiagnosis, type CreatedLearningPlan, type NewLearningPlanInput } from "./domain/create-learning-plan"
+import { applyRoleCSubmissionOutcome } from "./domain/role-c-submission"
+import { submitRoleCAssessment } from "./domain/role-c-submission-client"
 import { furthestStage, stageIndex } from "./domain/guided-flow"
 import { diagnosisItems } from "./domain/diagnosis"
 import type { GuidedStage, RoleDSession } from "./domain/types"
@@ -74,7 +76,7 @@ export function App() {
       case "plan":
         return <PlanScreen session={session} onContinue={() => unlockStage("learning")} onBack={() => selectStage("profile")} />
       case "learning":
-        return <LearningScreen session={session} onTab={(activeArtifactKind) => updateView({ activeArtifactKind })} onCitation={(selectedSourceId) => updateView({ selectedSourceId, detailDrawer: "evidence" })} onAssessmentAnswer={(itemId, answer) => updateView({ assessmentAnswers: { ...(session.view.assessmentAnswers ?? {}), [itemId]: answer }, assessmentSubmitted: false })} onAssessmentSubmit={() => updateView({ assessmentSubmitted: true })} onContinue={() => unlockStage("feedback")} onBack={() => selectStage("plan")} />
+        return <LearningScreen session={session} onTab={(activeArtifactKind) => updateView({ activeArtifactKind })} onCitation={(selectedSourceId) => updateView({ selectedSourceId, detailDrawer: "evidence" })} onAssessmentAnswer={(itemId, answer) => updateView({ assessmentAnswers: { ...(session.view.assessmentAnswers ?? {}), [itemId]: answer }, assessmentSubmitted: false, assessmentStatus: "idle", assessmentMessage: "" })} onAssessmentSubmit={submitAssessment} onContinue={() => unlockStage("feedback")} onBack={() => selectStage("plan")} />
       case "feedback":
         return <FeedbackScreen session={session} onRestart={() => updateView({ currentStage: "learning", activeArtifactKind: "lesson", remediationStarted: true })} onBack={() => selectStage("learning")} />
     }
@@ -125,6 +127,28 @@ export function App() {
       setOnboardingSubmittingPlanId((current) => current === targetPlanId ? null : current)
     }
   }
+  const submitAssessment = async () => {
+    if (!session || session.view.assessmentStatus === "submitting") return
+    const targetPlanId = activePlan!.id
+    const targetSessionId = session.sessionId
+    const targetRunId = session.roleC?.runId
+    updateView({ assessmentSubmitted: true, assessmentStatus: "submitting", assessmentMessage: "正在等待 C 正式评分…" })
+    const result = await submitRoleCAssessment(session)
+    setWorkspace((current) => ({
+      ...current,
+      plans: current.plans.map((candidate) => {
+        if (candidate.id !== targetPlanId
+          || candidate.session.sessionId !== targetSessionId
+          || candidate.session.roleC?.runId !== targetRunId) return candidate
+        return {
+          ...candidate,
+          session: applyRoleCSubmissionOutcome(candidate.session, result.submissionId, result.outcome),
+          updatedAt: new Date().toISOString(),
+        }
+      }),
+    }))
+  }
+
   const submitDiagnosis = async () => {
     if (session.planSource !== "real-ab") {
       updateView({ diagnosisSubmitted: true })

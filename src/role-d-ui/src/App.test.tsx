@@ -24,7 +24,23 @@ async function createPlan(title = "循环专项", goal = "完成成绩统计程�
 }
 
 async function answerDynamicDiagnosis(options = ["遍历序列", "append", "def", "=", "str"]) {
-  for (const option of options) await userEvent.click(screen.getByLabelText(option))
+  const radios = screen.getAllByRole("radio")
+  const selected = new Set<string>()
+  for (const option of options) {
+    const matches = screen.queryAllByLabelText(option)
+    const target = matches.find((element) => !selected.has((element as HTMLInputElement).name)) as HTMLInputElement | undefined
+    if (target) {
+      await userEvent.click(target)
+      selected.add(target.name)
+    }
+  }
+  for (const radio of radios) {
+    const input = radio as HTMLInputElement
+    if (!selected.has(input.name)) {
+      await userEvent.click(input)
+      selected.add(input.name)
+    }
+  }
   await userEvent.click(screen.getByRole("button", { name: `提交 ${options.length} 道诊断题` }))
   expect(await screen.findByRole("status")).toHaveTextContent(`客观诊断已完成 · ${options.length} / ${options.length} 题`)
 }
@@ -72,7 +88,7 @@ describe("Role D local users and learning plans", () => {
 
     await userEvent.click(screen.getByRole("button", { name: "新建学习计划" }))
     await userEvent.type(screen.getByLabelText("计划名称 *"), "变量专项")
-    await userEvent.type(screen.getByLabelText("学习目标 *"), "读懂最简单的 Python 代码")
+    await userEvent.type(screen.getByLabelText("学习目标 *"), "学会变量与赋值，能用变量保存和更新数据")
     await userEvent.type(screen.getByLabelText("这个计划里觉得薄弱的知识"), "变量")
     await userEvent.click(screen.getByRole("button", { name: "创建学习计划" }))
     await userEvent.click(screen.getByRole("button", { name: "返回学习计划单" }))
@@ -104,7 +120,7 @@ describe("Role D local users and learning plans", () => {
     await userEvent.click(screen.getByRole("button", { name: "返回学习计划单" }))
     await userEvent.click(screen.getByRole("button", { name: "新建学习计划" }))
     await userEvent.type(screen.getByLabelText("计划名称 *"), "临时计划")
-    await userEvent.type(screen.getByLabelText("学习目标 *"), "读懂最简单的 Python 代码")
+    await userEvent.type(screen.getByLabelText("学习目标 *"), "学会变量与赋值，能用变量保存和更新数据")
     await userEvent.type(screen.getByLabelText("这个计划里觉得薄弱的知识"), "变量")
     await userEvent.click(screen.getByRole("button", { name: "创建学习计划" }))
 
@@ -163,9 +179,11 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     await setupRealPlan()
 
     expect(screen.getAllByRole("article")).toHaveLength(5)
-    expect(screen.getByText(/优先使用 A 当前命中的真实题.*prerequisites/)).toBeInTheDocument()
+    expect(screen.getByText(/系统只展示 A 当前命中的真实选择题/)).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "for 循环最适合用于什么场景？" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "向列表末尾添加元素常用哪个方法？" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "定义函数使用哪个关键字？" })).toBeInTheDocument()
     expect(screen.getByRole("heading", { name: "变量赋值在 Python 中使用哪个符号？" })).toBeInTheDocument()
-    expect(screen.getByRole("heading", { name: '"95" 在 Python 中通常属于哪种类型？' })).toBeInTheDocument()
     expect(screen.getByRole("status")).toHaveTextContent("已答 0 / 5 题 · 请完成全部真实题后提交")
     expect(screen.getByRole("button", { name: "提交 5 道诊断题" })).toBeDisabled()
   })
@@ -209,6 +227,9 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     expect(screen.getByText("concept-tutor")).toBeInTheDocument()
     expect(screen.getByText("code-lab")).toBeInTheDocument()
     expect(screen.getByText("tiered-evaluator")).toBeInTheDocument()
+    expect(screen.getAllByText("A 事实审核").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("B 教学审核").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("B 仲裁").length).toBeGreaterThan(0)
     await userEvent.click(screen.getByRole("button", { name: "关闭详情" }))
 
     await userEvent.click(screen.getByRole("button", { name: "查看知识证据" }))
@@ -245,7 +266,7 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     await userEvent.click(screen.getByRole("button", { name: "返回学习计划单" }))
     await userEvent.click(screen.getByRole("button", { name: "新建学习计划" }))
     await userEvent.type(screen.getByLabelText("计划名称 *"), "另一个计划")
-    await userEvent.type(screen.getByLabelText("学习目标 *"), "读懂最简单的 Python 代码")
+    await userEvent.type(screen.getByLabelText("学习目标 *"), "学会变量与赋值，能用变量保存和更新数据")
     await userEvent.click(screen.getByRole("button", { name: "创建学习计划" }))
     await userEvent.click(screen.getByRole("button", { name: "返回计划信息" }))
     expect(screen.getByRole("button", { name: "下一步：客观诊断" })).toBeEnabled()
@@ -255,7 +276,7 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     await vi.waitFor(() => {
       const workspace = JSON.parse(localStorage.getItem("knowbalance.role-d.workspace")!) as LearningWorkspaceState
       expect(workspace.plans.find((plan) => plan.title === "循环专项")?.session.profile.goal).toBe("更新后的成绩统计目标")
-      expect(workspace.plans.find((plan) => plan.title === "另一个计划")?.session.profile.goal).toBe("读懂最简单的 Python 代码")
+      expect(workspace.plans.find((plan) => plan.title === "另一个计划")?.session.profile.goal).toBe("学会变量与赋值，能用变量保存和更新数据")
     })
   })
 
@@ -265,12 +286,33 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     await answerDynamicDiagnosis()
     await enterLearning()
 
-    expect(screen.getByText("C 官方流水线 · REAL")).toBeInTheDocument()
+    expect(screen.getByText("C 本地验证流水线 · REAL")).toBeInTheDocument()
+    expect(screen.getByRole("button", { name: "查看反馈状态" })).toBeInTheDocument()
     await userEvent.click(screen.getByRole("tab", { name: "分阶测评" }))
     expect(screen.getAllByText(/Tier [123]/)).toHaveLength(5)
     expect(screen.getByText("补全 average_score。")).toBeInTheDocument()
     await userEvent.click(screen.getByRole("button", { name: "查看反馈状态" }))
     expect(screen.getByText("评分与动态反馈 · PENDING")).toBeInTheDocument()
+  })
+
+  test("presents the Week2 Role D visualization report before learning starts", async () => {
+    render(<App />)
+    await setupRealPlan()
+    await answerDynamicDiagnosis()
+    await userEvent.click(screen.getByRole("button", { name: "查看学情画像" }))
+    await userEvent.click(screen.getByRole("button", { name: "生成个性化方案" }))
+
+    expect(screen.getByRole("heading", { name: "Week2 可视化报告" })).toBeInTheDocument()
+    expect(screen.getByText("画像 + 路径 + 匹配度 + 双审核")).toBeInTheDocument()
+    expect(screen.getByRole("img", { name: "能力雷达图" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "学习路径图" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "资源匹配度" })).toBeInTheDocument()
+    expect(screen.getByRole("heading", { name: "Agent 协同过程展示" })).toBeInTheDocument()
+    expect(screen.getAllByText("A 事实审核").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("B 教学审核").length).toBeGreaterThan(0)
+    expect(screen.getAllByText("B 仲裁").length).toBeGreaterThan(0)
+    expect(screen.getByRole("heading", { name: "A/B 双审核与仲裁" })).toBeInTheDocument()
+    expect(screen.getByText("事实审核与教学审核均通过，内容可发布。")).toBeInTheDocument()
   })
 
   test("restores public C choices without revealing grading", async () => {
@@ -307,7 +349,7 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     await userEvent.clear(code)
     await userEvent.type(code, "def average_score(scores):\n    return sum(scores) / len(scores)")
     await userEvent.click(submit)
-    expect(screen.getByRole("status")).toHaveTextContent("作答已提交，等待 C 正式评分")
+    expect(screen.getByRole("status")).toHaveTextContent("测试环境未执行 C 正式评分")
 
     unmount()
     render(<App />)
@@ -315,6 +357,6 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     expect(screen.getByLabelText("第 3 题代码追踪答案")).toHaveValue("total 最终为 6")
     expect(screen.getByLabelText("第 4 题简答答案")).toHaveValue("列表按顺序保存多项成绩。")
     expect(screen.getByLabelText("第 5 题代码答案")).toHaveValue("def average_score(scores):\n    return sum(scores) / len(scores)")
-    expect(screen.getByRole("status")).toHaveTextContent("作答已提交，等待 C 正式评分")
+    expect(screen.getByRole("status")).toHaveTextContent("测试环境未执行 C 正式评分")
   })
 })

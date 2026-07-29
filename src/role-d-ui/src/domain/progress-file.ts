@@ -46,7 +46,13 @@ export function importProgressJson(json: string): ProgressImportResult {
     session: {
       ...value.session,
       assessmentGraded: false,
-      decision: { next: "remediate", reason: "等待 C 正式评分后更新动态路径。" },
+      feedback: undefined,
+      decision: { next: "remediate", reason: "导入文件不能恢复正式评分；请重新提交给 C。" },
+      view: {
+        ...value.session.view,
+        assessmentStatus: value.session.view.assessmentSubmitted ? "blocked" : "idle",
+        assessmentMessage: value.session.view.assessmentSubmitted ? "导入文件只恢复公开作答，不能恢复 C 正式评分。" : "",
+      },
     },
   }
 }
