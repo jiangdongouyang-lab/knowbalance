@@ -1,10 +1,16 @@
-import { ROLE_C_COMMON_SYSTEM_POLICY, ROLE_C_PROMPT_MANIFEST_VERSION } from "./common-policy"
+import {
+  ROLE_C_COMMON_SYSTEM_POLICY,
+  ROLE_C_NEXT_ROUND_CONTEXT_POLICY,
+  ROLE_C_PROMPT_MANIFEST_VERSION,
+} from "./common-policy"
 
 export const STAGED_AUTHOR_PROMPT_VERSION = ROLE_C_PROMPT_MANIFEST_VERSION
 
 const JSON_ONLY = "只输出满足本次 output schema 的 JSON 对象，不输出 Markdown、解释或内部推理。"
 
 export const CONCEPT_SEGMENT_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
+
+${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 
 当前职责：concept-tutor 的一个目标组。输入只包含本组学习目标与对应证据；生成一份完整、可独立校验的 ConceptLessonPayload。
 
@@ -18,6 +24,8 @@ export const CONCEPT_SEGMENT_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
 7. ${JSON_ONLY}`
 
 export const CODE_LAB_PUBLIC_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
+
+${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 
 当前职责：code-lab 的公开创作阶段，只生成 CodeLabPublicPayload。
 
@@ -33,6 +41,8 @@ export const CODE_LAB_PUBLIC_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLIC
 
 export const CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
 
+${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
+
 当前职责：code-lab 的私有验证材料阶段，只生成 CodeLabSecurePayload。输入中的 public_payload 已冻结，不得改写。
 
 要求：
@@ -46,18 +56,22 @@ export const CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLIC
 
 export const ASSESSMENT_PUBLIC_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
 
+${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
+
 当前职责：tiered-evaluator 的公开出题阶段，只生成 AssessmentPublicPayload。
 
 要求：
-1. form_id、objective_ids 与 item_plan 是冻结合同。items 必须与 item_plan 数量、顺序及 item_id/family_id/variant_id/display_no/objective_id/tier/modality/max_score 完全一致。
-2. 模型只创作 title、题干、选择项文本、代码 starter 与证据引用。
+1. form_id、objective_ids 与 item_plan 是冻结合同。items 必须与 item_plan 数量、顺序及 item_id/family_id/variant_id/display_no/objective_id/tier/modality/max_score/citations 完全一致。
+2. 模型只创作 title、题干、选择项文本和代码 starter。
 3. mcq/true_false 必须有 2 至 4 个稳定 option_id；code 必须有 starter_code；其他题型不得携带这些字段。
 4. public 中不得出现正确答案、answer_spec、rubric、误区映射、reference 或 hidden tests。
-5. 每题必须引用所属目标的 required fact；used_evidence 与实际引用完全一致。
+5. 每题原样复制 item_plan 中所属目标的 citations；used_evidence 与实际引用完全一致。
 6. routing、submission_policy 与 objective_coverage 将由编排器确定性生成，仍需输出合法字段但不得依赖其自拟语义。
 7. ${JSON_ONLY}`
 
 export const ASSESSMENT_SECURE_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
+
+${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 
 当前职责：tiered-evaluator 的私有答案阶段，只生成 AssessmentSecurePayload。输入中的 public_payload 与 item_plan 已冻结，不得改写公开题目。
 

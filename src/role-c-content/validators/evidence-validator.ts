@@ -1,5 +1,5 @@
 import type { GenerationSpec } from "../contracts/generation-spec"
-import { C_SCHEMA_VERSION, stableId } from "../contracts/common"
+import { C_SCHEMA_VERSION, contentHash, stableId } from "../contracts/common"
 import {
   type FactAuditPacket,
   type RagEvidencePack,
@@ -15,6 +15,13 @@ export function validateSpecEvidence(spec: GenerationSpec, evidence: RagEvidence
       message: "GenerationSpec 引用的 retrieval_id 与实际 evidence_pack 不一致",
       severity: "critical",
     })
+  }
+  if (spec.evidence_content_hash !== contentHash(evidence)) {
+    issues.push(issue(
+      "evidence_content_hash_mismatch",
+      "spec.evidence_content_hash",
+      "GenerationSpec 绑定的 evidence_pack 内容哈希与实际输入不一致",
+    ))
   }
   if (spec.versions.kb_version !== evidence.kb_version) {
     issues.push(issue("kb_version_mismatch", "spec.versions.kb_version", "GenerationSpec 的 KB 版本与 evidence_pack 不一致"))

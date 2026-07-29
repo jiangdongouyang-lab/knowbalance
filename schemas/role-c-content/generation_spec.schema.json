@@ -3,12 +3,13 @@
   "$id": "https://github.com/jiangdongouyang-lab/knowbalance/schemas/role-c-content/generation_spec.schema.json",
   "title": "C GenerationSpec",
   "type": "object",
-  "required": ["schema_version", "spec_id", "run_id", "evidence_ref", "versions", "profile_ref", "path_node", "targets", "learner_adaptation", "difficulty", "assessment_blueprint", "policies"],
+  "required": ["schema_version", "spec_id", "run_id", "evidence_ref", "evidence_content_hash", "versions", "profile_ref", "path_node", "targets", "learner_adaptation", "difficulty", "assessment_blueprint", "policies"],
   "properties": {
     "schema_version": { "const": "1.0" },
     "spec_id": { "type": "string", "minLength": 1 },
     "run_id": { "type": "string", "minLength": 1 },
     "evidence_ref": { "type": "string", "minLength": 1 },
+    "evidence_content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
     "versions": {
       "type": "object",
       "required": ["profile_version", "kb_version", "rag_version", "prompt_version", "model_config_hash", "schema_version"],
@@ -21,8 +22,12 @@
       "additionalProperties": false
     },
     "profile_ref": {
-      "type": "object", "required": ["profile_id", "profile_version"],
-      "properties": { "profile_id": { "type": "string", "minLength": 1 }, "profile_version": { "type": "string", "minLength": 1 } },
+      "type": "object", "required": ["profile_id", "profile_version", "profile_content_hash"],
+      "properties": {
+        "profile_id": { "type": "string", "minLength": 1 },
+        "profile_version": { "type": "string", "minLength": 1 },
+        "profile_content_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" }
+      },
       "additionalProperties": false
     },
     "path_node": {

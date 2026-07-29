@@ -12,10 +12,20 @@ import type { RagEvidencePack } from "../contracts/evidence-pack"
 import type { GenerationSpec } from "../contracts/generation-spec"
 import type { AlignmentObjection } from "../validators/alignment-validator"
 
+export interface NextRoundGenerationContext {
+  request_id: string
+  parent_spec_id: string
+  prior_feedback_ref: string
+  trigger_grade_artifact_id: string
+  action: "remediate" | "reinforce" | "advance"
+  focus_objective_ids: string[]
+  reason_codes: string[]
+}
+
 export interface ConceptTutorRequest {
   generation_spec: GenerationSpec
   evidence_pack: RagEvidencePack
-  prior_feedback_ref?: string
+  next_round_context?: NextRoundGenerationContext
   revision_objections?: AlignmentObjection[]
 }
 
@@ -23,6 +33,7 @@ export interface CodeLabRequest {
   generation_spec: GenerationSpec
   evidence_pack: RagEvidencePack
   concept_artifact: ConceptLessonArtifact
+  next_round_context?: NextRoundGenerationContext
   revision_objections?: AlignmentObjection[]
 }
 
@@ -35,6 +46,7 @@ export interface TieredEvaluatorRequest {
     objective_ids: string[]
     execution_verified: boolean
   }
+  next_round_context?: NextRoundGenerationContext
   revision_objections?: AlignmentObjection[]
 }
 

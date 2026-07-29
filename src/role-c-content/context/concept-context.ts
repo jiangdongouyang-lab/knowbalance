@@ -1,5 +1,6 @@
 import type { ConceptTutorRequest } from "../agents/types"
 import type { EvidenceExample, EvidenceFact } from "../contracts/evidence-pack"
+import { projectNextRoundContext } from "./next-round-context"
 
 export interface ConceptTutorModelInput {
   contract: {
@@ -19,7 +20,7 @@ export interface ConceptTutorModelInput {
     examples: EvidenceExample[]
   }>
   upstream: {
-    prior_feedback_ref?: string
+    next_round_context?: ConceptTutorRequest["next_round_context"]
     revision_objections?: ConceptTutorRequest["revision_objections"]
   }
 }
@@ -31,6 +32,11 @@ export interface ConceptTutorModelInput {
 export function buildConceptTutorModelInput(
   request: ConceptTutorRequest,
 ): ConceptTutorModelInput {
+  const targetObjectiveIds = request.generation_spec.targets.map((target) => target.objective_id)
+  const nextRoundContext = projectNextRoundContext(
+    request.next_round_context,
+    targetObjectiveIds,
+  )
   const requiredFactsBySource = new Map<string, Set<string>>()
   for (const target of request.generation_spec.targets) {
     const facts = requiredFactsBySource.get(target.source_id) ?? new Set<string>()
@@ -69,7 +75,9 @@ export function buildConceptTutorModelInput(
     },
     evidence,
     upstream: {
-      ...(request.prior_feedback_ref ? { prior_feedback_ref: request.prior_feedback_ref } : {}),
+      ...(nextRoundContext
+        ? { next_round_context: nextRoundContext }
+        : {}),
       ...(request.revision_objections ? { revision_objections: structuredClone(request.revision_objections) } : {}),
     },
   }

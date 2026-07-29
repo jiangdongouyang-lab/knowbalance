@@ -53,11 +53,11 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
     const publicTests: CodeLabPublicPayload["public_tests"] = facts.map(({ target, fact }, index) => ({
       test_id: `${target.objective_id}-PUBLIC-${index + 1}`,
       objective_id: target.objective_id,
-      description: [
+      description: `${fact.content} ${[
         "确认函数会遍历并处理输入中的全部成绩",
         "确认函数能处理只包含一个成绩的列表",
         "确认函数返回可继续使用的平均值结果",
-      ][index] ?? "确认当前目标对应的函数行为",
+      ][index] ?? "确认当前目标对应的函数行为"}`,
       input: [[80, 90, 70], [100], [72.5, 87.5]][index] ?? [60, 80, 100],
       expected_behavior: [
         "输入中的每个成绩都应参与平均值计算",
@@ -83,7 +83,7 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
     const hiddenTests: CodeLabSecurePayload["hidden_tests"] = [
       { test_id: "HT-O1-ALL", input: [10, 20, 30, 40], expected: 25, objective_id: objectiveIds[0], weight: 0.2, comparison: numeric() },
       { test_id: "HT-O2-SINGLE", input: [100], expected: 100, objective_id: objectiveIds[1] ?? objectiveIds[0], weight: 0.2, comparison: numeric() },
-      { test_id: "HT-O2-MIXED", input: [0, 50, 100, 50], expected: 50, objective_id: objectiveIds[1] ?? objectiveIds[0], weight: 0.2, comparison: numeric() },
+      { test_id: "HT-O2-MIXED", input: [0, 50, 100, 70], expected: 55, objective_id: objectiveIds[1] ?? objectiveIds[0], weight: 0.2, comparison: numeric() },
       { test_id: "HT-O3-DECIMAL", input: [72.5, 87.5], expected: 80, objective_id: objectiveIds[2] ?? objectiveIds.at(-1)!, weight: 0.2, comparison: numeric() },
       { test_id: "HT-O3-FRACTION", input: [1, 2], expected: 1.5, objective_id: objectiveIds[2] ?? objectiveIds.at(-1)!, weight: 0.2, comparison: numeric() },
     ]
@@ -117,7 +117,7 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
         must_fail_test_ids: ["HT-O3-FRACTION"],
       },
     ]
-    const groups = objectiveIds.map((objectiveId, index) => {
+    const groups = objectiveIds.map((objectiveId) => {
       const tests = hiddenTests.filter((test) => test.objective_id === objectiveId)
       return {
         group_id: `GROUP-${objectiveId}`,

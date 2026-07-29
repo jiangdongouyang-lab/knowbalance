@@ -2,7 +2,6 @@ import type {
   ArtifactDraft,
   AssessmentDraft,
   CodeLabDraft,
-  ConceptTutorRequest,
   RoleCContentProvider,
   TieredEvaluatorRequest,
 } from "../agents/types"
@@ -71,11 +70,11 @@ export function buildDeterministicAssessmentDraft(request: TieredEvaluatorReques
   ], "opt_true", trueFalsePosition, spec.policies.seed + 17)
 
   const publicItems: AssessmentItemPublic[] = [
-    publicItem("ITEM-O1-T1-MCQ", "FAMILY-O1-ITERATION", "V1", 1, o1.objective_id, 1, "mcq", "for 循环在本实验中最适合承担哪项任务？", 1, [citeFor(0)], { options: mcqOptions }),
-    publicItem("ITEM-O2-T1-TF", "FAMILY-O2-LIST", "V1", 2, o2.objective_id, 1, "true_false", "判断：列表中的元素具有确定的先后顺序。", 1, [citeFor(1)], { options: trueFalseOptions }),
-    publicItem("ITEM-O1-T2-TRACE", "FAMILY-O1-TRACE", "V1", 3, o1.objective_id, 2, "trace", "执行 total = 0；随后依次对 [3, 5] 中的每个值执行 total += value。最终 total 是多少？", 2, [citeFor(0)]),
-    publicItem("ITEM-O2-T2-SHORT", "FAMILY-O2-APPLICATION", "V1", 4, o2.objective_id, 2, "short_answer", "简要说明列表如何保存一组成绩，并支持程序按顺序逐项处理。", 2, [citeFor(1)]),
-    publicItem("ITEM-O3-T3-CODE", "FAMILY-O3-CODE", "V1", 5, o3.objective_id, 3, "code", "补全 average_score(scores)，遍历非空成绩列表并返回保留小数的平均值。", 4, [citeFor(2)], {
+    publicItem("ITEM-O1-T1-MCQ", "FAMILY-O1-ITERATION", "V1", 1, o1.objective_id, 1, "mcq", `${facts[0].fact.content} 本实验中最适合承担哪项任务？`, 1, [citeFor(0)], { options: mcqOptions }),
+    publicItem("ITEM-O2-T1-TF", "FAMILY-O2-LIST", "V1", 2, o2.objective_id, 1, "true_false", `${facts[1].fact.content} 请判断该表述。`, 1, [citeFor(1)], { options: trueFalseOptions }),
+    publicItem("ITEM-O1-T2-TRACE", "FAMILY-O1-TRACE", "V1", 3, o1.objective_id, 2, "trace", `${facts[0].fact.content} 执行 total = 0；随后依次对 [3, 5] 中的每个值执行 total += value。最终 total 是多少？`, 2, [citeFor(0)]),
+    publicItem("ITEM-O2-T2-SHORT", "FAMILY-O2-APPLICATION", "V1", 4, o2.objective_id, 2, "short_answer", `${facts[1].fact.content} 请说明它如何支持程序按顺序逐项处理一组成绩。`, 2, [citeFor(1)]),
+    publicItem("ITEM-O3-T3-CODE", "FAMILY-O3-CODE", "V1", 5, o3.objective_id, 3, "code", `${facts[2].fact.content} 请补全 average_score(scores)，遍历非空成绩列表并返回保留小数的平均值。`, 4, [citeFor(2)], {
       starter_code: "def average_score(scores):\n    total = 0\n    count = 0\n    for score in scores:\n        # TODO\n        pass\n    return None",
     }),
   ]

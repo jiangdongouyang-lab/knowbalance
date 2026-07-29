@@ -1,6 +1,7 @@
 import type { TieredEvaluatorRequest } from "../agents/types"
 import type { CitationRef } from "../contracts/common"
 import type { EvidenceExample, EvidenceFact } from "../contracts/evidence-pack"
+import { projectNextRoundContext } from "./next-round-context"
 
 export interface AssessmentAuthorModelInput {
   contract: {
@@ -29,6 +30,7 @@ export interface AssessmentAuthorModelInput {
     }>
     misconceptions: NonNullable<TieredEvaluatorRequest["concept_artifact"]["payload"]>["misconceptions"]
     code_lab_summary?: TieredEvaluatorRequest["code_lab_summary"]
+    next_round_context?: TieredEvaluatorRequest["next_round_context"]
   }
   revision_objections?: TieredEvaluatorRequest["revision_objections"]
 }
@@ -37,6 +39,10 @@ export interface AssessmentAuthorModelInput {
 export function buildAssessmentAuthorModelInput(
   request: TieredEvaluatorRequest,
 ): AssessmentAuthorModelInput {
+  const nextRoundContext = projectNextRoundContext(
+    request.next_round_context,
+    request.generation_spec.targets.map((target) => target.objective_id),
+  )
   const sourceIds = new Set(request.generation_spec.path_node.target_source_ids)
   const payload = request.concept_artifact.payload
   const blocks = payload
@@ -94,6 +100,7 @@ export function buildAssessmentAuthorModelInput(
       code_lab_summary: request.code_lab_summary
         ? structuredClone(request.code_lab_summary)
         : undefined,
+      next_round_context: nextRoundContext,
     },
     revision_objections: request.revision_objections
       ? structuredClone(request.revision_objections)

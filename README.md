@@ -9,7 +9,7 @@ KnowBalance is a personalized Python learning system built around one OpenCode o
 3. Synthesize a learner profile and retrieve a traceable learning path.
 4. Generate and verify a concept lesson, code lab, and tiered assessment.
 5. Capture learner responses and preserve the plan checkpoint.
-6. Grade, update mastery, and decide advance/remediate/reprofile after the remaining Week 2 integration.
+6. Grade the submission, update mastery, return one adaptive decision, and prepare the next learning round.
 
 The `learning-orchestrator` agent only uses OpenCode's native `task` and `question` tools. Its task permission is limited to the eight registered workers. Worker agents cannot delegate further work. The native OpenCode path remains sequential because some anonymous OpenCode model/provider combinations can close the parent stream after a subagent finishes; the deterministic TypeScript implementations are the reproducible Week 1 verification path.
 
@@ -19,6 +19,16 @@ The `learning-orchestrator` agent only uses OpenCode's native `task` and `questi
 bun install
 bun run check
 ```
+
+编程练习和代码题统一在专用 Docker 镜像中运行。安装并启动 Docker 后，首次使用先构建镜像：
+
+```bash
+bun run docker:role-c:build
+bun run docker:role-c:doctor
+bun run test:role-c:docker
+```
+
+Docker 验收依次检查隔离与资源限制、编程练习验证，以及包含代码题判分的完整 C 流程；任一环节未达到 `ready` 都会返回非零退出码。
 
 Copy `opencode.example.json` to `opencode.json` and replace its plugin entry with the absolute `file://` URL for this workspace. The local `opencode.json` is ignored because that path is machine-specific.
 
@@ -64,19 +74,19 @@ Role A provides a versioned Python-basics knowledge slice, knowledge facts, exam
 
 ## Role C: evidence-constrained content generation
 
-Role C implements `concept-tutor`, `code-lab`, and `tiered-evaluator` with a frozen `GenerationSpec`, runtime JSON Schemas, public/secure separation, independent verification, cross-artifact alignment, mixed grading, frozen feedback, idempotent mastery updates, checkpoint recovery and append-only traces. Model-backed Authors use staged generation and deterministic composition. See `docs/role_c_design.md` and `docs/role_c_prompt_index.md`.
+Role C implements `concept-tutor`, `code-lab`, and `tiered-evaluator` with a frozen `GenerationSpec`, runtime JSON Schemas, public/secure separation, Docker code execution, A/B content review, mixed grading, persistent mastery updates, unified dynamic feedback, atomic delivery envelopes, and reviewed next-round regeneration. Model-backed Authors use staged generation and deterministic composition. See `docs/role_c_design.md` and `docs/role_c_prompt_index.md`.
 
 ```bash
 bun run demo:role-c       # profile → RAG → verified concept lesson
-bun run demo:role-c:lab   # concept lesson → verified code lab
-bun run demo:role-c:full  # three agents → submission → grade → mastery
+bun run demo:role-c:lab   # concept lesson → Docker-verified code lab
+bun run demo:role-c:full  # three agents → review → Docker grading → next reviewed round
 ```
 
-OCI execution uses `ROLE_C_RUNNER_RUNTIME` and a digest-pinned `ROLE_C_RUNNER_IMAGE`:
-
-```bash
-bun run demo:role-c:lab:oci
-```
+`code-lab` 参考答案校验、错误变体校验、测评代码题校验和学习者代码评分共用
+`DockerPythonCodeRunner`。Runner 每次使用镜像的不可变本地 image ID，并关闭网络、使用只读
+文件系统和非 root 用户，同时限制 CPU、内存、进程数、运行时间、临时目录和输出大小。
+隐藏测试的期望答案与权重不进入容器，Docker 只返回代码的实际运行结果，由后端完成比较和计分。
+镜像名称及资源参数可通过 `.env.role-c.example` 中列出的 `ROLE_C_DOCKER_*` 环境变量覆盖。
 
 For a real model smoke test, copy `.env.role-c.example` to `.env.role-c.local`, set `ROLE_C_MODEL_ENDPOINT`, `ROLE_C_MODEL_ID`, optional `ROLE_C_MODEL_API_KEY`, and `ROLE_C_MODEL_THINKING`, then run:
 
@@ -106,5 +116,5 @@ Repository tests use `bun test --isolate ./tests` so Role C's schema and frozen-
 
 - **Week 1 complete path:** learner input → B profile → A retrieval → C verified lesson/lab/assessment → D display, response capture, local submission, and checkpoint recovery.
 - **Gold path limitation:** the deterministic C provider currently supports the K007/K009/K018 score-project target. Unsupported goals are blocked honestly instead of receiving fabricated artifacts.
-- **Week 2 remaining:** formal grading delivery, isolated code execution, mastery evidence, automatic next-step decisions, and the broader review/arbitration visualization required by the project plan.
+- **Role C Week 2:** formal grading, isolated code execution, mastery evidence, unified adaptive decisions, A/B content review, idempotent delivery, and next-round regeneration are implemented behind transport-neutral ports.
 - **Future product work:** real authentication and cloud synchronization should use a dedicated backend; they must not be simulated with local browser profiles or by widening worker permissions.

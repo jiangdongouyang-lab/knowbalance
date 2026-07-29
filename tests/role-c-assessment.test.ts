@@ -20,7 +20,6 @@ import {
   TrustedAssessmentVerifier,
   validateAssessmentDraftStructure,
   validateRoleCSchema,
-  type AssessmentDraft,
   type CodeExecutionRequest,
   type CodeExecutionResult,
   type CodeRunner,

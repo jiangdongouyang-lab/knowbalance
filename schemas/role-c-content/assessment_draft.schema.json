@@ -212,7 +212,7 @@
         "test_suite_id": { "type": "string", "minLength": 1 },
         "execution_contract": { "$ref": "code_lab_draft.schema.json#/$defs/execution_contract" },
         "reference_solution": { "type": "string", "minLength": 1, "maxLength": 20000 },
-        "hidden_tests": { "type": "array", "minItems": 2, "items": { "$ref": "code_lab_draft.schema.json#/$defs/hidden_test" } }
+        "hidden_tests": { "type": "array", "minItems": 2, "maxItems": 64, "items": { "$ref": "code_lab_draft.schema.json#/$defs/hidden_test" } }
       },
       "additionalProperties": false
     },

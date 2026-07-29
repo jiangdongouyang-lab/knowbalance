@@ -57,6 +57,8 @@ describe("role C staged model provider", () => {
     labDraft.secure_draft.payload.hidden_tests.forEach((entry) => { entry.weight *= 2 })
     labDraft.secure_draft.payload.scoring_groups.forEach((entry) => { entry.weight = 0.123 })
     const assessmentDraft = await deterministic.generateAssessment(assessmentRequest)
+    assessmentDraft.public_draft.payload.items[3]!.citations =
+      structuredClone(assessmentDraft.public_draft.payload.items[0]!.citations)
     const gateway = new StagedFixtureGateway(conceptOutputs, labDraft, assessmentDraft)
     const provider = new ModelBackedRoleCContentProvider(gateway, {
       concept_group_size: 1,
@@ -74,6 +76,16 @@ describe("role C staged model provider", () => {
     expect(concept.payload.objective_ids).toEqual(context.spec.targets.map((target) => target.objective_id))
     expect(lab.public_draft.payload.lab_id).toBe(lab.secure_draft.payload.lab_id)
     expect(assessment.public_draft.payload.form_id).toBe(assessment.secure_draft.payload.form_id)
+    for (const item of assessment.public_draft.payload.items) {
+      const target = context.spec.targets.find(
+        (entry) => entry.objective_id === item.objective_id,
+      )!
+      expect(item.citations).toEqual(target.required_fact_ids.map((factId) => ({
+        source_id: target.source_id,
+        fact_id: factId,
+        relation: "derived_from",
+      })))
+    }
     expect(gateway.tasks).toEqual([
       "role-c.concept-tutor.segment",
       "role-c.concept-tutor.segment",

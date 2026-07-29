@@ -6,7 +6,7 @@
   "required": ["schema_version", "seq", "event_type", "run_id", "status", "input_refs", "summary"],
   "properties": {
     "schema_version": { "const": "1.0" }, "seq": { "type": "integer", "minimum": 1 },
-    "event_type": { "enum": ["c.spec.ready", "c.agent.started", "c.agent.ready", "c.validation.failed", "c.pipeline.blocked", "c.pipeline.failed", "c.pipeline.ready"] },
+    "event_type": { "enum": ["c.spec.ready", "c.agent.started", "c.agent.ready", "c.validation.failed", "c.review.revision_requested", "c.review.passed", "c.pipeline.blocked", "c.pipeline.failed", "c.pipeline.ready"] },
     "run_id": { "type": "string", "minLength": 1 },
     "agent": { "enum": ["concept-tutor", "code-lab", "tiered-evaluator"] },
     "status": { "enum": ["started", "success", "blocked", "failed"] },

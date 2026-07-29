@@ -5,7 +5,7 @@ import {
   type ArtifactQuality,
   type BlockedReason,
   type CitationRef,
-  type RoleCAgentName,
+  type RoleCArtifactType,
 } from "../contracts/common"
 import type { GenerationSpec } from "../contracts/generation-spec"
 import type { RagEvidencePack } from "../contracts/evidence-pack"
@@ -18,7 +18,12 @@ import {
 } from "../validators/runtime-schema-validator"
 import type { ArtifactDraft } from "./types"
 
-type RoleCArtifactType = ArtifactEnvelope<unknown>["artifact_type"]
+type AgentForArtifact<TArtifactType extends RoleCArtifactType> =
+  TArtifactType extends "concept_lesson"
+    ? "concept-tutor"
+    : TArtifactType extends "code_lab_public" | "code_lab_secure"
+      ? "code-lab"
+      : "tiered-evaluator"
 
 const ARTIFACT_SCHEMAS: Record<RoleCArtifactType, RoleCSchemaFile> = {
   concept_lesson: "concept_artifact.schema.json",
@@ -34,11 +39,14 @@ const ARTIFACT_SCHEMAS: Record<RoleCArtifactType, RoleCSchemaFile> = {
  * accepted: citations, claim counts, coverage, schema status, and verification flags
  * are derived here or supplied by an independent verifier.
  */
-export function finalizeDraft<TPayload>(input: {
+export function finalizeDraft<
+  TPayload,
+  TArtifactType extends RoleCArtifactType,
+>(input: {
   spec: GenerationSpec
   evidence: RagEvidencePack
-  agent: RoleCAgentName
-  artifact_type: RoleCArtifactType
+  agent: AgentForArtifact<TArtifactType>
+  artifact_type: TArtifactType
   draft: ArtifactDraft<TPayload>
   input_refs: string[]
   public_payload: boolean
@@ -52,7 +60,12 @@ export function finalizeDraft<TPayload>(input: {
   verified_test_count?: number
   verified_item_count?: number
   verification_issues?: string[]
-}): ArtifactEnvelope<TPayload> {
+  /**
+   * Trusted event identity for artifacts whose public wording may be regenerated
+   * after a score is frozen. Other artifacts remain payload-addressed.
+   */
+  stable_identity?: unknown
+}): ArtifactEnvelope<TPayload, TArtifactType, AgentForArtifact<TArtifactType>> {
   const derived = derivePayloadMetadata(input.draft.payload)
   const citations = deduplicateCitations(input.trusted_citations ?? derived.citations)
   const citationReport = validateCitations(citations, input.evidence)
@@ -103,9 +116,15 @@ export function finalizeDraft<TPayload>(input: {
     spec_id: input.spec.spec_id,
     artifact_type: input.artifact_type,
     seed: input.spec.policies.seed,
-    payload: input.draft.payload,
+    ...(input.stable_identity === undefined
+      ? { payload: input.draft.payload }
+      : { stable_identity: input.stable_identity }),
   })
-  const artifact: ArtifactEnvelope<TPayload> = {
+  const artifact: ArtifactEnvelope<
+    TPayload,
+    TArtifactType,
+    AgentForArtifact<TArtifactType>
+  > = {
     schema_version: C_SCHEMA_VERSION,
     run_id: input.spec.run_id,
     artifact_id: artifactId,
@@ -137,14 +156,17 @@ export function finalizeDraft<TPayload>(input: {
   return artifact
 }
 
-export function providerBlockedEnvelope<TPayload>(input: {
+export function providerBlockedEnvelope<
+  TPayload,
+  TArtifactType extends RoleCArtifactType,
+>(input: {
   spec: GenerationSpec
   evidence: RagEvidencePack
-  agent: RoleCAgentName
-  artifact_type: RoleCArtifactType
+  agent: AgentForArtifact<TArtifactType>
+  artifact_type: TArtifactType
   input_refs: string[]
   message: string
-}): ArtifactEnvelope<TPayload> {
+}): ArtifactEnvelope<TPayload, TArtifactType, AgentForArtifact<TArtifactType>> {
   return blockedEnvelope(
     {
       ...input,
@@ -156,15 +178,18 @@ export function providerBlockedEnvelope<TPayload>(input: {
   )
 }
 
-export function invalidOutputEnvelope<TPayload>(input: {
+export function invalidOutputEnvelope<
+  TPayload,
+  TArtifactType extends RoleCArtifactType,
+>(input: {
   spec: GenerationSpec
   evidence: RagEvidencePack
-  agent: RoleCAgentName
-  artifact_type: RoleCArtifactType
+  agent: AgentForArtifact<TArtifactType>
+  artifact_type: TArtifactType
   input_refs: string[]
   message: string
   details?: string[]
-}): ArtifactEnvelope<TPayload> {
+}): ArtifactEnvelope<TPayload, TArtifactType, AgentForArtifact<TArtifactType>> {
   return blockedEnvelope(
     {
       ...input,
@@ -176,12 +201,15 @@ export function invalidOutputEnvelope<TPayload>(input: {
   )
 }
 
-function blockedEnvelope<TPayload>(
+function blockedEnvelope<
+  TPayload,
+  TArtifactType extends RoleCArtifactType,
+>(
   input: {
     spec: GenerationSpec
     evidence: RagEvidencePack
-    agent: RoleCAgentName
-    artifact_type: RoleCArtifactType
+    agent: AgentForArtifact<TArtifactType>
+    artifact_type: TArtifactType
     draft: ArtifactDraft<TPayload>
     input_refs: string[]
     public_payload: boolean
@@ -194,7 +222,7 @@ function blockedEnvelope<TPayload>(
     verified_item_count?: number
   },
   reason: BlockedReason,
-): ArtifactEnvelope<TPayload> {
+): ArtifactEnvelope<TPayload, TArtifactType, AgentForArtifact<TArtifactType>> {
   const artifactId = stableId("ART", {
     spec_id: input.spec.spec_id,
     artifact_type: input.artifact_type,

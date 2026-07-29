@@ -5,7 +5,7 @@ import {
   adaptLearnerProfile,
   adaptRagResult,
   buildGenerationSpec,
-  createOciPythonCodeRunnerFromEnv,
+  createDockerPythonCodeRunnerFromEnv,
   defineLearningPathNode,
   DeterministicCodeLabContentProvider,
   generateCodeLab,
@@ -13,15 +13,10 @@ import {
   InMemorySecureArtifactStore,
   ROLE_C_PROMPT_MANIFEST_VERSION,
   TrustedCodeLabVerifier,
-  type CodeExecutionRequest,
-  type CodeExecutionResult,
-  type CodeRunner,
   type LearningPathNode,
 } from "../src/role-c-content"
 
-const CONFORMANCE_DIGEST = `sha256:${"c".repeat(64)}`
-const useOci = process.argv.includes("--oci")
-const runner = useOci ? createOciPythonCodeRunnerFromEnv() : new DemoConformanceRunner()
+const runner = await createDockerPythonCodeRunnerFromEnv()
 const profile = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
 const rawPath = (await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()) as LearningPathNode
 const kb = await loadKnowledgeBase()
@@ -57,7 +52,7 @@ if (!built.ok) {
   output = {
     workflow: "B_profile_to_A_evidence_to_C_verified_code_lab",
     status: "blocked",
-    runner_mode: useOci ? "oci" : "contract_conformance_test_double",
+    runner_mode: "docker",
     intake: built,
   }
 } else {
@@ -85,10 +80,8 @@ if (!built.ok) {
     status: pair?.public_artifact.status === "ready" && secureRefs.length === 1
       ? "code_lab_ready"
       : "blocked",
-    runner_mode: useOci ? "oci" : "contract_conformance_test_double",
-    production_runner_note: useOci
-      ? "digest-pinned OCI runner executed the suite"
-      : "This deterministic test double exercises verifier/orchestration contracts; use --oci for real isolated execution.",
+    runner_mode: "docker",
+    runner_image_digest: runner.runner_image_digest,
     input_refs: {
       profile_id: profileSnapshot.profile_id,
       path_node_id: pathNode.node_id,
@@ -104,31 +97,4 @@ if (!built.ok) {
 }
 
 console.log(JSON.stringify(output, null, 2))
-
-/** Explicitly non-production: deterministic verification responses for the reproducible demo. */
-class DemoConformanceRunner implements CodeRunner {
-  readonly runner_image_digest = CONFORMANCE_DIGEST
-
-  async execute(request: CodeExecutionRequest): Promise<CodeExecutionResult> {
-    const testIds = request.test_suite?.tests.map((entry) => entry.test_id) ?? []
-    const failedIds = request.code.includes("return None")
-      ? testIds
-      : request.code.includes("total = score")
-        ? ["HT-O1-ALL"]
-        : request.code.includes("scores[:-1]")
-          ? ["HT-O2-MIXED"]
-          : request.code.includes("return 80")
-            ? ["HT-O2-SINGLE", "HT-O2-MIXED"]
-            : request.code.includes("// count")
-              ? ["HT-O3-FRACTION"]
-              : []
-    return {
-      status: failedIds.length === 0 ? "passed" : "failed",
-      passed_tests: Math.max(0, testIds.length - failedIds.length),
-      total_tests: testIds.length,
-      score_ratio: testIds.length === 0 ? 0 : (testIds.length - failedIds.length) / testIds.length,
-      failure_codes: failedIds.map((testId) => `${testId}:assertion_failed`),
-      runner_image_digest: this.runner_image_digest,
-    }
-  }
-}
+if (output.status !== "code_lab_ready") process.exit(1)

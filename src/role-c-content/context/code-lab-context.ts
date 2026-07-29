@@ -1,6 +1,7 @@
 import type { CodeLabRequest } from "../agents/types"
 import type { CitationRef } from "../contracts/common"
 import type { EvidenceExample, EvidenceFact } from "../contracts/evidence-pack"
+import { projectNextRoundContext } from "./next-round-context"
 
 export interface CodeLabModelInput {
   contract: {
@@ -29,11 +30,16 @@ export interface CodeLabModelInput {
     }>
     misconceptions: NonNullable<CodeLabRequest["concept_artifact"]["payload"]>["misconceptions"]
   }
+  next_round_context?: CodeLabRequest["next_round_context"]
   revision_objections?: CodeLabRequest["revision_objections"]
 }
 
 /** Builds the model-visible lab context without learner identity or answer-bearing quiz seeds. */
 export function buildCodeLabModelInput(request: CodeLabRequest): CodeLabModelInput {
+  const nextRoundContext = projectNextRoundContext(
+    request.next_round_context,
+    request.generation_spec.targets.map((target) => target.objective_id),
+  )
   const targetSources = new Set(request.generation_spec.path_node.target_source_ids)
   const evidence = request.evidence_pack.results
     .filter((item) => targetSources.has(item.source_id))
@@ -91,6 +97,7 @@ export function buildCodeLabModelInput(request: CodeLabRequest): CodeLabModelInp
       objective_summaries: objectiveSummaries,
       misconceptions: structuredClone(payload?.misconceptions ?? []),
     },
+    next_round_context: nextRoundContext,
     revision_objections: request.revision_objections
       ? structuredClone(request.revision_objections)
       : undefined,

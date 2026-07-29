@@ -388,8 +388,36 @@ function deriveMisconceptions(answer: SubmissionAnswer | undefined, item: Assess
     const tag = item.misconception_by_option[answer.selected_option_id]
     if (tag) tags.add(tag)
   }
-  for (const code of decision.failure_codes ?? []) tags.add(`code:${code}`)
+  for (const code of publicCodeFailureCategories(decision.failure_codes ?? [])) {
+    tags.add(`code:${code}`)
+  }
   return [...tags]
+}
+
+/**
+ * Runner failure strings may contain hidden test identifiers. Only stable,
+ * learner-safe categories cross the grading boundary.
+ */
+function publicCodeFailureCategories(codes: string[]): string[] {
+  const known = [
+    "assertion_failed",
+    "syntax_error",
+    "execution_timeout",
+    "resource_limit_exceeded",
+    "output_limit",
+    "forbidden_import",
+    "unsupported_contract_import",
+    "forbidden_builtin",
+  ] as const
+  const categories = codes.map((code) => {
+    const normalized = code.normalize("NFKC").toLocaleLowerCase()
+    return known.find((category) =>
+      normalized === category
+        || normalized.endsWith(`:${category}`)
+        || normalized.includes(category))
+      ?? "execution_failed"
+  })
+  return [...new Set(categories)]
 }
 
 function validJudgeResult(result: BlindRubricJudgeResult["criteria"][number]): boolean {

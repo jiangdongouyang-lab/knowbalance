@@ -12,9 +12,9 @@ import {
   defineLearningPathNode,
   detectEvidenceConflicts,
   deliverRoleCToB,
-  deliverRoleCToD,
   DeterministicCodeLabContentProvider,
   EvidencePhraseRubricJudge,
+  executeTrustedReferenceWithRetry,
   executeWithRunnerRetry,
   generateConceptLesson,
   gradeSubmission,
@@ -35,7 +35,11 @@ import {
   type CodeRunner,
   type GenerationSpec,
   type LearningEvidenceEvent,
+  type ObjectiveMasteryState,
+  type ProfileDriftSuggestion,
   type RagEvidencePack,
+  type RoleCDeliveryAck,
+  type RoleCLearningProgressDelivery,
   type RoleCContentProvider,
   type SubmissionEnvelope,
   type TieredEvaluatorRequest,
@@ -176,6 +180,36 @@ describe("role C eleven contract properties", () => {
     expect(calls).toBe(1)
   })
 
+  test("P08 trusted reference retries a transient container timeout", async () => {
+    let calls = 0
+    const runner: CodeRunner = {
+      runner_image_digest: DIGEST,
+      async execute() {
+        calls += 1
+        return calls === 1
+          ? {
+              status: "timeout",
+              passed_tests: 0,
+              total_tests: 1,
+              score_ratio: 0,
+              failure_codes: ["execution_timeout"],
+              runner_image_digest: DIGEST,
+            }
+          : {
+              status: "passed",
+              passed_tests: 1,
+              total_tests: 1,
+              score_ratio: 1,
+              failure_codes: [],
+              runner_image_digest: DIGEST,
+            }
+      },
+    }
+    const result = await executeTrustedReferenceWithRetry(runner, codeRequest(), 1)
+    expect(result.status).toBe("passed")
+    expect(result.tool_attempts).toBe(2)
+  })
+
   test("P09 Beta updates aggregate one artifact batch per objective and stay bounded", async () => {
     const events = [evidenceEvent("E1", "I1", 1, "mcq"), evidenceEvent("E2", "I2", 0, "trace")]
     const store = new InMemoryMasteryStateStore()
@@ -247,33 +281,267 @@ describe("role C eleven contract properties", () => {
   })
 })
 
+describe("role C in-memory mastery revision guards", () => {
+  test("save and saveBatch reject revision jumps without partial writes", async () => {
+    const store = new InMemoryMasteryStateStore()
+    await expect(store.save(masterySnapshot("O1", 2), 0))
+      .rejects.toThrow("MASTERY_REVISION_STEP_INVALID")
+    expect(await store.load("learner", "p", "O1")).toBeUndefined()
+
+    const valid = masterySnapshot("O1", 1)
+    const jumping = masterySnapshot("O2", 2)
+    await expect(store.saveBatch([
+      { state: valid, expected_revision: 0 },
+      { state: jumping, expected_revision: 0 },
+    ])).rejects.toThrow("MASTERY_REVISION_STEP_INVALID")
+    expect(await store.load("learner", "p", "O1")).toBeUndefined()
+    expect(await store.load("learner", "p", "O2")).toBeUndefined()
+
+    await store.save(valid, 0)
+    await expect(store.save(masterySnapshot("O1", 3), 1))
+      .rejects.toThrow("MASTERY_REVISION_STEP_INVALID")
+    expect(await store.load("learner", "p", "O1")).toEqual(valid)
+  })
+
+  test("folds multiple evidence batches into one strict CAS revision", async () => {
+    const first = evidenceEvent("E-MASTERY-1", "I1", 1, "mcq")
+    const second = evidenceEvent("E-MASTERY-2", "I2", 0, "trace")
+    first.provenance.idempotency_key = `sha256:${"1".repeat(64)}`
+    second.provenance.idempotency_key = `sha256:${"2".repeat(64)}`
+    const store = new InMemoryMasteryStateStore()
+
+    const result = await updateMasteryFromEvidence([first, second], store)
+
+    expect(result.states[0]).toMatchObject({
+      evidence_batches: 2,
+      revision: 1,
+    })
+    expect(result.states[0]!.processed_artifact_ids).toHaveLength(2)
+    expect((await store.load("learner", "p", "O1"))?.revision).toBe(1)
+  })
+})
+
+describe("role C pipeline single-flight", () => {
+  test("coalesces concurrent cache misses for the same input and secure-store namespace", async () => {
+    const context = await golden()
+    const calls = { concept: 0, lab: 0, assessment: 0 }
+    let releaseConcept!: () => void
+    let signalConceptStarted!: () => void
+    const conceptGate = new Promise<void>((resolve) => { releaseConcept = resolve })
+    const conceptStarted = new Promise<void>((resolve) => { signalConceptStarted = resolve })
+    const provider: RoleCContentProvider = {
+      async generateConceptLesson(request) {
+        calls.concept += 1
+        signalConceptStarted()
+        await conceptGate
+        return context.provider.generateConceptLesson(request)
+      },
+      async generateCodeLab(request) {
+        calls.lab += 1
+        return context.provider.generateCodeLab(request)
+      },
+      async generateAssessment(request) {
+        calls.assessment += 1
+        return context.provider.generateAssessment(request)
+      },
+    }
+    const runner = new PassingContractRunner()
+    const agents = createRoleCAgents(provider, {
+      code_lab: new TrustedCodeLabVerifier(runner),
+      assessment: new TrustedAssessmentVerifier(runner),
+    })
+    const secureStore = new InMemorySecureArtifactStore()
+    const cache = new InMemoryContentCache<Awaited<ReturnType<typeof runCPipeline>>>()
+    const input = { generation_spec: context.spec, evidence_pack: context.evidence }
+
+    const first = runCPipeline(input, agents, secureStore, { cache })
+    await conceptStarted
+    const duplicate = runCPipeline(input, agents, secureStore, { cache })
+    releaseConcept()
+    const [left, right] = await Promise.all([first, duplicate])
+
+    expect(left.status).toBe("ready")
+    expect(right).toEqual(left)
+    expect(calls).toEqual({ concept: 1, lab: 1, assessment: 1 })
+    expect(left.secure_refs).toEqual(right.secure_refs)
+  })
+
+  test("releases a failed flight so the same input can be retried", async () => {
+    const context = await golden()
+    let conceptCalls = 0
+    const provider: RoleCContentProvider = {
+      async generateConceptLesson(request) {
+        conceptCalls += 1
+        if (conceptCalls === 1) throw new Error("transient concept failure")
+        return context.provider.generateConceptLesson(request)
+      },
+      generateCodeLab: (request) => context.provider.generateCodeLab(request),
+      generateAssessment: (request) => context.provider.generateAssessment(request),
+    }
+    const runner = new PassingContractRunner()
+    const agents = createRoleCAgents(provider, {
+      code_lab: new TrustedCodeLabVerifier(runner),
+      assessment: new TrustedAssessmentVerifier(runner),
+    })
+    const secureStore = new InMemorySecureArtifactStore()
+    const cache = new InMemoryContentCache<Awaited<ReturnType<typeof runCPipeline>>>()
+    const input = { generation_spec: context.spec, evidence_pack: context.evidence }
+
+    const failed = await runCPipeline(input, agents, secureStore, { cache })
+    const retried = await runCPipeline(input, agents, secureStore, { cache })
+
+    expect(failed.status).toBe("failed")
+    expect(failed.failure_reason?.code).toBe("PROVIDER_ERROR")
+    expect(retried.status).toBe("ready")
+    expect(conceptCalls).toBe(2)
+  })
+
+  test("does not merge calls that use different execution dependencies", async () => {
+    const context = await golden()
+    let conceptCalls = 0
+    let startedCount = 0
+    let releaseConcept!: () => void
+    let signalBothStarted!: () => void
+    const conceptGate = new Promise<void>((resolve) => { releaseConcept = resolve })
+    const bothStarted = new Promise<void>((resolve) => { signalBothStarted = resolve })
+    const createAgents = () => {
+      const provider: RoleCContentProvider = {
+        async generateConceptLesson(request) {
+          conceptCalls += 1
+          startedCount += 1
+          if (startedCount === 2) signalBothStarted()
+          await conceptGate
+          return context.provider.generateConceptLesson(request)
+        },
+        generateCodeLab: (request) => context.provider.generateCodeLab(request),
+        generateAssessment: (request) => context.provider.generateAssessment(request),
+      }
+      const runner = new PassingContractRunner()
+      return createRoleCAgents(provider, {
+        code_lab: new TrustedCodeLabVerifier(runner),
+        assessment: new TrustedAssessmentVerifier(runner),
+      })
+    }
+    const secureStore = new InMemorySecureArtifactStore()
+    const input = { generation_spec: context.spec, evidence_pack: context.evidence }
+
+    const first = runCPipeline(input, createAgents(), secureStore)
+    const second = runCPipeline(input, createAgents(), secureStore)
+    await bothStarted
+    releaseConcept()
+    const [left, right] = await Promise.all([first, second])
+
+    expect(left.status).toBe("ready")
+    expect(right.status).toBe("ready")
+    expect(conceptCalls).toBe(2)
+    expect(left.secure_refs).not.toEqual(right.secure_refs)
+  })
+})
+
 describe("role C transport-neutral delivery guards", () => {
+  test("publishes one stable same-learner B envelope and accepts a duplicate acknowledgement", async () => {
+    const firstEvent = evidenceEvent("E-1", "I1", 1, "mcq")
+    const secondEvent = evidenceEvent("E-2", "I2", 0, "trace")
+    const drift = profileDriftSuggestion()
+    const received: RoleCLearningProgressDelivery[] = []
+    const committed = new Set<string>()
+    const port = {
+      async publishLearningProgress(delivery: RoleCLearningProgressDelivery) {
+        received.push(structuredClone(delivery))
+        const status = committed.has(delivery.delivery_id) ? "duplicate" as const : "accepted" as const
+        committed.add(delivery.delivery_id)
+        return learningProgressAck(delivery, status)
+      },
+    }
+
+    const first = await deliverRoleCToB(port, [secondEvent, firstEvent], drift)
+    const replay = await deliverRoleCToB(
+      port,
+      [structuredClone(firstEvent), structuredClone(secondEvent)],
+      structuredClone(drift),
+    )
+
+    expect(received).toHaveLength(2)
+    expect(received[0]!.delivery_id).toMatch(/^sha256:[a-f0-9]{64}$/)
+    expect(received[0]!.delivery_id).toBe(received[1]!.delivery_id)
+    expect(received[0]!.evidence_events.map((event) => event.event_id)).toEqual(["E-1", "E-2"])
+    expect(received[0]!.profile_drift_suggestion).toEqual(drift)
+    expect(first.status).toBe("accepted")
+    expect(replay.status).toBe("duplicate")
+  })
+
+  test("defines a drift-only delivery and rejects a fully empty B delivery", async () => {
+    let calls = 0
+    const port = {
+      async publishLearningProgress(delivery: RoleCLearningProgressDelivery) {
+        calls += 1
+        return learningProgressAck(delivery)
+      },
+    }
+    const ack = await deliverRoleCToB(port, [], profileDriftSuggestion())
+    expect(ack.status).toBe("accepted")
+    expect(calls).toBe(1)
+
+    await expect(deliverRoleCToB(port, [])).rejects.toThrow("ROLE_C_B_DELIVERY_EMPTY")
+    expect(calls).toBe(1)
+  })
+
   test("rejects duplicate B evidence events before invoking the transport", async () => {
     const event = evidenceEvent("E-DUP", "I1", 1, "mcq")
     let calls = 0
     await expect(deliverRoleCToB({
-      async consumeLearningEvidence() { calls += 1 },
-      async consumeProfileDriftSuggestion() { calls += 1 },
+      async publishLearningProgress(delivery) {
+        calls += 1
+        return learningProgressAck(delivery)
+      },
     }, [event, structuredClone(event)])).rejects.toThrow("DUPLICATE_EVENT")
     expect(calls).toBe(0)
   })
 
-  test("rejects out-of-order D trace events before invoking the transport", async () => {
+  test("rejects malformed, mixed-profile, and secret-bearing B batches before transport", async () => {
     let calls = 0
-    const trace = [2, 1].map((seq) => ({
-      schema_version: "1.0" as const,
-      seq,
-      event_type: "c.pipeline.ready" as const,
-      run_id: "RUN-DELIVERY",
-      status: "success" as const,
-      input_refs: [],
-      summary: "ready",
-    }))
-    await expect(deliverRoleCToD({
-      async publishArtifacts() { calls += 1 },
-      async publishTrace() { calls += 1 },
-    }, "RUN-DELIVERY", [], trace)).rejects.toThrow("NOT_STRICTLY_ORDERED")
+    const port = {
+      async publishLearningProgress(delivery: RoleCLearningProgressDelivery) {
+        calls += 1
+        return learningProgressAck(delivery)
+      },
+    }
+
+    const malformed = evidenceEvent("E-BAD-SCHEMA", "I1", 1, "mcq")
+    malformed.source_id = "not-a-source"
+    await expect(deliverRoleCToB(port, [malformed]))
+      .rejects.toThrow("ROLE_C_OUTBOUND_SCHEMA_INVALID")
+
+    const wrongProfile = evidenceEvent("E-WRONG-PROFILE", "I2", 1, "mcq")
+    wrongProfile.profile_version = "another-profile"
+    await expect(deliverRoleCToB(port, [
+      evidenceEvent("E-GOOD", "I1", 1, "mcq"),
+      wrongProfile,
+    ])).rejects.toThrow("MIXED_PROFILE_BATCH")
+
+    await expect(deliverRoleCToB(
+      port,
+      [evidenceEvent("E-DRIFT-MISMATCH", "I1", 1, "mcq")],
+      profileDriftSuggestion("learner", "another-profile"),
+    )).rejects.toThrow("DRIFT_PROFILE_MISMATCH")
+
+    const secretBearing = evidenceEvent("E-SECRET", "I1", 1, "mcq")
+    secretBearing.misconceptions = ["secure://role-c/private-answer"]
+    await expect(deliverRoleCToB(port, [secretBearing]))
+      .rejects.toThrow("ROLE_C_B_DELIVERY_SECRET_LEAK")
     expect(calls).toBe(0)
+  })
+
+  test("rejects a B acknowledgement for another delivery", async () => {
+    await expect(deliverRoleCToB({
+      async publishLearningProgress(delivery) {
+        return {
+          ...learningProgressAck(delivery),
+          delivery_id: `sha256:${"0".repeat(64)}`,
+        }
+      },
+    }, [evidenceEvent("E-ACK", "I1", 1, "mcq")]))
+      .rejects.toThrow("ROLE_C_B_ACK_ID_MISMATCH")
   })
 })
 
@@ -303,7 +571,62 @@ function evidenceEvent(eventId: string, itemId: string, score: number, modality:
     schema_version: "1.0", event_id: eventId, learner_id_hash: "learner", profile_version: "p", path_node_id: "path", objective_id: "O1", source_id: "K007",
     evidence: { modality, raw_score: score, evidence_score: score, grader_confidence: 1, hint_level: 0, attempt_no: 1 }, misconceptions: [],
     recommendation: { action: "reinforce", confidence: 0.7, reason_codes: ["fixture"] },
-    provenance: { artifact_id: "GRADE-ONE", item_id: itemId, grader_version: "g" },
+    provenance: {
+      artifact_id: "GRADE-ONE",
+      idempotency_key: `sha256:${"1".repeat(64)}`,
+      item_id: itemId,
+      grader_version: "g",
+    },
+  }
+}
+
+function masterySnapshot(objectiveId: string, revision: number): ObjectiveMasteryState {
+  const alpha = 1 + revision
+  const beta = 1
+  return {
+    schema_version: "1.0",
+    learner_id_hash: "learner",
+    profile_version: "p",
+    objective_id: objectiveId,
+    alpha,
+    beta,
+    mastery: Math.round((alpha / (alpha + beta)) * 1_000_000) / 1_000_000,
+    evidence_batches: revision,
+    observed_modalities: ["mcq"],
+    processed_artifact_ids: Array.from(
+      { length: revision },
+      (_, index) => `BATCH-${index + 1}`,
+    ),
+    last_action: "reinforce",
+    revision,
+  }
+}
+
+function profileDriftSuggestion(
+  learnerIdHash = "learner",
+  profileVersion = "p",
+): ProfileDriftSuggestion {
+  return {
+    schema_version: "1.0",
+    suggestion_id: "PDS-PROPERTY-1",
+    learner_id_hash: learnerIdHash,
+    profile_version: profileVersion,
+    conflicting_objective_ids: ["O1"],
+    reason_codes: ["repeated_profile_evidence_conflict"],
+    confidence: 0.9,
+    action: "reprofile",
+  }
+}
+
+function learningProgressAck(
+  delivery: Pick<RoleCLearningProgressDelivery, "delivery_kind" | "delivery_id">,
+  status: RoleCDeliveryAck["status"] = "accepted",
+): RoleCDeliveryAck {
+  return {
+    schema_version: "1.0",
+    delivery_kind: delivery.delivery_kind,
+    delivery_id: delivery.delivery_id,
+    status,
   }
 }
 
