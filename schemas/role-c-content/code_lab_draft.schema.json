@@ -326,7 +326,7 @@
         "execution_contract": { "$ref": "#/$defs/execution_contract" },
         "reference_solution": { "type": "string", "minLength": 1, "maxLength": 20000 },
         "hidden_tests": {
-          "type": "array", "minItems": 2,
+          "type": "array", "minItems": 2, "maxItems": 64,
           "items": { "$ref": "#/$defs/hidden_test" }
         },
         "scoring_groups": {

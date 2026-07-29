@@ -10,15 +10,16 @@ import {
   adaptLearnerProfile,
   adaptRagResult,
   AtomicFileSecureArtifactStore,
+  BunDockerCommandExecutor,
   buildCodeLabModelInput,
   buildGenerationSpec,
-  createOciPythonCodeRunnerFromEnv,
+  createDockerPythonCodeRunnerFromEnv,
   defineLearningPathNode,
   DeterministicCodeLabContentProvider,
+  DockerPythonCodeRunner,
   generateCodeLab,
   generateConceptLesson,
   ModelBackedRoleCContentProvider,
-  OciPythonCodeRunner,
   OpenCodeConceptContentProvider,
   PLATFORM_PYTHON_IMPORT_ALLOWLIST,
   ROLE_C_PROMPT_MANIFEST_VERSION,
@@ -29,11 +30,10 @@ import {
   validateRoleCSchema,
   type CodeExecutionRequest,
   type CodeExecutionResult,
-  type CodeLabDraft,
   type CodeLabRequest,
   type CodeRunner,
-  type ContainerCommandExecutor,
-  type ContainerCommandRequest,
+  type DockerCommandExecutor,
+  type DockerCommandRequest,
   type GenerationSpec,
   type ModelGateway,
   type RagEvidencePack,
@@ -114,6 +114,16 @@ describe("role C phase-two trusted code-lab", () => {
     expect(JSON.stringify(pair.public_artifact)).not.toContain("hidden_tests")
     expect(pair.secure_artifact.payload?.hidden_tests).toHaveLength(5)
     expect(pair.secure_artifact.payload?.mutation_variants).toHaveLength(4)
+  })
+
+  test("the mixed hidden case distinguishes a skipped final element", async () => {
+    const { request, provider } = await buildContext()
+    const draft = await provider.generateCodeLab(request)
+    const hidden = draft.secure_draft.payload.hidden_tests.find((entry) => entry.test_id === "HT-O2-MIXED")
+    expect(hidden).toBeDefined()
+    const scores = hidden!.input as number[]
+    const skippedLastAverage = scores.slice(0, -1).reduce((sum, score) => sum + score, 0) / (scores.length - 1)
+    expect(skippedLastAverage).not.toBe(hidden!.expected)
   })
 
   test("strictly rejects nested lab shape errors", async () => {
@@ -240,31 +250,14 @@ describe("role C phase-two trusted code-lab", () => {
     expect(pair.public_artifact.payload?.lab_id).toBe(draft.public_draft.payload.lab_id)
   })
 
-  test("stage-two demo publishes only the public lab and an opaque secure ref", async () => {
-    const child = Bun.spawn([process.execPath, "scripts/role-c-code-lab-demo.ts"], {
-      cwd: process.cwd(),
-      stdout: "pipe",
-      stderr: "pipe",
-    })
-    const stdout = await new Response(child.stdout).text()
-    const stderr = await new Response(child.stderr).text()
-    expect(await child.exited).toBe(0)
-    expect(stderr).toBe("")
-    const result = JSON.parse(stdout)
-    expect(result.status).toBe("code_lab_ready")
-    expect(result.runner_mode).toBe("contract_conformance_test_double")
-    expect(result.secure_refs).toHaveLength(1)
-    expect(JSON.stringify(result.code_lab_public)).not.toContain("reference_solution")
-    expect(JSON.stringify(result.code_lab_public)).not.toContain("hidden_tests")
-  })
 })
 
-describe("role C OCI runner boundary", () => {
-  test("uses a digest-pinned, no-network, read-only, non-root container request", async () => {
+describe("role C Docker runner boundary", () => {
+  test("uses an immutable, no-network, read-only, non-root Docker container request", async () => {
     const executor = new CapturingExecutor()
-    const runner = new OciPythonCodeRunner({
-      runtime_binary: "/usr/bin/docker",
-      image: `python@${RUNNER_DIGEST}`,
+    const runner = new DockerPythonCodeRunner({
+      docker_binary: "/usr/bin/docker",
+      image_id: RUNNER_DIGEST,
       executor,
     })
     const suite = minimalSuite()
@@ -276,25 +269,65 @@ describe("role C OCI runner boundary", () => {
     expect(args).toContain("--read-only")
     expect(args).toContain("ALL")
     expect(args).toContain("65534:65534")
+    expect(args).toContain("--pull=never")
     expect(args.some((entry) => entry.includes("sha256:"))).toBe(true)
-    expect(executor.requests[0].stdin).toContain("average_score")
-    expect(executor.requests[0].stdin).not.toContain(process.env.HOME ?? "unlikely-home")
+    const containerPayload = JSON.parse(executor.requests[0].stdin)
+    expect(containerPayload.code).toContain("average_score")
+    expect(containerPayload.test_inputs).toEqual([[1]])
+    expect(containerPayload).not.toHaveProperty("tests")
+    expect(JSON.stringify(containerPayload)).not.toContain(process.env.HOME ?? "unlikely-home")
   })
 
-  test("rejects mutable images, hidden defaults, and dangerous source before process launch", async () => {
-    expect(() => new OciPythonCodeRunner({ runtime_binary: "docker", image: "python:3.12" })).toThrow("sha256")
-    expect(() => createOciPythonCodeRunnerFromEnv({})).toThrow("ROLE_C_RUNNER_RUNTIME")
+  test("rejects mutable image IDs and dangerous source before Docker process launch", async () => {
+    expect(() => new DockerPythonCodeRunner({ docker_binary: "docker", image_id: "python:3.12" })).toThrow("sha256")
     const executor = new CapturingExecutor()
-    const runner = new OciPythonCodeRunner({ runtime_binary: "docker", image: `python@${RUNNER_DIGEST}`, executor })
+    const runner = new DockerPythonCodeRunner({ docker_binary: "docker", image_id: RUNNER_DIGEST, executor })
     const result = await runner.execute(executionRequest(minimalSuite(), "import os\ndef average_score(scores):\n    return 1"))
     expect(result.status).toBe("failed")
     expect(result.failure_codes).toContain("static:forbidden_import")
     expect(executor.requests).toHaveLength(0)
   })
 
+  test("keeps expected answers outside Docker and scores returned values on the host", async () => {
+    const executor = new CapturingExecutor(999)
+    const runner = new DockerPythonCodeRunner({
+      docker_binary: "docker",
+      image_id: RUNNER_DIGEST,
+      executor,
+    })
+    const result = await runner.execute(executionRequest(
+      minimalSuite(),
+      "def average_score(scores):\n    return 1",
+    ))
+    const payload = JSON.parse(executor.requests[0].stdin)
+    expect(payload).not.toHaveProperty("tests")
+    expect(payload.test_inputs).toEqual([[1]])
+    expect(result).toMatchObject({
+      status: "failed",
+      passed_tests: 0,
+      failure_codes: ["HT-1:assertion_failed"],
+    })
+  })
+
+  test("applies numeric tolerances after Docker returns the actual value", async () => {
+    const suite = minimalSuite()
+    suite.tests[0]!.expected = 1
+    suite.tests[0]!.comparison = { kind: "numeric", abs_tolerance: 0.01, rel_tolerance: 0 }
+    const accepted = new DockerPythonCodeRunner({
+      image_id: RUNNER_DIGEST,
+      executor: new CapturingExecutor(1.005),
+    })
+    const rejected = new DockerPythonCodeRunner({
+      image_id: RUNNER_DIGEST,
+      executor: new CapturingExecutor(1.02),
+    })
+    expect((await accepted.execute(executionRequest(suite, "def average_score(scores):\n    return 1"))).status).toBe("passed")
+    expect((await rejected.execute(executionRequest(suite, "def average_score(scores):\n    return 1"))).status).toBe("failed")
+  })
+
   test("intersects each lab import declaration with the platform Python allowlist", async () => {
     const executor = new CapturingExecutor()
-    const runner = new OciPythonCodeRunner({ runtime_binary: "docker", image: `python@${RUNNER_DIGEST}`, executor })
+    const runner = new DockerPythonCodeRunner({ docker_binary: "docker", image_id: RUNNER_DIGEST, executor })
 
     const unsupported = minimalSuite()
     unsupported.execution_contract.allowed_imports = ["random"]
@@ -312,6 +345,61 @@ describe("role C OCI runner boundary", () => {
     const schema = await Bun.file("schemas/role-c-content/code_lab_draft.schema.json").json()
     expect(schema.$defs.execution_contract.properties.allowed_imports.items.enum)
       .toEqual([...PLATFORM_PYTHON_IMPORT_ALLOWLIST])
+  })
+
+  test("resolves the dedicated Docker image to its immutable local image ID", async () => {
+    const executor = new ImageInspectionExecutor()
+    const runner = await createDockerPythonCodeRunnerFromEnv({}, { executor })
+    expect(runner.runner_image_digest).toBe(RUNNER_DIGEST)
+    expect(executor.requests[0]).toMatchObject({
+      command: "docker",
+      args: ["image", "inspect", "knowbalance-role-c-python-runner:1.0.0"],
+    })
+    await expect(createDockerPythonCodeRunnerFromEnv({}, {
+      executor: new ImageInspectionExecutor({}),
+    })).rejects.toThrow("缺少 io.knowbalance.role-c.runner=1")
+  })
+
+  test("bounds Docker CLI output while reading the process streams", async () => {
+    const executor = new BunDockerCommandExecutor()
+    const result = await executor.run({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('x'.repeat(10000))"],
+      stdin: "",
+      timeout_ms: 2_000,
+      max_output_bytes: 512,
+    })
+    expect(result.output_truncated).toBe(true)
+    expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(512)
+  })
+
+  test("keeps the known test count when Docker reports an infrastructure error", async () => {
+    const runner = new DockerPythonCodeRunner({
+      image_id: RUNNER_DIGEST,
+      executor: {
+        async run() {
+          return {
+            exit_code: 125,
+            stdout: "",
+            stderr: "container startup failed",
+            timed_out: false,
+            output_truncated: false,
+          }
+        },
+      },
+    })
+    const suite = minimalSuite()
+    const result = await runner.execute(executionRequest(
+      suite,
+      "def average_score(scores):\n    return 1",
+    ))
+    expect(result).toMatchObject({
+      status: "runner_error",
+      total_tests: suite.tests.length,
+      passed_tests: 0,
+      score_ratio: 0,
+      failure_codes: ["docker_container_failed"],
+    })
   })
 })
 
@@ -469,20 +557,42 @@ class SequenceGateway implements ModelGateway {
   }
 }
 
-class CapturingExecutor implements ContainerCommandExecutor {
-  readonly requests: ContainerCommandRequest[] = []
+class CapturingExecutor implements DockerCommandExecutor {
+  readonly requests: DockerCommandRequest[] = []
 
-  async run(request: ContainerCommandRequest) {
+  constructor(private readonly actual: unknown = 1) {}
+
+  async run(request: DockerCommandRequest) {
     this.requests.push(request)
+    const payload = JSON.parse(request.stdin)
     return {
       exit_code: 0,
       stdout: JSON.stringify({
-        status: "passed",
-        passed_tests: 1,
-        total_tests: 1,
-        score_ratio: 1,
-        failure_codes: [],
+        status: "completed",
+        results: payload.test_inputs.map(() => ({ outcome: "returned", actual: this.actual })),
       }),
+      stderr: "",
+      timed_out: false,
+      output_truncated: false,
+    }
+  }
+}
+
+class ImageInspectionExecutor implements DockerCommandExecutor {
+  readonly requests: DockerCommandRequest[] = []
+
+  constructor(
+    private readonly labels: Record<string, string> = { "io.knowbalance.role-c.runner": "1" },
+  ) {}
+
+  async run(request: DockerCommandRequest) {
+    this.requests.push(request)
+    return {
+      exit_code: 0,
+      stdout: JSON.stringify([{
+        Id: RUNNER_DIGEST,
+        Config: { Labels: this.labels },
+      }]),
       stderr: "",
       timed_out: false,
       output_truncated: false,

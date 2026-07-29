@@ -1,5 +1,6 @@
 export * from "./artifacts"
 export * from "./common"
+export * from "./dynamic-feedback"
 export * from "./evidence-pack"
 export * from "./external-api"
 export * from "./generation-spec"

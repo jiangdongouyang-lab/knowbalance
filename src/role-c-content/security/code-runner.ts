@@ -1,5 +1,14 @@
+import { randomUUID } from "node:crypto"
+import { isDeepStrictEqual } from "node:util"
 import type { ExecutionContract, HiddenTest } from "../contracts/artifacts"
 import { analyzePythonSource, PLATFORM_PYTHON_IMPORT_ALLOWLIST } from "./python-static-analyzer"
+
+export const DEFAULT_ROLE_C_DOCKER_IMAGE = "knowbalance-role-c-python-runner:1.0.0"
+export const ROLE_C_DOCKER_RUNNER_LABEL = "io.knowbalance.role-c.runner"
+
+const IMAGE_ID_PATTERN = /^sha256:[a-f0-9]{64}$/
+const MAX_RUNNER_PAYLOAD_BYTES = 512_000
+const MAX_HIDDEN_TESTS = 64
 
 export interface RunnerTestSuite {
   test_suite_id: string
@@ -31,7 +40,7 @@ export interface CodeTestSuiteResolver {
   resolve(testSuiteId: string): Promise<RunnerTestSuite | undefined>
 }
 
-/** Must be backed by a separate no-network container/VM. Never implement with Node vm or host Python. */
+/** Production implementations must execute untrusted code in an isolated Docker container. */
 export interface CodeRunner {
   readonly runner_image_digest: string
   execute(request: CodeExecutionRequest): Promise<CodeExecutionResult>
@@ -54,22 +63,51 @@ export async function executeWithRunnerRetry(
   return { ...last!, tool_attempts: retries + 1 }
 }
 
+/**
+ * Trusted reference programs are generated backend fixtures, so a container
+ * startup timeout is ambiguous infrastructure failure. Retry timeout/runner
+ * errors only on this trust-plane path; learner timeouts remain final.
+ */
+export async function executeTrustedReferenceWithRetry(
+  runner: CodeRunner,
+  request: CodeExecutionRequest,
+  maxToolRetries: number,
+): Promise<CodeExecutionResult & { tool_attempts: number }> {
+  const retries = Number.isFinite(maxToolRetries)
+    ? Math.max(0, Math.min(2, Math.trunc(maxToolRetries)))
+    : 0
+  let last: CodeExecutionResult | undefined
+  for (let attempt = 1; attempt <= retries + 1; attempt += 1) {
+    last = await runner.execute(request)
+    if (last.status !== "runner_error" && last.status !== "timeout") {
+      return { ...last, tool_attempts: attempt }
+    }
+  }
+  return { ...last!, tool_attempts: retries + 1 }
+}
+
 export class CodeRunnerUnavailableError extends Error {
-  constructor(message = "未配置隔离 CodeRunner，暂时无法对学习者代码给出可信判分") {
+  constructor(message = "Docker CodeRunner 不可用，暂时无法对学习者代码给出可信判分") {
     super(message)
     this.name = "CodeRunnerUnavailableError"
   }
 }
 
-export interface ContainerCommandRequest {
+export interface DockerCleanupCommand {
+  command: string
+  args: string[]
+}
+
+export interface DockerCommandRequest {
   command: string
   args: string[]
   stdin: string
   timeout_ms: number
   max_output_bytes: number
+  cleanup?: DockerCleanupCommand
 }
 
-export interface ContainerCommandResult {
+export interface DockerCommandResult {
   exit_code: number | null
   stdout: string
   stderr: string
@@ -77,70 +115,101 @@ export interface ContainerCommandResult {
   output_truncated: boolean
 }
 
-/** Injectable process boundary: tests inspect it without executing learner code. */
-export interface ContainerCommandExecutor {
-  run(request: ContainerCommandRequest): Promise<ContainerCommandResult>
+/** Injectable Docker CLI process boundary; unit tests inspect it without executing learner code. */
+export interface DockerCommandExecutor {
+  run(request: DockerCommandRequest): Promise<DockerCommandResult>
 }
 
-export interface OciPythonCodeRunnerOptions {
-  runtime_binary: string
-  image: string
-  executor?: ContainerCommandExecutor
+export interface DockerPythonCodeRunnerOptions {
+  docker_binary?: string
+  image_id: string
+  executor?: DockerCommandExecutor
   test_suite_resolver?: CodeTestSuiteResolver
   cpu_limit?: number
   pids_limit?: number
   tmpfs_mb?: number
 }
 
-export function createOciPythonCodeRunnerFromEnv(
+export async function createDockerPythonCodeRunnerFromEnv(
   env: Record<string, string | undefined> = process.env,
-  overrides: Pick<OciPythonCodeRunnerOptions, "executor" | "test_suite_resolver"> = {},
-): OciPythonCodeRunner {
-  const runtime = env.ROLE_C_RUNNER_RUNTIME
-  const image = env.ROLE_C_RUNNER_IMAGE
-  if (!runtime || !image) {
-    throw new CodeRunnerUnavailableError("Runner 配置缺失：需要 ROLE_C_RUNNER_RUNTIME 和 digest-pinned ROLE_C_RUNNER_IMAGE")
+  overrides: Pick<DockerPythonCodeRunnerOptions, "executor" | "test_suite_resolver"> = {},
+): Promise<DockerPythonCodeRunner> {
+  const dockerBinary = env.ROLE_C_DOCKER_BINARY?.trim() || "docker"
+  validateDockerBinary(dockerBinary)
+  const configuredImage = env.ROLE_C_DOCKER_IMAGE?.trim() || DEFAULT_ROLE_C_DOCKER_IMAGE
+  const executor = overrides.executor ?? new BunDockerCommandExecutor()
+  const inspection = await executor.run({
+    command: dockerBinary,
+    args: ["image", "inspect", configuredImage],
+    stdin: "",
+    timeout_ms: 10_000,
+    max_output_bytes: 256_000,
+  })
+  if (inspection.timed_out || inspection.exit_code !== 0 || inspection.output_truncated) {
+    const detail = compactDiagnostic(inspection.stderr)
+    throw new CodeRunnerUnavailableError(
+      `Docker runner 镜像不可用：${configuredImage}。请先运行 bun run docker:role-c:build${detail ? `（${detail}）` : ""}`,
+    )
   }
-  return new OciPythonCodeRunner({
-    runtime_binary: runtime,
-    image,
-    cpu_limit: optionalPositiveNumber(env.ROLE_C_RUNNER_CPUS, 0.5),
-    pids_limit: optionalPositiveInteger(env.ROLE_C_RUNNER_PIDS, 32),
-    tmpfs_mb: optionalPositiveInteger(env.ROLE_C_RUNNER_TMPFS_MB, 16),
-    ...overrides,
+  const image = parseRunnerImageInspection(inspection.stdout)
+  if (image.label !== "1") {
+    throw new CodeRunnerUnavailableError(
+      `Docker 镜像 ${configuredImage} 缺少 ${ROLE_C_DOCKER_RUNNER_LABEL}=1 标签`,
+    )
+  }
+  return new DockerPythonCodeRunner({
+    docker_binary: dockerBinary,
+    image_id: image.id,
+    executor,
+    test_suite_resolver: overrides.test_suite_resolver,
+    cpu_limit: optionalBoundedNumber(env.ROLE_C_DOCKER_CPUS, 0.5, 0.1, 4, "ROLE_C_DOCKER_CPUS"),
+    pids_limit: optionalBoundedInteger(env.ROLE_C_DOCKER_PIDS, 32, 8, 128, "ROLE_C_DOCKER_PIDS"),
+    tmpfs_mb: optionalBoundedInteger(env.ROLE_C_DOCKER_TMPFS_MB, 16, 4, 256, "ROLE_C_DOCKER_TMPFS_MB"),
   })
 }
 
 /**
- * Runs Python only inside a digest-pinned OCI image. The container has no network,
- * no capabilities, a read-only root, a non-root user, bounded CPU/memory/PIDs/output,
- * and receives no project mount or host secret.
+ * Executes Python only in the dedicated Role C Docker image, addressed by immutable image ID.
+ * Every run is networkless, read-only, non-root, capability-free and resource bounded.
  */
-export class OciPythonCodeRunner implements CodeRunner {
+export class DockerPythonCodeRunner implements CodeRunner {
   readonly runner_image_digest: string
-  private readonly executor: ContainerCommandExecutor
+  private readonly executor: DockerCommandExecutor
+  private readonly dockerBinary: string
+  private readonly cpuLimit: number
+  private readonly pidsLimit: number
+  private readonly tmpfsMb: number
 
-  constructor(private readonly options: OciPythonCodeRunnerOptions) {
-    if (!options.runtime_binary.trim()) throw new CodeRunnerUnavailableError("OCI runtime_binary 不能为空")
-    const digest = options.image.match(/@((?:sha256):[a-f0-9]{64})$/)?.[1]
-    if (!digest) {
-      throw new CodeRunnerUnavailableError("Runner image 必须固定为 image@sha256:<64 hex>，不能使用可变 tag")
+  constructor(private readonly options: DockerPythonCodeRunnerOptions) {
+    this.dockerBinary = options.docker_binary?.trim() || "docker"
+    validateDockerBinary(this.dockerBinary)
+    if (!IMAGE_ID_PATTERN.test(options.image_id)) {
+      throw new CodeRunnerUnavailableError("Docker runner image_id 必须为不可变的 sha256:<64 hex>")
     }
-    this.runner_image_digest = digest
-    this.executor = options.executor ?? new BunContainerCommandExecutor()
+    this.runner_image_digest = options.image_id
+    this.cpuLimit = boundedNumber(options.cpu_limit ?? 0.5, 0.1, 4, "cpu_limit")
+    this.pidsLimit = boundedInteger(options.pids_limit ?? 32, 8, 128, "pids_limit")
+    this.tmpfsMb = boundedInteger(options.tmpfs_mb ?? 16, 4, 256, "tmpfs_mb")
+    this.executor = options.executor ?? new BunDockerCommandExecutor()
   }
 
   async execute(request: CodeExecutionRequest): Promise<CodeExecutionResult> {
+    const requestedTestCount = request.test_suite?.tests.length ?? 0
     if (request.language !== "python" || request.network_allowed !== false) {
-      return runnerError(this.runner_image_digest, "invalid_runner_policy")
+      return runnerError(this.runner_image_digest, "invalid_runner_policy", requestedTestCount)
     }
     const suite = request.test_suite ?? await this.options.test_suite_resolver?.resolve(request.test_suite_id)
     if (!suite || suite.test_suite_id !== request.test_suite_id) {
-      return runnerError(this.runner_image_digest, "test_suite_unavailable")
+      return runnerError(this.runner_image_digest, "test_suite_unavailable", requestedTestCount)
     }
+    const totalTests = suite.tests.length
     if (suite.execution_contract.language !== "python") {
-      return runnerError(this.runner_image_digest, "unsupported_language")
+      return runnerError(this.runner_image_digest, "unsupported_language", totalTests)
     }
+    if (suite.tests.length < 1 || suite.tests.length > MAX_HIDDEN_TESTS) {
+      return runnerError(this.runner_image_digest, "invalid_test_count", totalTests)
+    }
+
     const staticIssues = analyzePythonSource(request.code, suite.execution_contract)
     if (staticIssues.length > 0) {
       return {
@@ -152,50 +221,61 @@ export class OciPythonCodeRunner implements CodeRunner {
         runner_image_digest: this.runner_image_digest,
       }
     }
+
     const timeoutMs = Math.min(request.timeout_ms, suite.execution_contract.resource_limits.timeout_ms)
     const memoryMb = Math.min(request.memory_mb, suite.execution_contract.resource_limits.memory_mb)
     const maxOutputBytes = Math.min(request.max_output_bytes, suite.execution_contract.resource_limits.max_output_bytes)
-    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 100 || !Number.isSafeInteger(memoryMb) || memoryMb < 32) {
-      return runnerError(this.runner_image_digest, "invalid_resource_limits")
+    if (!boundedResourceLimits(timeoutMs, memoryMb, maxOutputBytes)) {
+      return runnerError(this.runner_image_digest, "invalid_resource_limits", totalTests)
     }
+
+    const payload = JSON.stringify({
+      code: request.code,
+      execution_contract: suite.execution_contract,
+      test_inputs: suite.tests.map((test) => test.input),
+      max_output_bytes: maxOutputBytes,
+      platform_allowed_imports: PLATFORM_PYTHON_IMPORT_ALLOWLIST,
+    })
+    if (Buffer.byteLength(payload, "utf8") > MAX_RUNNER_PAYLOAD_BYTES) {
+      return runnerError(this.runner_image_digest, "runner_payload_too_large", totalTests)
+    }
+
     const cpuSeconds = Math.max(1, Math.ceil(timeoutMs / 1000))
+    const containerName = `role-c-python-${randomUUID()}`
     const args = [
       "run",
       "--rm",
       "--interactive",
+      "--name", containerName,
+      "--pull=never",
       "--network", "none",
       "--read-only",
       "--cap-drop", "ALL",
       "--security-opt", "no-new-privileges",
-      "--pids-limit", String(this.options.pids_limit ?? 32),
+      "--pids-limit", String(this.pidsLimit),
       "--memory", `${memoryMb}m`,
       "--memory-swap", `${memoryMb}m`,
-      "--cpus", String(this.options.cpu_limit ?? 0.5),
+      "--cpus", String(this.cpuLimit),
       "--ulimit", `cpu=${cpuSeconds}:${cpuSeconds}`,
       "--ulimit", "nofile=64:64",
-      "--tmpfs", `/tmp:rw,noexec,nosuid,nodev,size=${this.options.tmpfs_mb ?? 16}m`,
+      "--tmpfs", `/tmp:rw,noexec,nosuid,nodev,size=${this.tmpfsMb}m`,
       "--user", "65534:65534",
       "--workdir", "/tmp",
-      "--env", "PYTHONDONTWRITEBYTECODE=1",
-      "--env", "PYTHONHASHSEED=0",
-      this.options.image,
-      "python",
-      "-I",
-      "-S",
-      "-c",
-      PYTHON_TEST_HARNESS,
+      this.options.image_id,
     ]
     const result = await this.executor.run({
-      command: this.options.runtime_binary,
+      command: this.dockerBinary,
       args,
-      stdin: JSON.stringify({
-        code: request.code,
-        execution_contract: suite.execution_contract,
-        tests: suite.tests,
-        max_output_bytes: maxOutputBytes,
-      }),
+      stdin: payload,
       timeout_ms: timeoutMs + 1_000,
-      max_output_bytes: 64_000,
+      max_output_bytes: Math.min(
+        MAX_RUNNER_PAYLOAD_BYTES,
+        Math.max(64_000, maxOutputBytes + 16_000),
+      ),
+      cleanup: {
+        command: this.dockerBinary,
+        args: ["rm", "--force", containerName],
+      },
     })
     if (result.timed_out) {
       return {
@@ -218,238 +298,324 @@ export class OciPythonCodeRunner implements CodeRunner {
           runner_image_digest: this.runner_image_digest,
         }
       }
-      return runnerError(this.runner_image_digest, result.output_truncated ? "runner_output_truncated" : "container_failed")
+      return runnerError(
+        this.runner_image_digest,
+        result.output_truncated ? "runner_output_truncated" : "docker_container_failed",
+        totalTests,
+      )
     }
     try {
-      const parsed = JSON.parse(result.stdout.trim()) as Partial<CodeExecutionResult>
-      if (!isRunnerPayload(parsed, suite.tests.length)) {
-        return runnerError(this.runner_image_digest, "invalid_runner_response")
+      const parsed = JSON.parse(result.stdout.trim()) as unknown
+      if (!isDockerHarnessResponse(parsed, suite.tests.length)) {
+        return runnerError(this.runner_image_digest, "invalid_runner_response", totalTests)
       }
-      return { ...parsed, runner_image_digest: this.runner_image_digest } as CodeExecutionResult
+      return evaluateHarnessResults(parsed.results, suite.tests, this.runner_image_digest)
     } catch {
-      return runnerError(this.runner_image_digest, "invalid_runner_json")
+      return runnerError(this.runner_image_digest, "invalid_runner_json", totalTests)
     }
   }
 }
 
-export class BunContainerCommandExecutor implements ContainerCommandExecutor {
-  async run(request: ContainerCommandRequest): Promise<ContainerCommandResult> {
+export class BunDockerCommandExecutor implements DockerCommandExecutor {
+  async run(request: DockerCommandRequest): Promise<DockerCommandResult> {
     let processHandle: ReturnType<typeof Bun.spawn>
     try {
       processHandle = Bun.spawn([request.command, ...request.args], {
         stdin: "pipe",
         stdout: "pipe",
         stderr: "pipe",
-        env: { PATH: process.env.PATH ?? "" },
+        env: dockerCliEnvironment(),
       })
     } catch (error) {
       return {
         exit_code: null,
         stdout: "",
-        stderr: error instanceof Error ? error.message : "container runtime unavailable",
+        stderr: error instanceof Error ? error.message : "docker command unavailable",
         timed_out: false,
         output_truncated: false,
       }
     }
+
     const stdin = processHandle.stdin
     const stdoutStream = processHandle.stdout
     const stderrStream = processHandle.stderr
     if (!stdin || typeof stdin === "number" || !stdoutStream || typeof stdoutStream === "number" || !stderrStream || typeof stderrStream === "number") {
       processHandle.kill()
+      await this.cleanup(request.cleanup)
       return {
         exit_code: null,
         stdout: "",
-        stderr: "container runtime pipes unavailable",
+        stderr: "docker command pipes unavailable",
         timed_out: false,
         output_truncated: false,
       }
     }
+
     stdin.write(request.stdin)
     stdin.end()
     let timedOut = false
+    let outputTruncated = false
+    let termination: Promise<void> | undefined
+    const terminate = (): Promise<void> => {
+      if (termination) return termination
+      try {
+        processHandle.kill()
+      } catch {
+        // Process already exited.
+      }
+      termination = this.cleanup(request.cleanup)
+      return termination
+    }
     const timer = setTimeout(() => {
       timedOut = true
-      processHandle.kill()
+      void terminate()
     }, request.timeout_ms)
+    const budget = { remaining: request.max_output_bytes }
+    const onLimit = () => {
+      outputTruncated = true
+      void terminate()
+    }
     const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(stdoutStream).text(),
-      new Response(stderrStream).text(),
+      readStreamWithSharedLimit(stdoutStream, budget, onLimit),
+      readStreamWithSharedLimit(stderrStream, budget, onLimit),
       processHandle.exited,
     ])
     clearTimeout(timer)
-    const stdoutBytes = Buffer.byteLength(stdout)
-    const stderrBytes = Buffer.byteLength(stderr)
-    const outputTruncated = stdoutBytes + stderrBytes > request.max_output_bytes
+    if (termination) await termination
     return {
       exit_code: exitCode,
-      stdout: outputTruncated ? stdout.slice(0, request.max_output_bytes) : stdout,
-      stderr: outputTruncated ? stderr.slice(0, request.max_output_bytes) : stderr,
+      stdout,
+      stderr,
       timed_out: timedOut,
       output_truncated: outputTruncated,
     }
   }
+
+  private async cleanup(command: DockerCleanupCommand | undefined): Promise<void> {
+    if (!command) return
+    let cleanupHandle: ReturnType<typeof Bun.spawn>
+    try {
+      cleanupHandle = Bun.spawn([command.command, ...command.args], {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+        env: dockerCliEnvironment(),
+      })
+    } catch {
+      return
+    }
+    const timer = setTimeout(() => {
+      try {
+        cleanupHandle.kill()
+      } catch {
+        // Cleanup already exited.
+      }
+    }, 3_000)
+    await cleanupHandle.exited
+    clearTimeout(timer)
+  }
 }
 
-function isRunnerPayload(value: Partial<CodeExecutionResult>, expectedTests: number): boolean {
-  const shapeOk = ["passed", "failed", "timeout", "runner_error"].includes(String(value.status)) &&
-    Number.isSafeInteger(value.passed_tests) &&
-    value.total_tests === expectedTests &&
-    typeof value.score_ratio === "number" &&
-    value.score_ratio >= 0 && value.score_ratio <= 1 &&
-    Array.isArray(value.failure_codes) && value.failure_codes.every((entry) => typeof entry === "string")
-  if (!shapeOk) return false
-  if (value.status === "passed") return value.passed_tests === expectedTests && value.score_ratio === 1 && value.failure_codes!.length === 0
-  if (value.status === "failed") return value.passed_tests! < expectedTests && value.score_ratio! < 1 && value.failure_codes!.length > 0
-  if (value.status === "timeout") return value.score_ratio === 0 && value.failure_codes!.length > 0
-  return false
+async function readStreamWithSharedLimit(
+  stream: ReadableStream<Uint8Array>,
+  budget: { remaining: number },
+  onLimit: () => void,
+): Promise<string> {
+  const reader = stream.getReader()
+  const decoder = new TextDecoder()
+  let text = ""
+  while (true) {
+    const { value, done } = await reader.read()
+    if (done) break
+    if (!value) continue
+    const accepted = Math.min(value.byteLength, Math.max(0, budget.remaining))
+    if (accepted > 0) {
+      budget.remaining -= accepted
+      text += decoder.decode(value.subarray(0, accepted), { stream: true })
+    }
+    if (accepted < value.byteLength) {
+      onLimit()
+      break
+    }
+  }
+  text += decoder.decode()
+  return text
 }
 
-function runnerError(digest: string, code: string): CodeExecutionResult {
+function parseRunnerImageInspection(raw: string): { id: string; label?: string } {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(raw)
+  } catch {
+    throw new CodeRunnerUnavailableError("Docker image inspect 返回了无效 JSON")
+  }
+  const image = Array.isArray(parsed) ? parsed[0] : undefined
+  if (!image || typeof image !== "object") {
+    throw new CodeRunnerUnavailableError("Docker image inspect 未返回镜像信息")
+  }
+  const record = image as {
+    Id?: unknown
+    Config?: { Labels?: Record<string, unknown> | null }
+  }
+  if (typeof record.Id !== "string" || !IMAGE_ID_PATTERN.test(record.Id)) {
+    throw new CodeRunnerUnavailableError("Docker image inspect 未返回有效的不可变 image ID")
+  }
+  const label = record.Config?.Labels?.[ROLE_C_DOCKER_RUNNER_LABEL]
+  return { id: record.Id, label: typeof label === "string" ? label : undefined }
+}
+
+interface DockerHarnessResult {
+  outcome: "returned" | "static_policy" | "syntax_error" | "output_limit" | "non_json_output" | "runtime_error"
+  actual?: unknown
+  error_type?: string
+}
+
+interface DockerHarnessResponse {
+  status: "completed"
+  results: DockerHarnessResult[]
+}
+
+function isDockerHarnessResponse(value: unknown, expectedTests: number): value is DockerHarnessResponse {
+  if (!value || typeof value !== "object") return false
+  const response = value as Partial<DockerHarnessResponse>
+  if (response.status !== "completed" || !Array.isArray(response.results) || response.results.length !== expectedTests) {
+    return false
+  }
+  const outcomes = new Set<DockerHarnessResult["outcome"]>([
+    "returned",
+    "static_policy",
+    "syntax_error",
+    "output_limit",
+    "non_json_output",
+    "runtime_error",
+  ])
+  return response.results.every((entry) => {
+    if (!entry || typeof entry !== "object") return false
+    const result = entry as Partial<DockerHarnessResult>
+    if (!outcomes.has(result.outcome as DockerHarnessResult["outcome"])) return false
+    if (result.outcome === "returned") return Object.hasOwn(result, "actual")
+    if (result.outcome === "runtime_error") {
+      return typeof result.error_type === "string" && /^[A-Za-z][A-Za-z0-9_]{0,80}$/.test(result.error_type)
+    }
+    return true
+  })
+}
+
+function evaluateHarnessResults(
+  results: DockerHarnessResult[],
+  tests: HiddenTest[],
+  imageDigest: string,
+): CodeExecutionResult {
+  let passedTests = 0
+  let passedWeight = 0
+  const totalWeight = tests.reduce((sum, test) => sum + test.weight, 0)
+  const failureCodes: string[] = []
+  for (const [index, test] of tests.entries()) {
+    const result = results[index]!
+    if (result.outcome === "returned" && matchesExpected(result.actual, test.expected, test.comparison)) {
+      passedTests += 1
+      passedWeight += test.weight
+      continue
+    }
+    const reason = result.outcome === "returned"
+      ? "assertion_failed"
+      : result.outcome === "runtime_error"
+        ? `runtime_${result.error_type}`
+        : result.outcome
+    failureCodes.push(`${test.test_id}:${reason}`)
+  }
+  const scoreRatio = totalWeight <= 0 ? 0 : Math.max(0, Math.min(1, passedWeight / totalWeight))
+  return {
+    status: passedTests === tests.length ? "passed" : "failed",
+    passed_tests: passedTests,
+    total_tests: tests.length,
+    score_ratio: scoreRatio,
+    failure_codes: failureCodes,
+    runner_image_digest: imageDigest,
+  }
+}
+
+function matchesExpected(actual: unknown, expected: unknown, comparison: HiddenTest["comparison"]): boolean {
+  if (comparison.kind === "numeric") {
+    if (typeof actual !== "number" || typeof expected !== "number") return false
+    if (!Number.isFinite(actual) || !Number.isFinite(expected)) return false
+    const tolerance = Math.max(
+      comparison.abs_tolerance,
+      Math.abs(expected) * comparison.rel_tolerance,
+    )
+    return Math.abs(actual - expected) <= tolerance
+  }
+  return isDeepStrictEqual(actual, expected)
+}
+
+function runnerError(digest: string, code: string, totalTests = 0): CodeExecutionResult {
   return {
     status: "runner_error",
     passed_tests: 0,
-    total_tests: 0,
+    total_tests: totalTests,
     score_ratio: 0,
     failure_codes: [code],
     runner_image_digest: digest,
   }
 }
 
-function optionalPositiveNumber(value: string | undefined, fallback: number): number {
-  if (value === undefined) return fallback
-  const parsed = Number(value)
-  if (!Number.isFinite(parsed) || parsed <= 0) throw new CodeRunnerUnavailableError("Runner 数值配置必须大于 0")
+function boundedResourceLimits(timeoutMs: number, memoryMb: number, maxOutputBytes: number): boolean {
+  return Number.isSafeInteger(timeoutMs) && timeoutMs >= 100 && timeoutMs <= 5_000 &&
+    Number.isSafeInteger(memoryMb) && memoryMb >= 32 && memoryMb <= 512 &&
+    Number.isSafeInteger(maxOutputBytes) && maxOutputBytes >= 256 && maxOutputBytes <= 100_000
+}
+
+function optionalBoundedNumber(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  if (value === undefined || value.trim() === "") return fallback
+  return boundedNumber(Number(value), minimum, maximum, name)
+}
+
+function optionalBoundedInteger(
+  value: string | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number,
+  name: string,
+): number {
+  if (value === undefined || value.trim() === "") return fallback
+  return boundedInteger(Number(value), minimum, maximum, name)
+}
+
+function boundedNumber(value: number, minimum: number, maximum: number, name: string): number {
+  if (!Number.isFinite(value) || value < minimum || value > maximum) {
+    throw new CodeRunnerUnavailableError(`${name} 必须在 ${minimum} 到 ${maximum} 之间`)
+  }
+  return value
+}
+
+function boundedInteger(value: number, minimum: number, maximum: number, name: string): number {
+  const parsed = boundedNumber(value, minimum, maximum, name)
+  if (!Number.isSafeInteger(parsed)) throw new CodeRunnerUnavailableError(`${name} 必须为整数`)
   return parsed
 }
 
-function optionalPositiveInteger(value: string | undefined, fallback: number): number {
-  const parsed = optionalPositiveNumber(value, fallback)
-  if (!Number.isSafeInteger(parsed)) throw new CodeRunnerUnavailableError("Runner 整数配置必须为正整数")
-  return parsed
+function validateDockerBinary(value: string): void {
+  const binary = value.split("/").at(-1)
+  if (binary !== "docker") {
+    throw new CodeRunnerUnavailableError("ROLE_C_DOCKER_BINARY 必须指向 docker 命令")
+  }
 }
 
-const PYTHON_TEST_HARNESS = String.raw`
-import contextlib
-import ast
-import io
-import json
-import math
-import sys
+function dockerCliEnvironment(): Record<string, string> {
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "" }
+  for (const name of ["HOME", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_HOST", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH"] as const) {
+    const value = process.env[name]
+    if (value !== undefined) env[name] = value
+  }
+  return env
+}
 
-payload = json.loads(sys.stdin.read())
-code = payload["code"]
-contract = payload["execution_contract"]
-tests = payload["tests"]
-limit = int(payload["max_output_bytes"])
-
-class OutputLimitExceeded(Exception):
-    pass
-
-class LimitedWriter(io.TextIOBase):
-    def __init__(self, byte_limit):
-        self.byte_limit = byte_limit
-        self.byte_count = 0
-        self.parts = []
-    def write(self, value):
-        encoded = str(value).encode("utf-8")
-        self.byte_count += len(encoded)
-        if self.byte_count > self.byte_limit:
-            raise OutputLimitExceeded()
-        self.parts.append(str(value))
-        return len(value)
-    def getvalue(self):
-        return "".join(self.parts)
-
-def matches(actual, expected, comparison):
-    if comparison["kind"] == "numeric":
-        if isinstance(actual, bool) or not isinstance(actual, (int, float)):
-            return False
-        if isinstance(expected, bool) or not isinstance(expected, (int, float)):
-            return False
-        tolerance = max(
-            float(comparison["abs_tolerance"]),
-            abs(float(expected)) * float(comparison["rel_tolerance"]),
-        )
-        return math.isfinite(float(actual)) and abs(float(actual) - float(expected)) <= tolerance
-    return actual == expected
-
-compiled = None
-compile_error = False
-policy_error = False
-try:
-    tree = ast.parse(code, "submission.py", "exec")
-    platform_allowed = set(${JSON.stringify(PLATFORM_PYTHON_IMPORT_ALLOWLIST)})
-    allowed = {name.split(".")[0] for name in contract.get("allowed_imports", [])} & platform_allowed
-    never_allowed = {"builtins", "ctypes", "importlib", "inspect", "marshal", "multiprocessing", "os", "pathlib", "pickle", "resource", "shutil", "signal", "socket", "subprocess", "sys", "threading"}
-    blocked_calls = {"eval", "exec", "compile", "open", "breakpoint", "__import__", "globals", "locals", "vars", "getattr", "setattr", "delattr", "memoryview"}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            roots = {alias.name.split(".")[0] for alias in node.names}
-            if any(root in never_allowed or root not in allowed for root in roots):
-                policy_error = True
-        if isinstance(node, ast.ImportFrom):
-            root = (node.module or "").split(".")[0]
-            if root in never_allowed or root not in allowed:
-                policy_error = True
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in blocked_calls:
-            policy_error = True
-        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
-            policy_error = True
-    compiled = compile(tree, "submission.py", "exec")
-except BaseException:
-    compile_error = True
-
-passed = 0
-passed_weight = 0.0
-total_weight = sum(float(test["weight"]) for test in tests)
-failures = []
-
-for test in tests:
-    test_id = test["test_id"]
-    if policy_error:
-        failures.append(test_id + ":static_policy")
-        continue
-    if compile_error:
-        failures.append(test_id + ":syntax_error")
-        continue
-    writer = LimitedWriter(limit)
-    namespace = {"__name__": "__submission__"}
-    try:
-        with contextlib.redirect_stdout(writer), contextlib.redirect_stderr(writer):
-            if contract["execution_mode"] == "function":
-                exec(compiled, namespace, namespace)
-                fn = namespace.get(contract.get("entry_point"))
-                if not callable(fn):
-                    raise LookupError("entry_point_missing")
-                test_input = test.get("input")
-                if isinstance(test_input, dict) and "args" in test_input:
-                    actual = fn(*test_input.get("args", []), **test_input.get("kwargs", {}))
-                else:
-                    actual = fn(test_input)
-            else:
-                old_stdin = sys.stdin
-                sys.stdin = io.StringIO(str(test.get("input", "")))
-                try:
-                    exec(compiled, namespace, namespace)
-                finally:
-                    sys.stdin = old_stdin
-                actual = writer.getvalue()
-        if matches(actual, test.get("expected"), test["comparison"]):
-            passed += 1
-            passed_weight += float(test["weight"])
-        else:
-            failures.append(test_id + ":assertion_failed")
-    except OutputLimitExceeded:
-        failures.append(test_id + ":output_limit")
-    except BaseException as error:
-        failures.append(test_id + ":runtime_" + type(error).__name__)
-
-ratio = 0.0 if total_weight <= 0 else passed_weight / total_weight
-print(json.dumps({
-    "status": "passed" if passed == len(tests) else "failed",
-    "passed_tests": passed,
-    "total_tests": len(tests),
-    "score_ratio": max(0.0, min(1.0, ratio)),
-    "failure_codes": failures,
-}))
-`
+function compactDiagnostic(value: string): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, 240)
+}

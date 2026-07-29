@@ -12,7 +12,11 @@ import type { AgentTraceEvent } from "../contracts/learning-evidence-event"
 import { newTraceEvent } from "../contracts/learning-evidence-event"
 import type { GenerationSpec } from "../contracts/generation-spec"
 import type { FactAuditPacket, FactAuditPort, RagEvidencePack } from "../contracts/evidence-pack"
-import type { RoleCAgents } from "../agents/types"
+import type {
+  NextRoundGenerationContext,
+  RoleCAgents,
+  TieredEvaluatorRequest,
+} from "../agents/types"
 import {
   reportFromObjections,
   validateCrossArtifactAlignment,
@@ -31,6 +35,8 @@ import { validatePublicArtifactNoSecrets } from "../validators/public-secure-lea
 export interface CPipelineInput {
   generation_spec: GenerationSpec
   evidence_pack: RagEvidencePack
+  /** Frozen trigger and focus shared by all three Agents in a follow-up round. */
+  next_round_context?: NextRoundGenerationContext
 }
 
 export interface CPipelineResult {
@@ -60,6 +66,10 @@ export interface CPipelineOptions {
   trace_seq_start?: number
 }
 
+const activePipelineFlights = new Map<string, Promise<CPipelineResult>>()
+const localDependencyIds = new WeakMap<object, string>()
+let nextLocalDependencyId = 1
+
 export async function runCPipeline(
   input: CPipelineInput,
   agents: RoleCAgents,
@@ -70,6 +80,22 @@ export async function runCPipeline(
   const cacheKey = secureStore.namespace_id
     ? pipelineInputHash({ input, secure_store_namespace: secureStore.namespace_id })
     : undefined
+  const flightKey = pipelineInputHash({
+    input,
+    secure_store: secureStore.namespace_id ?? localDependencyId(secureStore),
+    execution_dependencies: {
+      agents: localDependencyId(agents),
+      critic: localDependencyId(options.critic),
+      fact_audit_port: localDependencyId(options.fact_audit_port),
+      cache: localDependencyId(options.cache),
+      checkpoint_store: localDependencyId(options.checkpoint_store),
+      trace_store: localDependencyId(options.trace_store),
+      trace_seq_start: options.trace_seq_start ?? null,
+    },
+  })
+  const activeBeforeCache = activePipelineFlights.get(flightKey)
+  if (activeBeforeCache) return structuredClone(await activeBeforeCache)
+
   try {
     const cached = cacheKey ? await options.cache?.get(cacheKey) : undefined
     if (cached) {
@@ -88,6 +114,36 @@ export async function runCPipeline(
   } catch {
     // Cache/ref validation is an optimization. A stale entry must regenerate through the full trust path.
   }
+
+  const activeAfterCache = activePipelineFlights.get(flightKey)
+  if (activeAfterCache) return structuredClone(await activeAfterCache)
+
+  const flight = executePipeline(
+    input,
+    agents,
+    secureStore,
+    options,
+    inputHash,
+    cacheKey,
+  )
+  activePipelineFlights.set(flightKey, flight)
+  try {
+    return await flight
+  } finally {
+    if (activePipelineFlights.get(flightKey) === flight) {
+      activePipelineFlights.delete(flightKey)
+    }
+  }
+}
+
+async function executePipeline(
+  input: CPipelineInput,
+  agents: RoleCAgents,
+  secureStore: SecureArtifactStore,
+  options: CPipelineOptions,
+  inputHash: string,
+  cacheKey: string | undefined,
+): Promise<CPipelineResult> {
   let traceSeqStart = options.trace_seq_start ?? 1
   try {
     const prior = await options.trace_store?.read(input.generation_spec.run_id)
@@ -100,6 +156,70 @@ export async function runCPipeline(
     try { await options.checkpoint_store?.delete(inputHash) } catch { /* stale input-hashed checkpoint is safe */ }
   }
   return result
+}
+
+function localDependencyId(value: object | undefined): string {
+  if (!value) return "none"
+  const existing = localDependencyIds.get(value)
+  if (existing) return existing
+  const created = `local-dependency-${nextLocalDependencyId}`
+  nextLocalDependencyId += 1
+  localDependencyIds.set(value, created)
+  return created
+}
+
+function validateNextRoundContext(
+  input: CPipelineInput,
+): Array<{ path: string; message: string }> {
+  const context = input.next_round_context
+  if (!context) return []
+  const issues: Array<{ path: string; message: string }> = []
+  for (const [field, value] of Object.entries({
+    request_id: context.request_id,
+    parent_spec_id: context.parent_spec_id,
+    prior_feedback_ref: context.prior_feedback_ref,
+    trigger_grade_artifact_id: context.trigger_grade_artifact_id,
+  })) {
+    if (typeof value !== "string" || !value.trim()) {
+      issues.push({
+        path: `$.next_round_context.${field}`,
+        message: "必须为非空字符串",
+      })
+    }
+  }
+  if (!["remediate", "reinforce", "advance"].includes(context.action)) {
+    issues.push({
+      path: "$.next_round_context.action",
+      message: "必须为 remediate、reinforce 或 advance",
+    })
+  }
+  const targetIds = new Set(input.generation_spec.targets.map((target) =>
+    target.objective_id))
+  if (!Array.isArray(context.focus_objective_ids)
+    || context.focus_objective_ids.length === 0
+    || new Set(context.focus_objective_ids).size !== context.focus_objective_ids.length
+    || context.focus_objective_ids.some((objectiveId) => !targetIds.has(objectiveId))) {
+    issues.push({
+      path: "$.next_round_context.focus_objective_ids",
+      message: "必须是当前 GenerationSpec 中非空且不重复的目标集合",
+    })
+  }
+  if (!Array.isArray(context.reason_codes)
+    || context.reason_codes.length === 0
+    || new Set(context.reason_codes).size !== context.reason_codes.length
+    || context.reason_codes.some((code) => typeof code !== "string" || !code.trim())) {
+    issues.push({
+      path: "$.next_round_context.reason_codes",
+      message: "必须是非空且不重复的原因码集合",
+    })
+  }
+  if (context.parent_spec_id === input.generation_spec.spec_id) {
+    issues.push({
+      path: "$.next_round_context.parent_spec_id",
+      message: "必须引用上一轮 GenerationSpec",
+    })
+  }
+  return issues
 }
 
 async function runCPipelineCore(
@@ -132,6 +252,7 @@ async function runCPipelineCore(
   const inputSchemaIssues = [
     ...validateRoleCSchema("generation_spec.schema.json", input.generation_spec).issues,
     ...validateRoleCSchema("rag_evidence_pack.schema.json", input.evidence_pack).issues,
+    ...validateNextRoundContext(input),
   ]
   if (inputSchemaIssues.length > 0) {
     state = transitionCState(state, "BLOCKED")
@@ -242,6 +363,7 @@ async function runCPipelineCore(
     concept = checkpoint?.concept ?? await agents.concept_tutor.generate({
       generation_spec: input.generation_spec,
       evidence_pack: input.evidence_pack,
+      next_round_context: input.next_round_context,
     })
     if (!checkpoint && concept.status === "ready") {
       try { await options.checkpoint_store?.save({ input_hash: inputHash, stage: "concept_ready", concept }) } catch { /* checkpoint is non-authoritative */ }
@@ -313,11 +435,13 @@ async function runCPipelineCore(
           generation_spec: input.generation_spec,
           evidence_pack: input.evidence_pack,
           concept_artifact: concept,
+          next_round_context: input.next_round_context,
         }),
         agents.tiered_evaluator.generate({
           generation_spec: input.generation_spec,
           evidence_pack: input.evidence_pack,
           concept_artifact: concept,
+          next_round_context: input.next_round_context,
         }),
       ])
       labPair = generatedLab
@@ -456,30 +580,33 @@ async function runCPipelineCore(
         concept = await agents.concept_tutor.generate({
           generation_spec: input.generation_spec,
           evidence_pack: input.evidence_pack,
+          next_round_context: input.next_round_context,
           revision_objections: alignmentReport.objections.filter((entry) => entry.target_artifact_id === concept.artifact_id),
         })
       }
-      const branches: Promise<void>[] = []
-      if (labNeedsRevision) branches.push(agents.code_lab.generate({
-        generation_spec: input.generation_spec,
-        evidence_pack: input.evidence_pack,
-        concept_artifact: concept,
-        revision_objections: alignmentReport.objections.filter((entry) =>
-          entry.target_artifact_id === labPair.public_artifact.artifact_id || entry.target_artifact_id === labPair.secure_artifact.artifact_id),
-      }).then((pair) => { labPair = pair }))
-      if (assessmentNeedsRevision) branches.push(agents.tiered_evaluator.generate({
-        generation_spec: input.generation_spec,
-        evidence_pack: input.evidence_pack,
-        concept_artifact: concept,
-        code_lab_summary: labPair.public_artifact.payload ? {
-          lab_id: labPair.public_artifact.payload.lab_id,
-          objective_ids: [...labPair.public_artifact.payload.objective_ids],
-          execution_verified: labPair.public_artifact.quality.execution_verified === true,
-        } : undefined,
-        revision_objections: alignmentReport.objections.filter((entry) =>
-          entry.target_artifact_id === assessmentPair.public_artifact.artifact_id || entry.target_artifact_id === assessmentPair.secure_artifact.artifact_id),
-      }).then((pair) => { assessmentPair = pair }))
-      await Promise.all(branches)
+      if (labNeedsRevision) {
+        labPair = await agents.code_lab.generate({
+          generation_spec: input.generation_spec,
+          evidence_pack: input.evidence_pack,
+          concept_artifact: concept,
+          next_round_context: input.next_round_context,
+          revision_objections: alignmentReport.objections.filter((entry) =>
+            entry.target_artifact_id === labPair.public_artifact.artifact_id
+              || entry.target_artifact_id === labPair.secure_artifact.artifact_id),
+        })
+      }
+      if (assessmentNeedsRevision) {
+        assessmentPair = await agents.tiered_evaluator.generate({
+          generation_spec: input.generation_spec,
+          evidence_pack: input.evidence_pack,
+          concept_artifact: concept,
+          next_round_context: input.next_round_context,
+          code_lab_summary: toCodeLabSummary(labPair),
+          revision_objections: alignmentReport.objections.filter((entry) =>
+            entry.target_artifact_id === assessmentPair.public_artifact.artifact_id
+              || entry.target_artifact_id === assessmentPair.secure_artifact.artifact_id),
+        })
+      }
     } catch (error) {
       state = transitionCState(state, "FAILED")
       const failure: FailureReason = { code: "PROVIDER_ERROR", message: errorMessage(error) }
@@ -615,6 +742,18 @@ async function runCPipelineCore(
     alignment_report: alignmentReport,
     trace_events: trace,
     fact_audit_packets: [],
+  }
+}
+
+function toCodeLabSummary(
+  pair: CodeLabArtifactPair,
+): TieredEvaluatorRequest["code_lab_summary"] {
+  const payload = pair.public_artifact.payload
+  if (!payload) return undefined
+  return {
+    lab_id: payload.lab_id,
+    objective_ids: [...payload.objective_ids],
+    execution_verified: pair.public_artifact.quality.execution_verified === true,
   }
 }
 

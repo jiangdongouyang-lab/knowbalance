@@ -105,6 +105,12 @@ function collectStrings(value: unknown): string[] {
 }
 
 function visit(value: unknown, path: string, issues: ValidationIssue[]): void {
+  if (typeof value === "string") {
+    if (value.toLowerCase().includes("secure://role-c/")) {
+      issues.push(issue("secure_ref_leak", path, "公开产物包含私有引用"))
+    }
+    return
+  }
   if (Array.isArray(value)) {
     value.forEach((entry, index) => visit(entry, `${path}[${index}]`, issues))
     return

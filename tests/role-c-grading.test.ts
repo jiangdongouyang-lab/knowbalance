@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import {
+  buildGradeFeedback,
   gradeSubmission,
   decideNextAction,
   type CodeExecutionRequest,
@@ -160,5 +161,29 @@ describe("role C deterministic grading boundary", () => {
     expect(decideNextAction({ mastery: 0.7, sufficient_modalities: true }).action).toBe("reinforce")
     expect(decideNextAction({ mastery: 0.9, sufficient_modalities: true }).action).toBe("advance")
     expect(decideNextAction({ mastery: 0.9, sufficient_modalities: true, profile_conflict_count: 2 }).action).toBe("reprofile")
+  })
+
+  test("keeps a partially satisfied rubric item on the review path", () => {
+    const feedback = buildGradeFeedback({
+      submission_id: "SUB-RUBRIC",
+      form_id: "FORM-RUBRIC",
+      raw_score: 0.5,
+      max_score: 1,
+      evidence_score: 0.5,
+      item_results: [{
+        item_id: "I-RUBRIC",
+        objective_id: "O-RUBRIC",
+        raw_score: 0.5,
+        max_score: 1,
+        evidence_score: 0.5,
+        grader_confidence: 0.9,
+        hint_factor: 1,
+        repeat_factor: 1,
+        misconception_tags: [],
+        feedback_code: "rubric_graded",
+      }],
+    }, "formative")
+    expect(feedback.item_feedback[0]!.message).toContain("仍有标准未完全满足")
+    expect(feedback.item_feedback[0]!.next_step).toContain("回到目标 O-RUBRIC")
   })
 })

@@ -24,6 +24,8 @@ export interface LearningEvidenceEvent {
   }
   provenance: {
     artifact_id: string
+    /** Cryptographic identity used by the durable mastery idempotency ledger. */
+    idempotency_key: string
     item_id: string
     grader_version: string
   }
@@ -48,6 +50,8 @@ export interface AgentTraceEvent {
     | "c.agent.started"
     | "c.agent.ready"
     | "c.validation.failed"
+    | "c.review.revision_requested"
+    | "c.review.passed"
     | "c.pipeline.blocked"
     | "c.pipeline.failed"
     | "c.pipeline.ready"

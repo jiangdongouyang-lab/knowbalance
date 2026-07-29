@@ -8,6 +8,13 @@ export type LearnerLevel = KnowledgeDifficulty
 export type ArtifactStatus = "ready" | "blocked" | "failed"
 export type CitationRelation = "supports" | "derived_from" | "prerequisite"
 export type RoleCAgentName = "concept-tutor" | "code-lab" | "tiered-evaluator"
+export type RoleCArtifactType =
+  | "concept_lesson"
+  | "code_lab_public"
+  | "code_lab_secure"
+  | "assessment_public"
+  | "assessment_secure"
+  | "grade_result"
 
 export interface EvidenceRef {
   source_id: string
@@ -40,18 +47,16 @@ export interface ArtifactQuality {
   verified_item_count?: number
 }
 
-export interface ArtifactEnvelope<TPayload> {
+export interface ArtifactEnvelope<
+  TPayload,
+  TArtifactType extends RoleCArtifactType = RoleCArtifactType,
+  TAgent extends RoleCAgentName = RoleCAgentName,
+> {
   schema_version: SchemaVersion
   run_id: string
   artifact_id: string
-  artifact_type:
-    | "concept_lesson"
-    | "code_lab_public"
-    | "code_lab_secure"
-    | "assessment_public"
-    | "assessment_secure"
-    | "grade_result"
-  agent: RoleCAgentName
+  artifact_type: TArtifactType
+  agent: TAgent
   status: ArtifactStatus
   blocked_reason?: BlockedReason
   failure_reason?: FailureReason
@@ -72,6 +77,7 @@ export interface BlockedReason {
     | "BLOCKED_INVALID_CITATION"
     | "BLOCKED_PUBLIC_SECURE_LEAK"
     | "BLOCKED_ALIGNMENT_FAILURE"
+    | "BLOCKED_CONTENT_REVIEW"
     | "BLOCKED_EXECUTION_UNVERIFIED"
     | "BLOCKED_ANSWER_KEY_UNVERIFIED"
     | "BLOCKED_PROVIDER_UNAVAILABLE"
@@ -102,10 +108,13 @@ export function contentHash(value: unknown): string {
 }
 
 function stableStringify(value: unknown): string {
-  if (value === null || typeof value !== "object") return JSON.stringify(value)
+  if (value === null || typeof value !== "object") {
+    return JSON.stringify(value) ?? "null"
+  }
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`
   const record = value as Record<string, unknown>
   return `{${Object.keys(record)
+    .filter((key) => record[key] !== undefined)
     .sort()
     .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
     .join(",")}}`

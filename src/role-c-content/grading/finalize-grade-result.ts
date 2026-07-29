@@ -5,9 +5,13 @@ import type {
   GradeResultArtifact,
   GradeResultPayload,
 } from "../contracts/artifacts"
+import {
+  aggregateObjectiveResults,
+  decideRoundAction,
+  type FinalLearningDecision,
+} from "../contracts/dynamic-feedback"
 import type { RagEvidencePack } from "../contracts/evidence-pack"
 import type { GenerationSpec } from "../contracts/generation-spec"
-import { decideNextAction } from "../mastery/next-action-policy"
 import type { SubmissionGrade } from "./grade-submission"
 import {
   validateFeedbackContract,
@@ -21,6 +25,18 @@ export interface FinalizeGradeResultInput {
   evidence: RagEvidencePack
   assessment_secure: AssessmentSecureArtifact
   formative: boolean
+  /** Authoritative cycle decision. When omitted, the deterministic round-accuracy policy is used. */
+  recommendation?: FinalLearningDecision
+  /**
+   * Trusted cycle identity supplied by LearningCycleService. It prevents two
+   * sessions that reuse a client submission ID from sharing a grade identity.
+   */
+  cycle_identity?: {
+    session_id: string
+    learner_id_hash: string
+    attempt_no: number
+    submission_hash: string
+  }
 }
 
 /** Freezes trusted scores first, then derives public feedback without access to answer keys. */
@@ -49,14 +65,19 @@ export function finalizeGradeResult(input: FinalizeGradeResultInput): GradeResul
     evidence_score: input.grade.evidence_score,
     item_results: structuredClone(input.grade.item_results),
   })
-  const sufficientModalities = input.assessment_secure.payload.items.some((item) =>
-    (item.modality === "trace" || item.modality === "code")
-      && frozenScore.item_results.some((result) => result.item_id === item.item_id && result.grader_confidence >= 0.65),
-  )
+  const finalDecision = input.recommendation ?? decideRoundAction({
+    raw_score: frozenScore.raw_score,
+    max_score: frozenScore.max_score,
+    objective_results: aggregateObjectiveResults(frozenScore.item_results),
+  })
   const payload: GradeResultPayload = {
     ...frozenScore,
     score_frozen: true,
-    recommendation: decideNextAction({ mastery: frozenScore.evidence_score, sufficient_modalities: sufficientModalities }),
+    recommendation: {
+      action: finalDecision.action,
+      confidence: finalDecision.confidence,
+      reason_codes: [...finalDecision.reason_codes],
+    },
     feedback: buildGradeFeedback(frozenScore, input.formative ? "formative" : "summative"),
   }
   return finalizeDraft({
@@ -69,6 +90,14 @@ export function finalizeGradeResult(input: FinalizeGradeResultInput): GradeResul
     public_payload: true,
     objective_ids: [...new Set(payload.item_results.map((result) => result.objective_id))],
     answer_key_verified: true,
+    stable_identity: {
+      run_id: input.spec.run_id,
+      submission_id: payload.submission_id,
+      form_id: payload.form_id,
+      cycle_identity: input.cycle_identity,
+      recommendation: finalDecision,
+      score_frozen: true,
+    },
   })
 }
 
@@ -110,6 +139,11 @@ export async function finalizeGradeResultWithFeedback(
     return baseline
   }
   const payload: GradeResultPayload = { ...structuredClone(baseline.payload), feedback }
+  const identityDecision = input.recommendation ?? decideRoundAction({
+    raw_score: payload.raw_score,
+    max_score: payload.max_score,
+    objective_results: aggregateObjectiveResults(payload.item_results),
+  })
   return finalizeDraft({
     spec: input.spec,
     evidence: input.evidence,
@@ -120,6 +154,14 @@ export async function finalizeGradeResultWithFeedback(
     public_payload: true,
     objective_ids: [...new Set(payload.item_results.map((result) => result.objective_id))],
     answer_key_verified: true,
+    stable_identity: {
+      run_id: input.spec.run_id,
+      submission_id: payload.submission_id,
+      form_id: payload.form_id,
+      cycle_identity: input.cycle_identity,
+      recommendation: identityDecision,
+      score_frozen: true,
+    },
   })
 }
 
@@ -132,12 +174,15 @@ export function buildGradeFeedback(score: FrozenScore, mode: GradeFeedback["mode
     generated_after_score_freeze: true,
     mode,
     summary: `本次完成 ${score.item_results.length} 题，其中 ${correctCount} 题达到完整要求；证据分为 ${formatPercent(score.evidence_score)}。`,
-    item_feedback: score.item_results.map((item) => ({
-      item_id: item.item_id,
-      feedback_code: item.feedback_code,
-      message: feedbackMessage(item.feedback_code, mode, item.misconception_tags, item.raw_score === item.max_score),
-      next_step: feedbackNextStep(item.feedback_code, item.objective_id),
-    })),
+    item_feedback: score.item_results.map((item) => {
+      const fullScore = item.raw_score === item.max_score
+      return {
+        item_id: item.item_id,
+        feedback_code: item.feedback_code,
+        message: feedbackMessage(item.feedback_code, mode, item.misconception_tags, fullScore),
+        next_step: feedbackNextStep(item.feedback_code, item.objective_id, fullScore),
+      }
+    }),
   }
 }
 
@@ -154,8 +199,10 @@ function feedbackMessage(code: string, mode: GradeFeedback["mode"], misconceptio
   return mode === "formative" ? "当前作答未达到要求，建议根据提示重新推导。" : "当前作答未达到评分要求。"
 }
 
-function feedbackNextStep(code: string, objectiveId: string): string {
-  if (code === "correct" || code === "passed" || code === "rubric_graded") return `继续完成目标 ${objectiveId} 的迁移练习。`
+function feedbackNextStep(code: string, objectiveId: string, fullScore: boolean): string {
+  if (fullScore && (code === "correct" || code === "passed" || code === "rubric_graded")) {
+    return `继续完成目标 ${objectiveId} 的迁移练习。`
+  }
   if (code === "timeout") return `针对目标 ${objectiveId} 检查终止条件与复杂度。`
   return `回到目标 ${objectiveId} 的讲解与示例，完成一次同族变式后再测。`
 }

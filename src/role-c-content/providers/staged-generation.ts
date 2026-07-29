@@ -29,6 +29,7 @@ export interface AssessmentItemPlan {
   tier: 1 | 2 | 3
   modality: AssessmentItemPublic["modality"]
   max_score: number
+  citations: CitationRef[]
 }
 
 export function splitConceptRequest(
@@ -284,6 +285,11 @@ export function buildAssessmentItemPlan(spec: GenerationSpec): AssessmentItemPla
       tier,
       modality,
       max_score: tier === 1 ? 1 : tier === 2 ? 2 : 4,
+      citations: objective.required_fact_ids.map((factId) => ({
+        source_id: objective.source_id,
+        fact_id: factId,
+        relation: "derived_from" as const,
+      })),
     }
   })
 }
@@ -335,7 +341,7 @@ export function normalizeAssessmentPublic(
     }))
     return {
       ...structuredClone(item),
-      ...expected,
+      ...structuredClone(expected),
       ...(options ? { options } : {}),
     }
   })

@@ -181,7 +181,7 @@ try {
     },
     author_results: authorResults,
     upstream_fixture: modelConcept?.status === "ready" ? "validated_model_concept" : "validated_deterministic_concept",
-    publication_boundary: "Drafts were not marked execution/answer verified; ready publication still requires the isolated OCI runner.",
+    publication_boundary: "Drafts were not marked execution/answer verified; ready publication still requires the isolated Docker runner.",
     usage,
   }
   console.log(JSON.stringify(result, null, 2))

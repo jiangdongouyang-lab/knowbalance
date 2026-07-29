@@ -30,6 +30,7 @@ import {
   type LearningPathNode,
   type RagEvidencePack,
   type RoleCContentProvider,
+  type RoleCAgents,
   type GeneratedContentVerifiers,
   type SecureArtifact,
   type SecureArtifactStore,
@@ -166,6 +167,7 @@ describe("role C intake contracts", () => {
     const report = validateSpecEvidence(spec.spec, replaced)
     expect(report.ok).toBe(false)
     expect(report.issues.map((issue) => issue.code)).toContain("kb_version_mismatch")
+    expect(report.issues.map((issue) => issue.code)).toContain("evidence_content_hash_mismatch")
     expect(report.issues.map((issue) => issue.code)).not.toContain("weak_target_source")
   })
 
@@ -262,13 +264,7 @@ describe("role C public/private and orchestration boundaries", () => {
 
   test("runs the shell pipeline and returns only secure references", async () => {
     const { pack, spec } = await buildGoldenContext()
-    const objectiveIds = spec.spec.targets.map((target) => target.objective_id)
-    const citations = spec.spec.targets.map((target) => ({
-      source_id: target.source_id,
-      fact_id: target.required_fact_ids[0],
-      relation: "supports" as const,
-    }))
-    const provider = fixtureProvider(objectiveIds, citations)
+    const provider = fixtureProvider()
     const stored: SecureArtifact[] = []
     const store: SecureArtifactStore = {
       async put(artifact, context) {
@@ -294,15 +290,67 @@ describe("role C public/private and orchestration boundaries", () => {
     expect(JSON.stringify(result.public_artifacts)).not.toContain("hidden_tests")
   })
 
+  test("passes one validated next-round focus context to all three Agents", async () => {
+    const { pack, spec } = await buildGoldenContext()
+    const base = createRoleCAgents(
+      fixtureProvider(),
+      fixtureVerifiers,
+    )
+    const seen: NonNullable<Parameters<RoleCAgents["concept_tutor"]["generate"]>[0]["next_round_context"]>[] = []
+    const agents: RoleCAgents = {
+      concept_tutor: {
+        async generate(request) {
+          seen.push(structuredClone(request.next_round_context!))
+          return base.concept_tutor.generate(request)
+        },
+      },
+      code_lab: {
+        async generate(request) {
+          seen.push(structuredClone(request.next_round_context!))
+          return base.code_lab.generate(request)
+        },
+      },
+      tiered_evaluator: {
+        async generate(request) {
+          seen.push(structuredClone(request.next_round_context!))
+          return base.tiered_evaluator.generate(request)
+        },
+      },
+    }
+    const nextRoundContext = {
+      request_id: "NXR-FOCUS",
+      parent_spec_id: "SPEC-PARENT",
+      prior_feedback_ref: "DFR-FOCUS",
+      trigger_grade_artifact_id: "ART-GRADE-FOCUS",
+      action: "remediate" as const,
+      focus_objective_ids: ["O1"],
+      reason_codes: ["round_accuracy_below_remediation_threshold"],
+    }
+    const result = await runCPipeline(
+      {
+        generation_spec: spec.spec,
+        evidence_pack: pack,
+        next_round_context: nextRoundContext,
+      },
+      agents,
+      {
+        async put(artifact) { return `secure://${artifact.artifact_id}` },
+        async putBatch(artifacts) {
+          return artifacts.map((artifact) => `secure://${artifact.artifact_id}`)
+        },
+        async get() { throw new Error("not used") },
+        async deleteBatch() {},
+      },
+    )
+    expect(result.status).toBe("ready")
+    expect(seen).toHaveLength(3)
+    expect(seen.every((context) =>
+      JSON.stringify(context) === JSON.stringify(nextRoundContext))).toBe(true)
+  })
+
   test("runs at most one critic-directed revision and revalidates before publication", async () => {
     const { pack, spec } = await buildGoldenContext()
-    const objectiveIds = spec.spec.targets.map((target) => target.objective_id)
-    const citations = spec.spec.targets.map((target) => ({
-      source_id: target.source_id,
-      fact_id: target.required_fact_ids[0],
-      relation: "supports" as const,
-    }))
-    const baseline = fixtureProvider(objectiveIds, citations)
+    const baseline = fixtureProvider()
     let assessmentCalls = 0
     const provider: RoleCContentProvider = {
       ...baseline,
@@ -346,17 +394,93 @@ describe("role C public/private and orchestration boundaries", () => {
     expect(result.trace_events.filter((event) => event.retry_kind === "semantic_revision")).toHaveLength(1)
   })
 
-  test("returns a typed failure when secure storage is unavailable", async () => {
+  test("revises code lab before assessment and passes the revised lab summary downstream", async () => {
     const { pack, spec } = await buildGoldenContext()
-    const objectiveIds = spec.spec.targets.map((target) => target.objective_id)
-    const citations = spec.spec.targets.map((target) => ({
-      source_id: target.source_id,
-      fact_id: target.required_fact_ids[0],
-      relation: "supports" as const,
-    }))
+    const baseAgents = createRoleCAgents(fixtureProvider(), fixtureVerifiers)
+    const events: string[] = []
+    let labCalls = 0
+    let assessmentCalls = 0
+    let revisedAssessmentSummary:
+      Parameters<RoleCAgents["tiered_evaluator"]["generate"]>[0]["code_lab_summary"]
+    const agents: RoleCAgents = {
+      concept_tutor: baseAgents.concept_tutor,
+      code_lab: {
+        async generate(request) {
+          labCalls += 1
+          const call = labCalls
+          events.push(`lab-${call}-started`)
+          const pair = structuredClone(await baseAgents.code_lab.generate(request))
+          if (call === 1) {
+            pair.public_artifact.quality.execution_verified = false
+            pair.secure_artifact.quality.execution_verified = false
+          }
+          events.push(`lab-${call}-completed`)
+          return pair
+        },
+      },
+      tiered_evaluator: {
+        async generate(request) {
+          assessmentCalls += 1
+          const call = assessmentCalls
+          events.push(`assessment-${call}-started`)
+          if (call === 2) {
+            revisedAssessmentSummary = structuredClone(request.code_lab_summary)
+          }
+          const pair = await baseAgents.tiered_evaluator.generate(request)
+          events.push(`assessment-${call}-completed`)
+          return pair
+        },
+      },
+    }
+    let reviews = 0
     const result = await runCPipeline(
       { generation_spec: spec.spec, evidence_pack: pack },
-      createRoleCAgents(fixtureProvider(objectiveIds, citations), fixtureVerifiers),
+      agents,
+      {
+        async put(artifact) { return `secure://${artifact.artifact_id}` },
+        async putBatch(artifacts) {
+          return artifacts.map((artifact) => `secure://${artifact.artifact_id}`)
+        },
+        async get() { throw new Error("not used") },
+        async deleteBatch() {},
+      },
+      {
+        critic: {
+          async review(input) {
+            reviews += 1
+            if (reviews > 1) return []
+            return [{
+              objection_id: "OBJ-ASSESSMENT-AFTER-LAB",
+              from_agent: "cross-artifact-gate",
+              target_artifact_id: input.assessment.artifact_id,
+              objective_id: "O2",
+              issue_type: "difficulty_mismatch",
+              severity: "critical",
+              evidence: ["assessment must consume the revised lab summary"],
+              proposed_action: "先修订实验，再基于新版实验摘要修订测评",
+            }]
+          },
+        },
+      },
+    )
+
+    expect(result.status).toBe("ready")
+    expect(labCalls).toBe(2)
+    expect(assessmentCalls).toBe(2)
+    expect(events.indexOf("lab-2-completed")).toBeLessThan(
+      events.indexOf("assessment-2-started"),
+    )
+    expect(revisedAssessmentSummary?.execution_verified).toBe(true)
+    expect(revisedAssessmentSummary?.lab_id).toBe(
+      result.public_artifacts.code_lab?.payload?.lab_id,
+    )
+  })
+
+  test("returns a typed failure when secure storage is unavailable", async () => {
+    const { pack, spec } = await buildGoldenContext()
+    const result = await runCPipeline(
+      { generation_spec: spec.spec, evidence_pack: pack },
+      createRoleCAgents(fixtureProvider(), fixtureVerifiers),
       {
         async put() { throw new Error("secure store offline") },
         async putBatch() { throw new Error("secure store offline") },
@@ -372,15 +496,9 @@ describe("role C public/private and orchestration boundaries", () => {
 
   test("does not accept execution or answer verification from the content Provider", async () => {
     const { pack, spec } = await buildGoldenContext()
-    const objectiveIds = spec.spec.targets.map((target) => target.objective_id)
-    const citations = spec.spec.targets.map((target) => ({
-      source_id: target.source_id,
-      fact_id: target.required_fact_ids[0],
-      relation: "supports" as const,
-    }))
     const result = await runCPipeline(
       { generation_spec: spec.spec, evidence_pack: pack },
-      createRoleCAgents(fixtureProvider(objectiveIds, citations)),
+      createRoleCAgents(fixtureProvider()),
       {
         async put(artifact) { return `secure://${artifact.artifact_id}` },
         async putBatch(artifacts) { return artifacts.map((artifact) => `secure://${artifact.artifact_id}`) },
@@ -408,6 +526,9 @@ describe("role C published integration assets", () => {
       "code_lab_secure.schema.json",
       "concept_artifact.schema.json",
       "concept_lesson_payload.schema.json",
+      "delivery_ack.schema.json",
+      "dynamic_feedback_delivery.schema.json",
+      "dynamic_feedback_result.schema.json",
       "evidence_gap_request.schema.json",
       "fact_audit_packet.schema.json",
       "generation_spec.schema.json",
@@ -416,8 +537,10 @@ describe("role C published integration assets", () => {
       "learner_profile_snapshot.schema.json",
       "learning_evidence_event.schema.json",
       "learning_path_node.schema.json",
+      "learning_progress_delivery.schema.json",
       "profile_drift_suggestion.schema.json",
       "rag_evidence_pack.schema.json",
+      "reviewed_release_delivery.schema.json",
       "rubric_judgment.schema.json",
       "session_state.schema.json",
       "submission.schema.json",
@@ -474,11 +597,7 @@ describe("role C published integration assets", () => {
   })
 })
 
-function fixtureProvider(
-  objectiveIds: string[],
-  citations: Array<{ source_id: string; fact_id: string; relation: "supports" }>,
-): RoleCContentProvider {
-  const baseDraft = <T>(payload: T): ArtifactDraft<T> => ({ payload })
+function fixtureProvider(): RoleCContentProvider {
   const deterministicConcept = new DeterministicConceptContentProvider()
   const deterministicLab = new DeterministicCodeLabContentProvider()
   return {

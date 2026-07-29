@@ -1,5 +1,6 @@
 import {
   C_SCHEMA_VERSION,
+  contentHash,
   stableId,
   type ArtifactVersions,
   type LearnerLevel,
@@ -32,10 +33,13 @@ export interface GenerationSpec {
   spec_id: string
   run_id: string
   evidence_ref: string
+  evidence_content_hash: string
   versions: ArtifactVersions
   profile_ref: {
     profile_id: string
     profile_version: string
+    /** Binds the complete trusted snapshot without exposing learner fields to agents. */
+    profile_content_hash: string
   }
   path_node: Omit<LearningPathNode, "schema_version" | "objectives" | "assessment_blueprint">
   targets: LearningObjective[]
@@ -67,6 +71,11 @@ export interface BuildGenerationSpecInput {
   versions: Omit<ArtifactVersions, "profile_version" | "kb_version" | "rag_version" | "schema_version">
   seed?: number
   difficulty?: Partial<DifficultyVector>
+  /** Narrow C-owned presentation override; profile facts remain read-only. */
+  adaptive_shell?: {
+    scaffold_level?: 0 | 1 | 2 | 3
+    reading_density?: "low" | "medium" | "high"
+  }
 }
 
 export type BuildGenerationSpecResult =
@@ -163,14 +172,55 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
     rag_version: input.evidence_pack.rag_version,
     schema_version: C_SCHEMA_VERSION,
   }
+  const learnerAdaptation: GenerationSpec["learner_adaptation"] = {
+    level: input.profile_snapshot.level,
+    known_concepts: [...input.profile_snapshot.known_concepts],
+    weak_concepts: [...input.profile_snapshot.weak_concepts],
+    preferred_contexts: [...input.profile_snapshot.preferred_contexts],
+    scaffold_level: input.adaptive_shell?.scaffold_level ?? defaults.scaffold_level,
+    reading_density: input.adaptive_shell?.reading_density ?? defaults.reading_density,
+    accommodations: [...input.profile_snapshot.accommodations],
+  }
+  const difficulty: DifficultyVector = { ...defaults.difficulty, ...input.difficulty }
+  const pathNode = {
+    node_id: input.path_node.node_id,
+    target_source_ids: [...input.path_node.target_source_ids],
+    prerequisite_source_ids: [...input.path_node.prerequisite_source_ids],
+    goal: input.path_node.goal,
+  }
+  const targets = input.path_node.objectives.map((objective) => ({
+    ...objective,
+    required_fact_ids: [...objective.required_fact_ids],
+  }))
+  const assessmentBlueprint = {
+    tier_1_count: input.path_node.assessment_blueprint.tier_1_count,
+    tier_2_count: input.path_node.assessment_blueprint.tier_2_count,
+    tier_3_count: input.path_node.assessment_blueprint.tier_3_count,
+    required_modalities: [...input.path_node.assessment_blueprint.required_modalities],
+  }
+  const policies: GenerationSpec["policies"] = {
+    external_knowledge_allowed: false,
+    citation_required: true,
+    max_semantic_revision: 1,
+    max_tool_retry: 2,
+    seed,
+  }
   const specIdentity = {
     run_id: input.run_id,
-    profile_id: input.profile_snapshot.profile_id,
-    profile_version: input.profile_snapshot.profile_version,
-    path_node_id: input.path_node.node_id,
-    retrieval_id: input.evidence_pack.retrieval_id,
-    assessment_blueprint: input.path_node.assessment_blueprint,
-    seed,
+    evidence_ref: input.evidence_pack.retrieval_id,
+    evidence_content_hash: contentHash(input.evidence_pack),
+    versions,
+    profile_ref: {
+      profile_id: input.profile_snapshot.profile_id,
+      profile_version: input.profile_snapshot.profile_version,
+      profile_content_hash: contentHash(input.profile_snapshot),
+    },
+    path_node: pathNode,
+    targets,
+    learner_adaptation: learnerAdaptation,
+    difficulty,
+    assessment_blueprint: assessmentBlueprint,
+    policies,
   }
 
   const spec: GenerationSpec = {
@@ -178,44 +228,19 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
     spec_id: stableId("SPEC", specIdentity),
     run_id: input.run_id,
     evidence_ref: input.evidence_pack.retrieval_id,
+    evidence_content_hash: contentHash(input.evidence_pack),
     versions,
     profile_ref: {
       profile_id: input.profile_snapshot.profile_id,
       profile_version: input.profile_snapshot.profile_version,
+      profile_content_hash: contentHash(input.profile_snapshot),
     },
-    path_node: {
-      node_id: input.path_node.node_id,
-      target_source_ids: [...input.path_node.target_source_ids],
-      prerequisite_source_ids: [...input.path_node.prerequisite_source_ids],
-      goal: input.path_node.goal,
-    },
-    targets: input.path_node.objectives.map((objective) => ({
-      ...objective,
-      required_fact_ids: [...objective.required_fact_ids],
-    })),
-    learner_adaptation: {
-      level: input.profile_snapshot.level,
-      known_concepts: [...input.profile_snapshot.known_concepts],
-      weak_concepts: [...input.profile_snapshot.weak_concepts],
-      preferred_contexts: [...input.profile_snapshot.preferred_contexts],
-      scaffold_level: defaults.scaffold_level,
-      reading_density: defaults.reading_density,
-      accommodations: [...input.profile_snapshot.accommodations],
-    },
-    difficulty: { ...defaults.difficulty, ...input.difficulty },
-    assessment_blueprint: {
-      tier_1_count: input.path_node.assessment_blueprint.tier_1_count,
-      tier_2_count: input.path_node.assessment_blueprint.tier_2_count,
-      tier_3_count: input.path_node.assessment_blueprint.tier_3_count,
-      required_modalities: [...input.path_node.assessment_blueprint.required_modalities],
-    },
-    policies: {
-      external_knowledge_allowed: false,
-      citation_required: true,
-      max_semantic_revision: 1,
-      max_tool_retry: 2,
-      seed,
-    },
+    path_node: pathNode,
+    targets,
+    learner_adaptation: learnerAdaptation,
+    difficulty,
+    assessment_blueprint: assessmentBlueprint,
+    policies,
   }
   return {
     ok: true,
@@ -279,6 +304,16 @@ function validateInputShape(input: BuildGenerationSpecInput): string[] {
     if (new Set(objective.required_fact_ids).size !== objective.required_fact_ids.length) errors.push(`目标 ${objective.objective_id} 的 required_fact_ids 不得重复`)
   }
   validateDifficulty(input.difficulty, errors)
+  if (input.adaptive_shell?.scaffold_level !== undefined
+    && (!Number.isSafeInteger(input.adaptive_shell.scaffold_level)
+      || input.adaptive_shell.scaffold_level < 0
+      || input.adaptive_shell.scaffold_level > 3)) {
+    errors.push("adaptive_shell.scaffold_level 必须是 0..3 的整数")
+  }
+  if (input.adaptive_shell?.reading_density !== undefined
+    && !["low", "medium", "high"].includes(input.adaptive_shell.reading_density)) {
+    errors.push("adaptive_shell.reading_density 必须是 low、medium 或 high")
+  }
   const blueprint = input.path_node.assessment_blueprint as AssessmentBlueprint | undefined
   if (!blueprint) {
     errors.push("path_node.assessment_blueprint 必须由上游下发")

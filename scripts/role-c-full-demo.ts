@@ -5,35 +5,40 @@ import {
   adaptLearnerProfile,
   adaptRagResult,
   buildGenerationSpec,
+  contentHash,
+  createLocalABContentReviewPort,
+  createDockerPythonCodeRunnerFromEnv,
   createRoleCAgents,
   defineLearningPathNode,
-  detectProfileDrift,
+  deliverDynamicFeedbackToD,
+  deliverRoleCToB,
+  deliverRoleCToD,
   DeterministicCodeLabContentProvider,
-  emitLearningEvidence,
-  EvidencePhraseRubricJudge,
-  finalizeGradeResult,
-  gradeSubmission,
-  InMemoryAgentTraceStore,
-  InMemoryContentCache,
+  executePreparedNextRound,
+  InMemoryLearningCycleStore,
   InMemoryMasteryStateStore,
-  InMemoryPipelineCheckpointStore,
+  InMemoryNextRoundExecutionJournal,
   InMemorySecureArtifactStore,
+  LearningCycleService,
   ROLE_C_PROMPT_MANIFEST_VERSION,
-  runCPipeline,
+  runReviewedCPipeline,
   TrustedAssessmentVerifier,
   TrustedCodeLabVerifier,
-  updateMasteryFromEvidence,
-  type AssessmentSecureArtifact,
-  type CodeExecutionRequest,
-  type CodeExecutionResult,
-  type CodeRunner,
   type LearningPathNode,
-  type SessionState,
+  type RoleBLearningProgressPort,
+  type RoleDDynamicFeedbackPort,
+  type RoleDPublicDeliveryPort,
   type SubmissionEnvelope,
 } from "../src/role-c-content"
 
-const DEMO_DIGEST = `sha256:${"d".repeat(64)}`
-const profile = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
+const runner = await createDockerPythonCodeRunnerFromEnv()
+const profileFixture = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
+const profile: LearnerProfile = {
+  ...profileFixture,
+  level: "integrated",
+  known_concepts: [...profileFixture.known_concepts, "函数定义与调用"],
+  goal: "理解循环与列表，并完成一个成绩统计程序",
+}
 const rawPath = (await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()) as LearningPathNode
 const kb = await loadKnowledgeBase()
 const { rag_result: ragResult } = await executeProfileRetrieval(profile)
@@ -55,44 +60,80 @@ const built = buildGenerationSpec({
   versions: {
     prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
     model_config_hash: "deterministic-full-reference-v1",
-    runner_image_digest: DEMO_DIGEST,
+    runner_image_digest: runner.runner_image_digest,
   },
   seed: 42,
 })
 
 if (!built.ok) {
   console.log(JSON.stringify({ status: "blocked", stage: "intake", result: built }, null, 2))
-  process.exit(0)
+  process.exit(1)
 }
 
-const runner = new FullDemoConformanceRunner()
 const provider = new DeterministicCodeLabContentProvider()
 const agents = createRoleCAgents(provider, {
   code_lab: new TrustedCodeLabVerifier(runner),
   assessment: new TrustedAssessmentVerifier(runner),
 })
 const secureStore = new InMemorySecureArtifactStore()
-const traceStore = new InMemoryAgentTraceStore()
-const pipeline = await runCPipeline(
+const pipeline = await runReviewedCPipeline(
   { generation_spec: built.spec, evidence_pack: evidence },
   agents,
   secureStore,
   {
-    cache: new InMemoryContentCache(),
-    checkpoint_store: new InMemoryPipelineCheckpointStore(),
-    trace_store: traceStore,
+    review_port: createLocalABContentReviewPort({ knowledge_base: kb }),
   },
 )
 
 if (pipeline.status !== "ready" || !pipeline.public_artifacts.assessment?.payload) {
   console.log(JSON.stringify({ status: pipeline.status, stage: "content_pipeline", pipeline }, null, 2))
-  process.exit(0)
+  process.exit(1)
 }
+const acceptedDeliveryIds = new Set<string>()
+const releasePort: RoleDPublicDeliveryPort = {
+  async publishReviewedRelease(release) {
+    const status = acceptedDeliveryIds.has(release.delivery_id)
+      ? "duplicate" as const
+      : "accepted" as const
+    acceptedDeliveryIds.add(release.delivery_id)
+    return {
+      schema_version: "1.0",
+      delivery_kind: release.delivery_kind,
+      delivery_id: release.delivery_id,
+      status,
+    }
+  },
+}
+const feedbackPort: RoleDDynamicFeedbackPort = {
+  async publishDynamicFeedback(delivery) {
+    const status = acceptedDeliveryIds.has(delivery.delivery_id)
+      ? "duplicate" as const
+      : "accepted" as const
+    acceptedDeliveryIds.add(delivery.delivery_id)
+    return {
+      schema_version: "1.0",
+      delivery_kind: delivery.delivery_kind,
+      delivery_id: delivery.delivery_id,
+      status,
+    }
+  },
+}
+const progressPort: RoleBLearningProgressPort = {
+  async publishLearningProgress(delivery) {
+    const status = acceptedDeliveryIds.has(delivery.delivery_id)
+      ? "duplicate" as const
+      : "accepted" as const
+    acceptedDeliveryIds.add(delivery.delivery_id)
+    return {
+      schema_version: "1.0",
+      delivery_kind: delivery.delivery_kind,
+      delivery_id: delivery.delivery_id,
+      status,
+    }
+  },
+}
+const initialReleaseAck = await deliverRoleCToD(releasePort, pipeline)
 
-const assessmentSecure = await secureStore.get(pipeline.secure_refs[1]!, {
-  principal: "role-c-grader",
-  run_id: built.spec.run_id,
-}) as AssessmentSecureArtifact
 const publicAssessment = pipeline.public_artifacts.assessment
 const formId = publicAssessment.payload.form_id
 const answers: SubmissionEnvelope["answers"] = [
@@ -100,7 +141,7 @@ const answers: SubmissionEnvelope["answers"] = [
   { item_id: "ITEM-O2-T1-TF", selected_option_id: "opt_true", hint_level_used: 0 },
   { item_id: "ITEM-O1-T2-TRACE", text_response: "8", hint_level_used: 0 },
   { item_id: "ITEM-O2-T2-SHORT", text_response: "列表保存一组成绩并保持顺序，程序可逐项处理。", hint_level_used: 0 },
-  { item_id: "ITEM-O3-T3-CODE", code_response: "def average_score(scores):\n    total = 0\n    for score in scores:\n        total += score\n    return total / len(scores)", hint_level_used: 0 },
+  { item_id: "ITEM-O3-T3-CODE", code_response: "def average_score(scores):\n    return 0", hint_level_used: 0 },
 ]
 const submission: SubmissionEnvelope = {
   schema_version: "1.0",
@@ -111,96 +152,137 @@ const submission: SubmissionEnvelope = {
   attempt_no: 1,
   answers,
 }
-const session: SessionState = {
-  schema_version: "1.0",
+const masteryStore = new InMemoryMasteryStateStore()
+const cycleService = new LearningCycleService({
+  cycle_store: new InMemoryLearningCycleStore(),
+  secure_store: secureStore,
+  mastery_store: masteryStore,
+  code_runner: runner,
+})
+await cycleService.registerReadyRun({
+  pipeline_input: { generation_spec: built.spec, evidence_pack: evidence },
+  pipeline_result: pipeline,
+  profile_snapshot: snapshot,
+  learner_id_hash: submission.learner_id_hash,
+})
+const session = await cycleService.openSession({
   session_id: "SESSION-C-FULL-DEMO",
   run_id: built.spec.run_id,
-  learner_id_hash: submission.learner_id_hash,
-  current_path_node_id: built.spec.path_node.node_id,
-  current_form_id: formId,
-  attempt_no: 1,
-  required_item_ids: answers.map((answer) => answer.item_id),
-  revealed_hint_levels: Object.fromEntries(answers.map((answer) => [answer.item_id, answer.hint_level_used])),
-  public_artifact_refs: Object.values(pipeline.public_artifacts).filter(Boolean).map((artifact) => artifact!.artifact_id),
-  secure_artifact_refs: [...pipeline.secure_refs],
-}
-const grade = await gradeSubmission(submission, assessmentSecure, {
-  code_runner: runner,
-  rubric_judge: new EvidencePhraseRubricJudge(),
-  public_artifact: publicAssessment,
-  session_state: session,
-  expected_path_node_id: built.spec.path_node.node_id,
-  assessment_secure_ref: pipeline.secure_refs[1],
-})
-const gradeArtifact = finalizeGradeResult({
-  grade,
-  spec: built.spec,
-  evidence,
-  assessment_secure: assessmentSecure,
-  formative: publicAssessment.payload.submission_policy.formative,
-})
-const learningEvidence = emitLearningEvidence(grade, built.spec, assessmentSecure, {
-  learner_id_hash: submission.learner_id_hash,
+  authenticated_learner_id_hash: submission.learner_id_hash,
   attempt_no: submission.attempt_no,
-  grader_version: "deterministic-hybrid-grader-1.0.0",
-  grade_artifact_id: gradeArtifact.artifact_id,
-  hint_levels_by_item: session.revealed_hint_levels,
+  required_item_ids: answers.map((answer) => answer.item_id),
+  revealed_hint_levels: Object.fromEntries(
+    answers.map((answer) => [answer.item_id, answer.hint_level_used]),
+  ),
+  profile_expectations_by_objective: Object.fromEntries(
+    built.spec.targets.map((target) => [target.objective_id, "weak" as const]),
+  ),
 })
-const mastery = await updateMasteryFromEvidence(learningEvidence, new InMemoryMasteryStateStore())
-const drift = detectProfileDrift({
-  learner_id_hash: submission.learner_id_hash,
-  profile_version: snapshot.profile_version,
-  observations: mastery.states.map((state) => ({ objective_id: state.objective_id, expected: "weak" as const, mastery: state.mastery })),
+const cycle = await cycleService.processSubmissionInternal({
+  session_id: session.session_id,
+  authenticated_learner_id_hash: submission.learner_id_hash,
+  submission,
 })
+if (cycle.status !== "completed") {
+  console.log(JSON.stringify({ status: cycle.status, stage: "learning_cycle", cycle }, null, 2))
+  process.exit(1)
+}
+const completion = cycle.completion
+const feedbackAck = await deliverDynamicFeedbackToD(
+  feedbackPort,
+  completion.feedback,
+)
+const learningProgressAck = await deliverRoleCToB(
+  progressPort,
+  completion.outbound_to_b.evidence_events,
+  completion.outbound_to_b.profile_drift_suggestion,
+)
+const nextRound = await cycleService.prepareNextRoundFromCompletedSubmission({
+  session_id: session.session_id,
+  submission_id: submission.submission_id,
+  authenticated_learner_id_hash: completion.feedback.learner_id_hash,
+  profile_snapshot: snapshot,
+})
+if (nextRound.status !== "generation_ready") {
+  console.log(JSON.stringify({ status: nextRound.status, stage: "next_round_prepare", next_round: nextRound }, null, 2))
+  process.exit(1)
+}
+const nextRoundJournal = new InMemoryNextRoundExecutionJournal()
+const nextRoundDependencies = {
+  agents,
+  secure_store: secureStore,
+  review_options: {
+    review_port: createLocalABContentReviewPort({ knowledge_base: kb }),
+  },
+  review_execution_config_version: "role-c-full-demo-review-v1",
+  execution_journal: nextRoundJournal,
+}
+const generatedNextRound = await executePreparedNextRound(
+  nextRound,
+  nextRoundDependencies,
+)
+const replayedNextRound = await executePreparedNextRound(
+  structuredClone(nextRound),
+  nextRoundDependencies,
+)
+if (generatedNextRound.status !== "ready"
+  || contentHash(replayedNextRound) !== contentHash(generatedNextRound)) {
+  console.log(JSON.stringify({
+    status: generatedNextRound.status,
+    stage: "next_round_execute",
+    generated_next_round: generatedNextRound,
+  }, null, 2))
+  process.exit(1)
+}
+const nextReleaseAck = await deliverRoleCToD(
+  releasePort,
+  generatedNextRound,
+)
 
-console.log(JSON.stringify({
+const output = {
   workflow: "B_profile_to_A_evidence_to_C_content_assessment_grade_to_B_mastery",
-  status: gradeArtifact.status === "ready" ? "ready" : "blocked",
-  runner_mode: "contract_conformance_test_double",
-  runner_note: "The demo validates orchestration contracts deterministically; production code execution requires the digest-pinned OCI runner.",
+  status: "ready",
+  runner_mode: "docker",
+  runner_image_digest: runner.runner_image_digest,
   public_artifacts: {
     concept_lesson: pipeline.public_artifacts.concept_lesson,
     code_lab: pipeline.public_artifacts.code_lab,
     assessment: publicAssessment,
-    grade_result: gradeArtifact,
+    grade_result: completion.feedback.grade_result,
   },
   grading_summary: {
-    status: grade.status,
-    blocked_reason: grade.blocked_reason,
-    unresolved_item_ids: grade.unresolved_item_ids,
-    validation_issues: grade.validation_issues,
-    boundary_verified: grade.boundary_verified,
+    status: "graded",
+    final_decision: completion.feedback.final_decision,
+    round_score: completion.feedback.round_score,
   },
-  secure_refs: pipeline.secure_refs,
-  learning_evidence_to_b: learningEvidence,
-  mastery_after_update: mastery,
-  profile_drift_suggestion: drift ?? null,
-  trace_events: await traceStore.read(built.spec.run_id),
-  security_assertion: "Only public artifacts, opaque backend references, learning evidence, and trace metadata are included.",
-}, null, 2))
-
-/** Explicitly non-production; it never executes submitted code on the host. */
-class FullDemoConformanceRunner implements CodeRunner {
-  readonly runner_image_digest = DEMO_DIGEST
-  async execute(request: CodeExecutionRequest): Promise<CodeExecutionResult> {
-    const declaredTests = request.test_suite?.tests.map((entry) => entry.test_id) ?? []
-    const testIds = declaredTests.length > 0
-      ? declaredTests
-      : ["AT-O3-BASIC", "AT-O3-SINGLE", "AT-O3-DECIMAL", "AT-O3-FRACTION"]
-    const failed = request.code.includes("return None") || request.code.includes("pass\n")
-      ? testIds
-      : request.code.includes("total = score")
-        ? testIds
-        : request.code.includes("scores[:-1]") || request.code.includes("return 80") || request.code.includes("// count")
-          ? testIds
-          : []
-    return {
-      status: failed.length === 0 ? "passed" : "failed",
-      passed_tests: testIds.length - failed.length,
-      total_tests: testIds.length,
-      score_ratio: testIds.length === 0 ? 0 : (testIds.length - failed.length) / testIds.length,
-      failure_codes: failed.map((testId) => `${testId}:assertion_failed`),
-      runner_image_digest: this.runner_image_digest,
-    }
-  }
+  content_review: {
+    policy_version: pipeline.review_policy_version,
+    decisions: pipeline.review_reports.map((report) => report.decision),
+  },
+  delivery_acknowledgements: {
+    initial_release: initialReleaseAck,
+    dynamic_feedback: feedbackAck,
+    learning_progress: learningProgressAck,
+    next_release: nextReleaseAck,
+  },
+  secure_artifact_count: pipeline.secure_refs.length,
+  dynamic_feedback: completion.feedback,
+  learning_evidence_to_b: completion.outbound_to_b.evidence_events,
+  mastery_snapshot: completion.feedback.mastery_snapshot,
+  profile_drift_suggestion: completion.outbound_to_b.profile_drift_suggestion ?? null,
+  next_round: {
+    action: nextRound.action,
+    request_id: nextRound.request_id,
+    run_id: generatedNextRound.generation_spec.run_id,
+    status: generatedNextRound.status,
+    public_artifact_ids: Object.values(generatedNextRound.public_artifacts)
+      .filter((artifact): artifact is NonNullable<typeof artifact> => Boolean(artifact))
+      .map((artifact) => artifact.artifact_id),
+    review_decisions: generatedNextRound.review_reports.map((report) => report.decision),
+    sequential_replay_verified: true,
+  },
+  trace_events: pipeline.trace_events,
+  security_assertion: "Only public artifacts, public feedback, learning evidence, and trace metadata are included.",
 }
+console.log(JSON.stringify(output, null, 2))
+if (output.status !== "ready") process.exit(1)

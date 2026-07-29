@@ -7,10 +7,13 @@ import type {
   AssessmentItemPublic,
   AssessmentItemSecure,
   AssessmentPublicPayload,
-  AssessmentSecurePayload,
 } from "../contracts/artifacts"
 import type { CitationRef } from "../contracts/common"
-import { executeWithRunnerRetry, type CodeRunner, type RunnerTestSuite } from "../security/code-runner"
+import {
+  executeTrustedReferenceWithRetry,
+  type CodeRunner,
+  type RunnerTestSuite,
+} from "../security/code-runner"
 import { analyzePythonSource } from "../security/python-static-analyzer"
 import { validateCitations, type ValidationIssue } from "./citation-validator"
 import { validateAssessmentPublicSecureSeparation, validatePublicArtifactNoSecrets } from "./public-secure-leak-validator"
@@ -253,7 +256,7 @@ export class TrustedAssessmentVerifier implements AssessmentDraftVerifier {
           execution_contract: suite.execution_contract,
           tests: suite.hidden_tests,
         }
-        const execution = await executeWithRunnerRetry(this.runner, {
+        const execution = await executeTrustedReferenceWithRetry(this.runner, {
           language: "python",
           code: suite.reference_solution,
           test_suite_id: suite.test_suite_id,

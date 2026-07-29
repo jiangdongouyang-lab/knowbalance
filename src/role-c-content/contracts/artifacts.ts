@@ -398,12 +398,18 @@ export interface GradeResultPayload {
   feedback: GradeFeedback
 }
 
-export type ConceptLessonArtifact = ArtifactEnvelope<ConceptLessonPayload>
-export type CodeLabPublicArtifact = ArtifactEnvelope<CodeLabPublicPayload>
-export type CodeLabSecureArtifact = ArtifactEnvelope<CodeLabSecurePayload>
-export type AssessmentPublicArtifact = ArtifactEnvelope<AssessmentPublicPayload>
-export type AssessmentSecureArtifact = ArtifactEnvelope<AssessmentSecurePayload>
-export type GradeResultArtifact = ArtifactEnvelope<GradeResultPayload>
+export type ConceptLessonArtifact =
+  ArtifactEnvelope<ConceptLessonPayload, "concept_lesson", "concept-tutor">
+export type CodeLabPublicArtifact =
+  ArtifactEnvelope<CodeLabPublicPayload, "code_lab_public", "code-lab">
+export type CodeLabSecureArtifact =
+  ArtifactEnvelope<CodeLabSecurePayload, "code_lab_secure", "code-lab">
+export type AssessmentPublicArtifact =
+  ArtifactEnvelope<AssessmentPublicPayload, "assessment_public", "tiered-evaluator">
+export type AssessmentSecureArtifact =
+  ArtifactEnvelope<AssessmentSecurePayload, "assessment_secure", "tiered-evaluator">
+export type GradeResultArtifact =
+  ArtifactEnvelope<GradeResultPayload, "grade_result", "tiered-evaluator">
 
 export interface CodeLabArtifactPair {
   public_artifact: CodeLabPublicArtifact

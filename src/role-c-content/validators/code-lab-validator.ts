@@ -2,7 +2,12 @@ import type { CodeLabDraft, CodeLabDraftVerifier, CodeLabRequest } from "../agen
 import type { CitationRef } from "../contracts/common"
 import { claimTextMatchesFact } from "./claim-grounding"
 import type { CodeLabPublicPayload, CodeLabSecurePayload } from "../contracts/artifacts"
-import { executeWithRunnerRetry, type CodeRunner, type RunnerTestSuite } from "../security/code-runner"
+import {
+  executeTrustedReferenceWithRetry,
+  executeWithRunnerRetry,
+  type CodeRunner,
+  type RunnerTestSuite,
+} from "../security/code-runner"
 import { analyzePythonSource } from "../security/python-static-analyzer"
 import { validateCitations, type ValidationIssue } from "./citation-validator"
 import { validateCodeLabPublicSecureSeparation, validatePublicArtifactNoSecrets } from "./public-secure-leak-validator"
@@ -279,7 +284,16 @@ export class TrustedCodeLabVerifier implements CodeLabDraftVerifier {
       network_allowed: false,
     }, request.generation_spec.policies.max_tool_retry)
 
-    const reference = await execute(securePayload.reference_solution)
+    const reference = await executeTrustedReferenceWithRetry(this.runner, {
+      language: "python",
+      code: securePayload.reference_solution,
+      test_suite_id: suite.test_suite_id,
+      test_suite: suite,
+      timeout_ms: publicPayload.execution_contract.resource_limits.timeout_ms,
+      memory_mb: publicPayload.execution_contract.resource_limits.memory_mb,
+      max_output_bytes: publicPayload.execution_contract.resource_limits.max_output_bytes,
+      network_allowed: false,
+    }, request.generation_spec.policies.max_tool_retry)
     if (reference.status !== "passed" || reference.passed_tests !== reference.total_tests) {
       issues.push(`reference_solution 未通过全部隐藏测试：${reference.failure_codes.join("、")}`)
     }

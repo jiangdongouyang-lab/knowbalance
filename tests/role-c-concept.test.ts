@@ -15,7 +15,6 @@ import {
   OpenCodeConceptContentProvider,
   ROLE_C_PROMPT_MANIFEST_VERSION,
   validateRoleCSchema,
-  type ConceptLessonPayload,
   type GenerationSpec,
   type ModelGateway,
   type RagEvidencePack,
