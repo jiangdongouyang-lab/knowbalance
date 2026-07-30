@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto"
+import { spawn as spawnChildProcess } from "node:child_process"
 import { isDeepStrictEqual } from "node:util"
 import type { ExecutionContract, HiddenTest } from "../contracts/artifacts"
 import { analyzePythonSource, PLATFORM_PYTHON_IMPORT_ALLOWLIST } from "./python-static-analyzer"
@@ -9,6 +10,7 @@ export const ROLE_C_DOCKER_RUNNER_LABEL = "io.knowbalance.role-c.runner"
 const IMAGE_ID_PATTERN = /^sha256:[a-f0-9]{64}$/
 const MAX_RUNNER_PAYLOAD_BYTES = 512_000
 const MAX_HIDDEN_TESTS = 64
+const DOCKER_CLEANUP_RETRY_DELAYS_MS = [0, 50, 100, 200, 400] as const
 
 export interface RunnerTestSuite {
   test_suite_id: string
@@ -393,6 +395,15 @@ export class BunDockerCommandExecutor implements DockerCommandExecutor {
 
   private async cleanup(command: DockerCleanupCommand | undefined): Promise<void> {
     if (!command) return
+    for (const delayMs of DOCKER_CLEANUP_RETRY_DELAYS_MS) {
+      if (delayMs > 0) await wait(delayMs)
+      if (await this.cleanupOnce(command) === 0) return
+    }
+  }
+
+  private async cleanupOnce(
+    command: DockerCleanupCommand,
+  ): Promise<number | null> {
     let cleanupHandle: ReturnType<typeof Bun.spawn>
     try {
       cleanupHandle = Bun.spawn([command.command, ...command.args], {
@@ -402,7 +413,7 @@ export class BunDockerCommandExecutor implements DockerCommandExecutor {
         env: dockerCliEnvironment(),
       })
     } catch {
-      return
+      return null
     }
     const timer = setTimeout(() => {
       try {
@@ -411,9 +422,173 @@ export class BunDockerCommandExecutor implements DockerCommandExecutor {
         // Cleanup already exited.
       }
     }, 3_000)
-    await cleanupHandle.exited
+    const exitCode = await cleanupHandle.exited
     clearTimeout(timer)
+    return exitCode
   }
+}
+
+/**
+ * Node-compatible Docker CLI boundary for server frameworks whose config
+ * process does not expose Bun globals. It applies the same shared output
+ * budget, timeout, environment allowlist, and forced container cleanup.
+ */
+export class NodeDockerCommandExecutor implements DockerCommandExecutor {
+  async run(request: DockerCommandRequest): Promise<DockerCommandResult> {
+    return new Promise((resolve) => {
+      let processHandle: ReturnType<typeof spawnChildProcess>
+      try {
+        processHandle = spawnChildProcess(
+          request.command,
+          request.args,
+          {
+            stdio: ["pipe", "pipe", "pipe"],
+            env: dockerCliEnvironment(),
+          },
+        )
+      } catch (error) {
+        resolve({
+          exit_code: null,
+          stdout: "",
+          stderr: error instanceof Error
+            ? error.message
+            : "docker command unavailable",
+          timed_out: false,
+          output_truncated: false,
+        })
+        return
+      }
+
+      const stdoutChunks: Buffer[] = []
+      const stderrChunks: Buffer[] = []
+      let remaining = request.max_output_bytes
+      let timedOut = false
+      let outputTruncated = false
+      let settled = false
+      let termination: Promise<void> | undefined
+      let timer: ReturnType<typeof setTimeout> | undefined
+
+      const terminate = (): Promise<void> => {
+        if (termination) return termination
+        try {
+          processHandle.kill("SIGKILL")
+        } catch {
+          // Process already exited.
+        }
+        termination = this.cleanup(request.cleanup)
+        return termination
+      }
+      const append = (
+        value: Buffer | string,
+        destination: Buffer[],
+      ): void => {
+        const chunk = Buffer.isBuffer(value)
+          ? value
+          : Buffer.from(value)
+        const accepted = Math.min(chunk.byteLength, Math.max(0, remaining))
+        if (accepted > 0) {
+          destination.push(Buffer.from(chunk.subarray(0, accepted)))
+          remaining -= accepted
+        }
+        if (accepted < chunk.byteLength && !outputTruncated) {
+          outputTruncated = true
+          void terminate()
+        }
+      }
+      const finish = async (
+        exitCode: number | null,
+        error?: Error,
+      ): Promise<void> => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        if (termination) await termination
+        const stderr = Buffer.concat(stderrChunks).toString("utf8")
+        resolve({
+          exit_code: exitCode,
+          stdout: Buffer.concat(stdoutChunks).toString("utf8"),
+          stderr: stderr || error?.message || "",
+          timed_out: timedOut,
+          output_truncated: outputTruncated,
+        })
+      }
+
+      processHandle.stdout?.on("data", (chunk: Buffer | string) => {
+        append(chunk, stdoutChunks)
+      })
+      processHandle.stderr?.on("data", (chunk: Buffer | string) => {
+        append(chunk, stderrChunks)
+      })
+      processHandle.once("error", (error) => {
+        void finish(null, error)
+      })
+      processHandle.once("close", (code) => {
+        void finish(code)
+      })
+      processHandle.stdin?.on("error", () => {
+        // A process may exit before consuming all input.
+      })
+      processHandle.stdin?.end(request.stdin)
+
+      timer = setTimeout(() => {
+        timedOut = true
+        void terminate()
+      }, request.timeout_ms)
+    })
+  }
+
+  private async cleanup(
+    command: DockerCleanupCommand | undefined,
+  ): Promise<void> {
+    if (!command) return
+    for (const delayMs of DOCKER_CLEANUP_RETRY_DELAYS_MS) {
+      if (delayMs > 0) await wait(delayMs)
+      if (await this.cleanupOnce(command) === 0) return
+    }
+  }
+
+  private cleanupOnce(
+    command: DockerCleanupCommand,
+  ): Promise<number | null> {
+    return new Promise<number | null>((resolve) => {
+      let settled = false
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const finish = (exitCode: number | null): void => {
+        if (settled) return
+        settled = true
+        if (timer) clearTimeout(timer)
+        resolve(exitCode)
+      }
+      let cleanupHandle: ReturnType<typeof spawnChildProcess>
+      try {
+        cleanupHandle = spawnChildProcess(
+          command.command,
+          command.args,
+          {
+            stdio: "ignore",
+            env: dockerCliEnvironment(),
+          },
+        )
+      } catch {
+        resolve(null)
+        return
+      }
+      cleanupHandle.once("error", () => finish(null))
+      cleanupHandle.once("close", (code) => finish(code))
+      timer = setTimeout(() => {
+        try {
+          cleanupHandle.kill("SIGKILL")
+        } catch {
+          // Cleanup already exited.
+        }
+        finish(null)
+      }, 3_000)
+    })
+  }
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds))
 }
 
 async function readStreamWithSharedLimit(

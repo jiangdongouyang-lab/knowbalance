@@ -6,8 +6,18 @@ import type {
   RoleDSession,
   WorkflowEventView,
 } from "./types"
+import type { RoleCForRoleDResult } from "../../../role-d-integration/contracts"
 
 type LooseRecord = Record<string, any>
+type RoleCReadyHandoff = Extract<RoleCForRoleDResult, { status: "ready" }>
+
+export interface CompletedRoleCRoundIdentity {
+  sessionId: string
+  runId: string
+  learningSessionId: string
+  feedbackId: string
+  submissionId: string
+}
 
 export function adaptHandoff(input: LooseRecord): RoleDSession {
   const profile = input.b_profile ?? input.profile ?? {}
@@ -101,12 +111,215 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
   }
 }
 
+export function completedRoleCRoundIdentity(
+  session: RoleDSession,
+): CompletedRoleCRoundIdentity | undefined {
+  if (session.assessmentGraded !== true
+    || !session.roleC
+    || !session.feedback) return undefined
+  return {
+    sessionId: session.sessionId,
+    runId: session.roleC.runId,
+    learningSessionId: session.roleC.learningSessionId,
+    feedbackId: session.feedback.feedbackId,
+    submissionId: session.feedback.submissionId,
+  }
+}
+
+export function matchesCompletedRoleCRound(
+  session: RoleDSession,
+  expected: CompletedRoleCRoundIdentity,
+): boolean {
+  const current = completedRoleCRoundIdentity(session)
+  return current !== undefined
+    && current.sessionId === expected.sessionId
+    && current.runId === expected.runId
+    && current.learningSessionId === expected.learningSessionId
+    && current.feedbackId === expected.feedbackId
+    && current.submissionId === expected.submissionId
+}
+
+export function applyRoleCNextRoundHandoff(
+  session: RoleDSession,
+  expected: CompletedRoleCRoundIdentity,
+  handoff: RoleCReadyHandoff,
+  now = new Date().toISOString(),
+): RoleDSession {
+  if (!matchesCompletedRoleCRound(session, expected)) return session
+
+  const validCitationIds = new Set<string>(
+    session.retrieval.items.flatMap((item) =>
+      item.facts.map((fact) => `${fact.sourceId}-${fact.factId}`)),
+  )
+  const artifacts = handoff.artifacts.map((artifact) =>
+    normalizeArtifact(artifact, validCitationIds))
+  const nextWorkflow = handoff.workflow.map(normalizeWorkflowEvent)
+  const workflowIds = new Set(nextWorkflow.map((event) => event.id))
+  const retrievableSourceIds = new Set(
+    session.retrieval.items.map((item) => item.sourceId),
+  )
+  const selectedSourceId = handoff.learningSession.targetSourceIds
+    .find((sourceId) => retrievableSourceIds.has(sourceId))
+    ?? artifacts.flatMap((artifact) => artifact.citations)
+      .find((citation) =>
+        retrievableSourceIds.has(citation.sourceId))?.sourceId
+    ?? (retrievableSourceIds.has(session.view.selectedSourceId)
+      ? session.view.selectedSourceId
+      : session.retrieval.items[0]?.sourceId ?? "")
+
+  return {
+    ...session,
+    updatedAt: now,
+    artifacts,
+    audit: handoff.audit ? normalizeAudit(handoff.audit) : undefined,
+    roleC: {
+      runId: handoff.runId,
+      learningSessionId: handoff.learningSession.sessionId,
+      formId: handoff.learningSession.formId,
+      attemptNo: handoff.learningSession.attemptNo,
+      profileVersion: handoff.learningSession.profileVersion,
+      pathNodeId: handoff.learningSession.pathNodeId,
+      targetSourceIds: [...handoff.learningSession.targetSourceIds],
+      routing: {
+        phase: "anchor_pending",
+        routingRequestId: handoff.learningSession.routingRequestId,
+        requiredItemIds: [...handoff.learningSession.requiredItemIds],
+      },
+    },
+    feedback: undefined,
+    assessmentGraded: false,
+    evidenceGaps: artifacts
+      .filter((artifact) => artifact.evidenceStatus === "gap")
+      .map((artifact) => artifact.id),
+    path: installNextRoundPath(
+      session.path,
+      handoff.learningSession.targetSourceIds,
+      artifacts,
+      session.profile.level,
+    ),
+    workflow: [
+      ...session.workflow.filter((event) => !workflowIds.has(event.id)),
+      ...nextWorkflow,
+    ],
+    decision: {
+      next: "remediate",
+      reason: "下一轮已就绪，等待完成本轮测评后由 C 更新动态决策。",
+    },
+    view: {
+      ...session.view,
+      currentStage: "learning",
+      activeArtifactKind: "lesson",
+      selectedSourceId,
+      remediationStarted: false,
+      assessmentAnswers: {},
+      assessmentSubmitted: false,
+      assessmentStatus: "idle",
+      assessmentMessage: "",
+      detailDrawer: "none",
+    },
+  }
+}
+
+function installNextRoundPath(
+  path: LearningPathNodeView[],
+  targetSourceIds: string[],
+  artifacts: LearningArtifactView[],
+  difficulty: Difficulty,
+): LearningPathNodeView[] {
+  const uniqueTargets = [...new Set(
+    targetSourceIds.filter((sourceId) => sourceId.trim() !== ""),
+  )]
+  if (uniqueTargets.length === 0) return path
+  const targetSet = new Set(uniqueTargets)
+  const existingCurrent = path.find((node) =>
+    targetSet.has(node.id) && node.status !== "completed")
+  const currentId = existingCurrent?.id
+    ?? uniqueTargets.find((sourceId) =>
+      !path.some((node) =>
+        node.id === sourceId && node.status === "completed"))
+    ?? uniqueTargets[0]!
+  const next = path.map((node) => {
+    if (node.status === "completed") return node
+    if (node.id === currentId) {
+      return {
+        ...node,
+        status: "current" as const,
+        reason: "B 的下一轮路径已由 C 发布并进入当前学习节点。",
+      }
+    }
+    if (node.status === "current") {
+      return { ...node, status: "upcoming" as const }
+    }
+    return node
+  })
+  const knownIds = new Set(next.map((node) => node.id))
+  const lessonTitle = artifacts.find((artifact) =>
+    artifact.kind === "lesson")?.title
+  for (const sourceId of uniqueTargets) {
+    if (knownIds.has(sourceId)) continue
+    next.push({
+      id: sourceId,
+      title: sourceId === currentId && lessonTitle
+        ? lessonTitle
+        : sourceId,
+      difficulty,
+      status: sourceId === currentId ? "current" : "upcoming",
+      reason: sourceId === currentId
+        ? "B 的下一轮路径已由 C 发布并进入当前学习节点。"
+        : "B 的下一轮路径已发布，等待进入该节点。",
+    })
+  }
+  return next
+}
+
 function normalizeRoleCSession(value: LooseRecord) {
+  const routing = value.routing ?? (
+    value.routingRequestId || value.routing_request_id
+      ? value
+      : undefined
+  )
   return {
     runId: value.runId ?? value.run_id ?? "",
     learningSessionId: value.learningSessionId ?? value.learning_session_id ?? value.sessionId ?? value.session_id ?? "",
     formId: value.formId ?? value.form_id ?? "",
     attemptNo: value.attemptNo ?? value.attempt_no ?? 1,
+    ...(value.profileVersion || value.profile_version ? {
+      profileVersion: value.profileVersion ?? value.profile_version,
+    } : {}),
+    ...(value.pathNodeId || value.path_node_id ? {
+      pathNodeId: value.pathNodeId ?? value.path_node_id,
+    } : {}),
+    ...(value.targetSourceIds || value.target_source_ids ? {
+      targetSourceIds: value.targetSourceIds ?? value.target_source_ids,
+    } : {}),
+    ...(routing ? {
+      routing: normalizeRoleCRouting(routing),
+    } : {}),
+  }
+}
+
+function normalizeRoleCRouting(value: LooseRecord) {
+  const phase = value.phase === "route_locked"
+    ? "route_locked" as const
+    : "anchor_pending" as const
+  if (phase === "anchor_pending") {
+    return {
+      phase,
+      routingRequestId: value.routingRequestId ?? value.routing_request_id ?? "",
+      requiredItemIds: value.requiredItemIds ?? value.required_item_ids ?? [],
+    }
+  }
+  return {
+    phase,
+    routingRequestId: value.routingRequestId ?? value.routing_request_id ?? "",
+    routeLockId: value.routeLockId ?? value.route_lock_id ?? "",
+    routeId: value.routeId ?? value.route_id ?? "",
+    action: value.action ?? "reinforce",
+    anchorScoreRatio: value.anchorScoreRatio ?? value.anchor_score_ratio ?? 0,
+    ...(value.anchorItemIds || value.anchor_item_ids ? {
+      anchorItemIds: value.anchorItemIds ?? value.anchor_item_ids,
+    } : {}),
+    requiredItemIds: value.requiredItemIds ?? value.required_item_ids ?? [],
   }
 }
 

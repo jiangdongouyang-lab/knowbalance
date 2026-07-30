@@ -165,6 +165,42 @@ describe("adaptHandoff", () => {
     expect(session.assessmentGraded).toBe(false)
   })
 
+  test("preserves C path identity and frozen anchor ids from a snake_case route lock", () => {
+    const session = adaptHandoff({
+      ...shared,
+      roleC: {
+        run_id: "RUN-1",
+        session_id: "SESSION-1",
+        form_id: "FORM-1",
+        attempt_no: 1,
+        profile_version: "PROFILE-1",
+        path_node_id: "PATH-1",
+        target_source_ids: ["K007", "K009"],
+        routing: {
+          phase: "route_locked",
+          routing_request_id: "ROUTING-1",
+          route_lock_id: "LOCK-1",
+          route_id: "ROUTE-1",
+          action: "reinforce",
+          anchor_score_ratio: 0.5,
+          anchor_item_ids: ["I1"],
+          required_item_ids: ["I1", "I2"],
+        },
+      },
+    })
+
+    expect(session.roleC).toMatchObject({
+      profileVersion: "PROFILE-1",
+      pathNodeId: "PATH-1",
+      targetSourceIds: ["K007", "K009"],
+      routing: {
+        phase: "route_locked",
+        anchorItemIds: ["I1"],
+        requiredItemIds: ["I1", "I2"],
+      },
+    })
+  })
+
   test("preserves A/B audit and arbitration summaries for Role D reporting", () => {
     const session = adaptHandoff({
       ...shared,

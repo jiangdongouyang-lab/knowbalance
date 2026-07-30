@@ -67,4 +67,31 @@ describe("EvidenceInspector", () => {
     await userEvent.click(screen.getByText("MISSING-F404"))
     expect(onSelect).not.toHaveBeenCalled()
   })
+
+  test("shows an explicit evidence gap instead of a blank drawer for a missing selected source", async () => {
+    const onSelect = vi.fn()
+    const artifact: LearningArtifactView = {
+      id: "lesson-external",
+      kind: "lesson",
+      title: "下一节点讲义",
+      status: "real",
+      content: "内容",
+      options: [],
+      citations: [{ sourceId: "K999", factId: "F001" }],
+      evidenceStatus: "gap",
+    }
+
+    render(<EvidenceInspector items={[retrieval]} artifacts={[artifact]} selectedSourceId="K999" onSelect={onSelect} />)
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "当前引用缺少可验证证据",
+    )
+    expect(screen.getByRole("status")).toHaveTextContent("K999")
+    expect(screen.getByText("D 不会为该引用补造检索事实；请等待 A/B 提供对应证据，或选择下方已有来源继续查看。")).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole("button", {
+      name: "K007 for 循环 beginner",
+    }))
+    expect(onSelect).toHaveBeenCalledWith("K007")
+  })
 })

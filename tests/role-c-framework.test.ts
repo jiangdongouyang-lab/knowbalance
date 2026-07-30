@@ -12,11 +12,16 @@ import {
   adaptRagResult,
   buildGenerationSpec,
   createRoleCAgents,
+  deliverLearningSessionToD,
+  deliverReviewRecoveryStatusToD,
+  deliverRoleCToD,
   DeterministicConceptContentProvider,
   DeterministicCodeLabContentProvider,
   defineLearningPathNode,
   getRoleCModelOutputSchema,
+  InMemorySecureArtifactStore,
   runCPipeline,
+  runReviewedCPipeline,
   ROLE_C_PROMPT_MANIFEST_VERSION,
   transitionCState,
   validateCitations,
@@ -27,8 +32,15 @@ import {
   type AssessmentDraft,
   type CodeLabDraft,
   type ConceptLessonPayload,
+  type ContentReviewRequest,
+  type ContentReviewResult,
   type LearningPathNode,
   type RagEvidencePack,
+  type ReviewRecoveryPublicResult,
+  type RoleCLearningSessionDelivery,
+  type RoleCLearningSessionHandoff,
+  type RoleCReviewRecoveryStatusDelivery,
+  type RoleCReviewedReleaseDelivery,
   type RoleCContentProvider,
   type RoleCAgents,
   type GeneratedContentVerifiers,
@@ -538,9 +550,16 @@ describe("role C published integration assets", () => {
       "learning_evidence_event.schema.json",
       "learning_path_node.schema.json",
       "learning_progress_delivery.schema.json",
+      "learning_session_delivery.schema.json",
       "profile_drift_suggestion.schema.json",
       "rag_evidence_pack.schema.json",
+      "review_recovery_result.schema.json",
+      "review_recovery_status.schema.json",
+      "review_recovery_status_delivery.schema.json",
       "reviewed_release_delivery.schema.json",
+      "role_b_path_draft.schema.json",
+      "role_b_path_planning_request.schema.json",
+      "role_b_path_planning_result.schema.json",
       "rubric_judgment.schema.json",
       "session_state.schema.json",
       "submission.schema.json",
@@ -562,6 +581,387 @@ describe("role C published integration assets", () => {
       }
     }
     expect(JSON.stringify(getRoleCModelOutputSchema("assessment_draft.schema.json"))).not.toContain("\"$ref\"")
+  })
+
+  test("validates B path recovery messages and exposes only a D-safe recovery result", async () => {
+    const { path, spec } = await buildGoldenContext()
+    const snapshot = adaptLearnerProfile(profile, {
+      profile_version: "profile-v1",
+    })
+    const request = {
+      schema_version: "1.0",
+      request_id: "BPATH-SCHEMA-001",
+      run_id: spec.spec.run_id,
+      current_spec_id: spec.spec.spec_id,
+      profile_snapshot: snapshot,
+      current_path_node: path,
+      failed_dimensions: ["prerequisite_coverage"],
+      missing_prerequisite_source_ids: ["K006"],
+      required_action: "replan_path",
+      fix_scope: "new_spec",
+      recommended_level: "beginner",
+      review_instruction_ids: ["REVIEW-INSTRUCTION-001"],
+    }
+    expect(validateRoleCSchema(
+      "role_b_path_planning_request.schema.json",
+      request,
+    ).ok).toBe(true)
+    expect(validateRoleCSchema(
+      "role_b_path_planning_request.schema.json",
+      {
+        ...request,
+        required_action: "request_new_evidence",
+      },
+    ).ok).toBe(false)
+
+    const readyPlanningResult = {
+      status: "ready",
+      request_id: request.request_id,
+      path_draft: {
+        ...structuredClone(path),
+        objectives: path.objectives.map((objective) => ({
+          ...structuredClone(objective),
+          required_fact_ids: [],
+        })),
+      },
+      profile_snapshot: snapshot,
+    }
+    expect(validateRoleCSchema(
+      "role_b_path_planning_result.schema.json",
+      readyPlanningResult,
+    ).ok).toBe(true)
+    expect(validateRoleCSchema(
+      "role_b_path_planning_result.schema.json",
+      {
+        status: "blocked",
+        request_id: request.request_id,
+        code: "UNSUPPORTED_TARGET",
+        reason: "B 无法规划当前目标",
+        failed_dimensions: ["UNSUPPORTED_TARGET"],
+        missing_prerequisite_source_ids: [],
+        can_recover: false,
+      },
+    ).ok).toBe(true)
+    expect(validateRoleCSchema(
+      "role_b_path_planning_result.schema.json",
+      {
+        ...readyPlanningResult,
+        code: "BLOCKED",
+      },
+    ).ok).toBe(false)
+
+    const recoveryResult = {
+      schema_version: "1.0",
+      result_kind: "review_recovery",
+      run_id: "RUN-C-RECOVERY-SCHEMA-001",
+      spec_id: "GS-C-RECOVERY-SCHEMA-001",
+      pipeline_input_hash: `sha256:${"a".repeat(64)}`,
+      generation_spec_hash: `sha256:${"b".repeat(64)}`,
+      pipeline_status: "blocked",
+      pipeline_state: "BLOCKED",
+      review_policy_version: "review-policy-v1",
+      recovery: {
+        code: "BLOCKED",
+        failed_dimensions: ["prerequisite_coverage"],
+        missing_prerequisite_source_ids: ["K006"],
+        unknown_prerequisite_refs: ["legacy:while-loop"],
+        required_action: "replan_path",
+        fix_scope: "new_spec",
+        can_recover: false,
+        recovery_attempts: 1,
+        message: "前置知识引用无法解析，已停止发布",
+      },
+      recovery_history: [{
+        attempt_no: 1,
+        action: "new_spec",
+        input_spec_id: spec.spec.spec_id,
+        input_run_id: spec.spec.run_id,
+        path_request_id: request.request_id,
+      }],
+    }
+    expect(validateRoleCSchema(
+      "review_recovery_status.schema.json",
+      recoveryResult.recovery,
+    ).ok).toBe(true)
+    expect(validateRoleCSchema(
+      "review_recovery_result.schema.json",
+      recoveryResult,
+    ).ok).toBe(true)
+    expect(validateRoleCSchema(
+      "review_recovery_result.schema.json",
+      {
+        ...recoveryResult,
+        pipeline_status: "ready",
+        pipeline_state: "READY",
+        recovery: {
+          ...recoveryResult.recovery,
+          code: "READY",
+          unknown_prerequisite_refs: [],
+          required_action: "none",
+          fix_scope: "none",
+          message: "内容已通过完整审核",
+        },
+      },
+    ).ok).toBe(true)
+
+    for (const secretField of [
+      "profile_snapshot",
+      "evidence_pack",
+      "secure_refs",
+      "trusted_context",
+    ]) {
+      expect(validateRoleCSchema(
+        "review_recovery_result.schema.json",
+        {
+          ...recoveryResult,
+          [secretField]: {},
+        },
+      ).ok).toBe(false)
+    }
+    expect(validateRoleCSchema(
+      "review_recovery_status.schema.json",
+      {
+        ...recoveryResult.recovery,
+        unknown_prerequisite_refs: [
+          "legacy:while-loop",
+          "legacy:while-loop",
+        ],
+      },
+    ).ok).toBe(false)
+    expect(validateRoleCSchema(
+      "review_recovery_result.schema.json",
+      {
+        ...recoveryResult,
+        pipeline_status: "ready",
+        pipeline_state: "READY",
+      },
+    ).ok).toBe(false)
+    expect(validateRoleCSchema(
+      "review_recovery_result.schema.json",
+      {
+        ...recoveryResult,
+        pipeline_state: "READY",
+      },
+    ).ok).toBe(false)
+
+    const terminalResult = structuredClone(
+      recoveryResult,
+    ) as ReviewRecoveryPublicResult
+    const statusDeliveries: RoleCReviewRecoveryStatusDelivery[] = []
+    const committed = new Set<string>()
+    const statusPort = {
+      async publishReviewRecoveryStatus(
+        delivery: RoleCReviewRecoveryStatusDelivery,
+      ) {
+        statusDeliveries.push(structuredClone(delivery))
+        const duplicate = committed.has(delivery.delivery_id)
+        committed.add(delivery.delivery_id)
+        return {
+          schema_version: "1.0" as const,
+          delivery_kind: "review_recovery_status" as const,
+          delivery_id: delivery.delivery_id,
+          status: duplicate ? "duplicate" as const : "accepted" as const,
+        }
+      },
+    }
+    const firstStatusAck = await deliverReviewRecoveryStatusToD(
+      statusPort,
+      terminalResult,
+    )
+    const replayStatusAck = await deliverReviewRecoveryStatusToD(
+      statusPort,
+      structuredClone(terminalResult),
+    )
+    expect(firstStatusAck.status).toBe("accepted")
+    expect(replayStatusAck.status).toBe("duplicate")
+    expect(statusDeliveries).toHaveLength(2)
+    expect(statusDeliveries[0]!.delivery_id)
+      .toBe(statusDeliveries[1]!.delivery_id)
+    expect(validateRoleCSchema(
+      "review_recovery_status_delivery.schema.json",
+      statusDeliveries[0],
+    ).ok).toBe(true)
+    expect(JSON.stringify(statusDeliveries[0])).not.toContain("quiz_seeds")
+
+    const readyResult = {
+      ...structuredClone(terminalResult),
+      pipeline_status: "ready" as const,
+      pipeline_state: "READY" as const,
+      recovery: {
+        ...structuredClone(terminalResult.recovery),
+        code: "READY" as const,
+        unknown_prerequisite_refs: [],
+        required_action: "none" as const,
+        fix_scope: "none" as const,
+        message: "内容已通过完整审核",
+      },
+    }
+    await expect(deliverReviewRecoveryStatusToD(
+      statusPort,
+      readyResult,
+    )).rejects.toThrow("ROLE_C_D_RECOVERY_STATUS_NOT_TERMINAL")
+
+    let rejectedDeliveryCalls = 0
+    await expect(deliverReviewRecoveryStatusToD(
+      {
+        async publishReviewRecoveryStatus(delivery) {
+          rejectedDeliveryCalls += 1
+          return {
+            schema_version: "1.0",
+            delivery_kind: "review_recovery_status",
+            delivery_id: delivery.delivery_id,
+            status: "accepted",
+          }
+        },
+      },
+      {
+        ...structuredClone(terminalResult),
+        answer: "must-not-leave-c",
+      } as unknown as ReviewRecoveryPublicResult,
+    )).rejects.toThrow("ROLE_C_OUTBOUND_SCHEMA_INVALID")
+    expect(rejectedDeliveryCalls).toBe(0)
+
+    await expect(deliverReviewRecoveryStatusToD(
+      {
+        async publishReviewRecoveryStatus(delivery) {
+          return {
+            schema_version: "1.0",
+            delivery_kind: "reviewed_release",
+            delivery_id: delivery.delivery_id,
+            status: "accepted",
+          }
+        },
+      },
+      terminalResult,
+    )).rejects.toThrow("ROLE_C_D_ACK_KIND_MISMATCH")
+  })
+
+  test("delivers reviewed content and a learning session under independent stable identities", async () => {
+    const result = await reviewedGoldenResult()
+    if (result.status !== "ready" || result.state !== "READY") {
+      throw new Error("reviewed fixture must be ready")
+    }
+    const assessment = result.public_artifacts.assessment
+    if (!assessment?.payload) throw new Error("assessment fixture missing")
+    const route = assessment.payload.routing.rules[0]!
+    const anchors = new Set(assessment.payload.routing.anchor_item_ids)
+    const requiredItemIds = assessment.payload.items
+      .filter((item) =>
+        anchors.has(item.item_id) || route.reveal_tiers.includes(item.tier))
+      .map((item) => item.item_id)
+    const handoff: RoleCLearningSessionHandoff = {
+      phase: "route_locked",
+      routing_request_id: "ROUTING-INDEPENDENT-001",
+      session_id: "SESSION-INDEPENDENT-001",
+      run_id: result.generation_spec.run_id,
+      form_id: assessment.payload.form_id,
+      attempt_no: 1,
+      route_lock_id: "ROUTE-LOCK-INDEPENDENT-001",
+      route_id: route.route_id,
+      action: route.action,
+      anchor_score_ratio: route.min_anchor_score_ratio,
+      required_item_ids: requiredItemIds,
+    }
+
+    const releases: RoleCReviewedReleaseDelivery[] = []
+    const releasePort = {
+      async publishReviewedRelease(release: RoleCReviewedReleaseDelivery) {
+        releases.push(structuredClone(release))
+        return {
+          schema_version: "1.0" as const,
+          delivery_kind: "reviewed_release" as const,
+          delivery_id: release.delivery_id,
+          status: releases.length === 1
+            ? "accepted" as const
+            : "duplicate" as const,
+        }
+      },
+    }
+    await deliverRoleCToD(releasePort, result)
+    await deliverRoleCToD(releasePort, structuredClone(result))
+    expect(releases).toHaveLength(2)
+    expect(releases[0]!.delivery_id).toBe(releases[1]!.delivery_id)
+    expect("learning_session" in releases[0]!).toBe(false)
+    expect("learning_session" in releases[1]!).toBe(false)
+    expect(validateRoleCSchema(
+      "reviewed_release_delivery.schema.json",
+      releases[1],
+    ).ok).toBe(true)
+
+    const sessions: RoleCLearningSessionDelivery[] = []
+    const committedSessions = new Set<string>()
+    const sessionPort = {
+      async publishLearningSession(delivery: RoleCLearningSessionDelivery) {
+        sessions.push(structuredClone(delivery))
+        const duplicate = committedSessions.has(delivery.delivery_id)
+        committedSessions.add(delivery.delivery_id)
+        return {
+          schema_version: "1.0" as const,
+          delivery_kind: "learning_session" as const,
+          delivery_id: delivery.delivery_id,
+          status: duplicate ? "duplicate" as const : "accepted" as const,
+        }
+      },
+    }
+    const pendingHandoff: RoleCLearningSessionHandoff = {
+      phase: "anchor_pending",
+      routing_request_id: "ROUTING-INDEPENDENT-PENDING-001",
+      session_id: "SESSION-INDEPENDENT-PENDING-001",
+      run_id: result.generation_spec.run_id,
+      form_id: assessment.payload.form_id,
+      attempt_no: 1,
+      required_item_ids: [...assessment.payload.routing.anchor_item_ids],
+    }
+    expect((await deliverLearningSessionToD(
+      sessionPort,
+      result,
+      pendingHandoff,
+    )).status).toBe("accepted")
+    const firstSessionAck = await deliverLearningSessionToD(
+      sessionPort,
+      result,
+      handoff,
+    )
+    const replaySessionAck = await deliverLearningSessionToD(
+      sessionPort,
+      structuredClone(result),
+      {
+        ...structuredClone(handoff),
+        required_item_ids: [...handoff.required_item_ids].reverse(),
+      },
+    )
+    expect(firstSessionAck.status).toBe("accepted")
+    expect(replaySessionAck.status).toBe("duplicate")
+    expect(sessions).toHaveLength(3)
+    expect(sessions[1]!.delivery_id).toBe(sessions[2]!.delivery_id)
+    expect(sessions[0]!.session).toEqual(pendingHandoff)
+    expect(sessions[1]!.session).toEqual(handoff)
+    expect("artifacts" in sessions[1]!).toBe(false)
+    expect(validateRoleCSchema(
+      "learning_session_delivery.schema.json",
+      sessions[0],
+    ).ok).toBe(true)
+    expect(validateRoleCSchema(
+      "learning_session_delivery.schema.json",
+      sessions[1],
+    ).ok).toBe(true)
+
+    await expect(deliverLearningSessionToD(
+      sessionPort,
+      result,
+      {
+        ...handoff,
+        required_item_ids: ["UNKNOWN-ITEM"],
+      },
+    )).rejects.toThrow("ROLE_C_D_SESSION_ITEMS_MISMATCH")
+    await expect(deliverLearningSessionToD(
+      sessionPort,
+      result,
+      {
+        ...handoff,
+        anchor_score_ratio: route.max_anchor_score_ratio,
+      },
+    )).rejects.toThrow("ROLE_C_D_SESSION_ROUTE_MISMATCH")
   })
 
   test("gives all three public workers distinct C-shell role prompts", () => {
@@ -596,6 +996,55 @@ describe("role C published integration assets", () => {
     }
   })
 })
+
+async function reviewedGoldenResult() {
+  const { pack, spec } = await buildGoldenContext()
+  const policyVersion = "framework-independent-delivery-review-v1"
+  return runReviewedCPipeline(
+    {
+      generation_spec: spec.spec,
+      evidence_pack: pack,
+    },
+    createRoleCAgents(fixtureProvider(), fixtureVerifiers),
+    new InMemorySecureArtifactStore(),
+    {
+      review_port: {
+        policy_version: policyVersion,
+        async review(request) {
+          return passingReviewResult(request, policyVersion)
+        },
+      },
+    },
+  )
+}
+
+function passingReviewResult(
+  request: ContentReviewRequest,
+  policyVersion: string,
+): ContentReviewResult {
+  return {
+    run_id: request.run_id,
+    pipeline_input_hash: request.pipeline_input_hash,
+    generation_spec_hash: request.generation_spec_hash,
+    policy_version: policyVersion,
+    revision_round: request.revision_round,
+    max_revision_rounds: request.max_revision_rounds,
+    evidence_hash: request.evidence_hash,
+    decision: "pass",
+    artifact_results: request.artifacts.map((target) => ({
+      artifact_kind: target.kind,
+      artifact_id: target.artifact.artifact_id,
+      artifact_hash: target.artifact_hash,
+      fact_status: "pass",
+      teaching_status: "pass",
+      decision: "pass",
+      can_revise: false,
+      findings: [],
+      revision_instructions: [],
+    })),
+    revision_instructions: [],
+  }
+}
 
 function fixtureProvider(): RoleCContentProvider {
   const deterministicConcept = new DeterministicConceptContentProvider()

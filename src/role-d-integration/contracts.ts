@@ -1,5 +1,6 @@
 import type { RagResult } from "../rag/retriever"
 import type { LearnerProfile } from "../role-b-profile/types"
+import type { RoleCDeliveryAck } from "../role-c-content"
 
 export interface RoleDPublicCitation {
   source_id: string
@@ -79,9 +80,19 @@ export type RoleCForRoleDResult =
       workflow: RoleDWorkflowEvent[]
       runId: string
       learningSession: {
+        phase: "anchor_pending"
         sessionId: string
         formId: string
         attemptNo: number
+        profileVersion: string
+        pathNodeId: string
+        targetSourceIds: string[]
+        routingRequestId: string
+        requiredItemIds: string[]
+      }
+      deliveryToD: {
+        reviewedRelease: RoleCDeliveryAck
+        learningSession: RoleCDeliveryAck
       }
       audit?: RoleDContentAuditSummary
     }
@@ -99,4 +110,33 @@ export interface GenerateRoleCForRoleDInput {
   ragResult: RagResult
   kbVersion: string
   runId: string
+}
+
+export interface RoleCContinuationHttpRequest {
+  sessionId: string
+  submissionId: string
+  learnerId: string
+}
+
+const ROLE_C_CONTINUATION_HTTP_KEYS = new Set([
+  "sessionId",
+  "submissionId",
+  "learnerId",
+])
+
+export function isRoleCContinuationHttpRequest(
+  value: unknown,
+): value is RoleCContinuationHttpRequest {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  if (Object.keys(record).some(
+    (key) => !ROLE_C_CONTINUATION_HTTP_KEYS.has(key),
+  )) return false
+  return isNonEmptyIdentity(record.sessionId)
+    && isNonEmptyIdentity(record.submissionId)
+    && isNonEmptyIdentity(record.learnerId)
+}
+
+function isNonEmptyIdentity(value: unknown): value is string {
+  return typeof value === "string" && value.trim() !== ""
 }

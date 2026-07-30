@@ -19,10 +19,38 @@ const scoreLabels: Record<string, string> = {
 
 export function EvidenceInspector({ items, artifacts, selectedSourceId, onSelect }: EvidenceInspectorProps) {
   const selected = items.find((item) => item.sourceId === selectedSourceId)
-  if (!selected) return null
   const factKeys = new Set(items.flatMap((item) => item.facts.map((fact) => `${fact.sourceId}-${fact.factId}`)))
   const hasCitationGap = artifacts.some((artifact) => artifact.evidenceStatus === "gap")
   const hasMockContent = artifacts.some((artifact) => artifact.status === "mock")
+  if (!selected) {
+    return (
+      <section className="panel evidence-panel" aria-labelledby="evidence-title">
+        <div className="panel-heading">
+          <div><span className="section-kicker">TRACEABLE EVIDENCE</span><h2 id="evidence-title">检索轨迹与生成内容引用</h2></div>
+          <span className="evidence-gap-badge"><AlertTriangle size={13} />引用尚未验证</span>
+        </div>
+        <article className="evidence-detail" role="status">
+          <div className="evidence-title-row">
+            <span className="source-token">{selectedSourceId || "UNKNOWN"}</span>
+            <div><strong>当前引用缺少可验证证据</strong><p>当前学习计划的 A 检索结果中没有这个来源。</p></div>
+          </div>
+          <p className="evidence-empty">D 不会为该引用补造检索事实；请等待 A/B 提供对应证据，或选择下方已有来源继续查看。</p>
+        </article>
+        {items.length > 0 && (
+          <section className="evidence-section evidence-recommendations" aria-labelledby="available-evidence-title">
+            <h3 id="available-evidence-title">当前可验证来源</h3>
+            <div className="retrieval-picker">
+              {items.map((item) => (
+                <button type="button" aria-label={`${item.sourceId} ${item.title} ${item.difficulty}`} onClick={() => onSelect(item.sourceId)} key={item.sourceId}>
+                  <span>{item.sourceId}</span><strong title={item.title}>{item.title}</strong><small>{item.difficulty} · {item.score} pts</small>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
+      </section>
+    )
+  }
   const scoreEntries = Object.entries(selected.trace.scoreBreakdown).filter(([, value]) => value > 0)
   const maxScore = Math.max(1, ...scoreEntries.map(([, value]) => value))
 

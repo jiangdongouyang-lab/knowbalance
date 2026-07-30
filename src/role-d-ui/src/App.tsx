@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { CheckCircle2, Database, List, Network, Plus, Trash2 } from "lucide-react"
 import { AppSidebar } from "./components/AppSidebar"
 import { ConfirmDialog } from "./components/ConfirmDialog"
@@ -11,8 +11,10 @@ import { UserSetupScreen } from "./components/UserSetupScreen"
 import { UserSwitcher } from "./components/UserSwitcher"
 import { WorkflowTimeline } from "./components/WorkflowTimeline"
 import { createLearningPlan, evaluatePlanDiagnosis, type CreatedLearningPlan, type NewLearningPlanInput } from "./domain/create-learning-plan"
-import { applyRoleCSubmissionOutcome } from "./domain/role-c-submission"
-import { submitRoleCAssessment } from "./domain/role-c-submission-client"
+import { applyRoleCNextRoundHandoff, completedRoleCRoundIdentity, type CompletedRoleCRoundIdentity } from "./domain/adapt-handoff"
+import { continueRoleCAfterSubmission } from "./domain/role-c-continuation-client"
+import { applyRoleCRoutingOutcome, applyRoleCSubmissionOutcome } from "./domain/role-c-submission"
+import { routeRoleCAssessment, submitRoleCAssessment } from "./domain/role-c-submission-client"
 import { furthestStage, stageIndex } from "./domain/guided-flow"
 import { diagnosisItems } from "./domain/diagnosis"
 import type { GuidedStage, RoleDSession } from "./domain/types"
@@ -36,6 +38,12 @@ export function App() {
   const [onboardingSubmittingPlanId, setOnboardingSubmittingPlanId] = useState<string | null>(null)
   const [diagnosisSubmittingPlanId, setDiagnosisSubmittingPlanId] = useState<string | null>(null)
   const [onboardingErrors, setOnboardingErrors] = useState<Record<string, string>>({})
+  const [continuingRoundKeys, setContinuingRoundKeys] = useState<Set<string>>(
+    () => new Set(),
+  )
+  const [continuationErrors, setContinuationErrors] =
+    useState<Record<string, string>>({})
+  const continuationRequests = useRef(new Set<string>())
 
   const activeUser = workspace.users.find((user) => user.id === workspace.activeUserId)
   const activePlan = workspace.plans.find((plan) => plan.id === workspace.activePlanId && plan.userId === workspace.activeUserId)
@@ -76,9 +84,15 @@ export function App() {
       case "plan":
         return <PlanScreen session={session} onContinue={() => unlockStage("learning")} onBack={() => selectStage("profile")} />
       case "learning":
-        return <LearningScreen session={session} onTab={(activeArtifactKind) => updateView({ activeArtifactKind })} onCitation={(selectedSourceId) => updateView({ selectedSourceId, detailDrawer: "evidence" })} onAssessmentAnswer={(itemId, answer) => updateView({ assessmentAnswers: { ...(session.view.assessmentAnswers ?? {}), [itemId]: answer }, assessmentSubmitted: false, assessmentStatus: "idle", assessmentMessage: "" })} onAssessmentSubmit={submitAssessment} onContinue={() => unlockStage("feedback")} onBack={() => selectStage("plan")} />
+        return <LearningScreen session={session} onTab={(activeArtifactKind) => updateView({ activeArtifactKind })} onCitation={(selectedSourceId) => updateView({ selectedSourceId, detailDrawer: "evidence" })} onAssessmentAnswer={updateAssessmentAnswer} onAssessmentSubmit={submitAssessment} onContinue={() => unlockStage("feedback")} onBack={() => selectStage("plan")} />
       case "feedback":
-        return <FeedbackScreen session={session} onRestart={() => updateView({ currentStage: "learning", activeArtifactKind: "lesson", remediationStarted: true })} onBack={() => selectStage("learning")} />
+        {
+          const identity = completedRoleCRoundIdentity(session)
+          const continuationKey = identity && activePlan
+            ? roleCContinuationKey(activePlan.id, identity)
+            : undefined
+          return <FeedbackScreen session={session} onRestart={() => updateView({ currentStage: "learning", activeArtifactKind: "lesson", remediationStarted: true })} onContinueNextRound={continueNextRound} continuing={continuationKey ? continuingRoundKeys.has(continuationKey) : false} continueError={continuationKey ? continuationErrors[continuationKey] ?? "" : ""} onBack={() => selectStage("learning")} />
+        }
     }
   }
 
@@ -132,7 +146,32 @@ export function App() {
     const targetPlanId = activePlan!.id
     const targetSessionId = session.sessionId
     const targetRunId = session.roleC?.runId
-    updateView({ assessmentSubmitted: true, assessmentStatus: "submitting", assessmentMessage: "正在等待 C 正式评分…" })
+    const routingPending = session.roleC?.routing?.phase === "anchor_pending"
+    updateView({
+      assessmentSubmitted: true,
+      assessmentStatus: "submitting",
+      assessmentMessage: routingPending
+        ? "正在由 C 评定锚点并确定后续题目…"
+        : "正在等待 C 正式评分…",
+    })
+    if (routingPending) {
+      const result = await routeRoleCAssessment(session)
+      setWorkspace((current) => ({
+        ...current,
+        plans: current.plans.map((candidate) => {
+          if (candidate.id !== targetPlanId
+            || candidate.session.sessionId !== targetSessionId
+            || candidate.session.roleC?.runId !== targetRunId
+            || candidate.session.roleC?.routing?.phase !== "anchor_pending") return candidate
+          return {
+            ...candidate,
+            session: applyRoleCRoutingOutcome(candidate.session, result.outcome),
+            updatedAt: new Date().toISOString(),
+          }
+        }),
+      }))
+      return
+    }
     const result = await submitRoleCAssessment(session)
     setWorkspace((current) => ({
       ...current,
@@ -147,6 +186,74 @@ export function App() {
         }
       }),
     }))
+  }
+
+  const continueNextRound = async () => {
+    if (!session || !activePlan) return
+    const expected = completedRoleCRoundIdentity(session)
+    if (!expected) return
+    const requestKey = roleCContinuationKey(activePlan.id, expected)
+    if (continuationRequests.current.has(requestKey)) return
+
+    continuationRequests.current.add(requestKey)
+    setContinuingRoundKeys((current) => new Set(current).add(requestKey))
+    setContinuationErrors((current) => ({ ...current, [requestKey]: "" }))
+    try {
+      const result = await continueRoleCAfterSubmission(session)
+      if (result.status === "published") {
+        setWorkspace((current) => ({
+          ...current,
+          plans: current.plans.map((candidate) => {
+            if (candidate.id !== activePlan.id) return candidate
+            const nextSession = applyRoleCNextRoundHandoff(
+              candidate.session,
+              expected,
+              result.handoff,
+            )
+            return nextSession === candidate.session
+              ? candidate
+              : {
+                  ...candidate,
+                  session: nextSession,
+                  updatedAt: new Date().toISOString(),
+                }
+          }),
+        }))
+      } else {
+        setContinuationErrors((current) => ({
+          ...current,
+          [requestKey]: result.message,
+        }))
+      }
+    } finally {
+      continuationRequests.current.delete(requestKey)
+      setContinuingRoundKeys((current) => {
+        const next = new Set(current)
+        next.delete(requestKey)
+        return next
+      })
+    }
+  }
+
+  const updateAssessmentAnswer = (itemId: string, answer: string) => {
+    setSession((current) => {
+      const routing = current.roleC?.routing
+      if (routing?.phase === "route_locked"
+        && routing.anchorItemIds?.includes(itemId)) return current
+      return {
+        ...current,
+        view: {
+          ...current.view,
+          assessmentAnswers: {
+            ...(current.view.assessmentAnswers ?? {}),
+            [itemId]: answer,
+          },
+          assessmentSubmitted: false,
+          assessmentStatus: "idle",
+          assessmentMessage: "",
+        },
+      }
+    })
   }
 
   const submitDiagnosis = async () => {
@@ -213,4 +320,18 @@ export function App() {
       {newPlanOpen && <NewPlanDialog user={activeUser} onCancel={() => setNewPlanOpen(false)} onCreate={createPlan} />}
     </div>
   )
+}
+
+function roleCContinuationKey(
+  planId: string,
+  identity: CompletedRoleCRoundIdentity,
+): string {
+  return [
+    planId,
+    identity.sessionId,
+    identity.runId,
+    identity.learningSessionId,
+    identity.feedbackId,
+    identity.submissionId,
+  ].join(":")
 }

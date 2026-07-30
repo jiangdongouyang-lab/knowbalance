@@ -65,7 +65,7 @@ export async function createLearningPlan(input: NewLearningPlanInput, requestRol
     kbVersion: knowledgeBase.version,
     runId: `RUN-${sessionId}`,
   })
-  const session = buildSession(input, synthesis, diagnosisRagResult, diagnosis, roleC, sessionId)
+  const session = buildSession(input, synthesis, diagnosisRagResult, diagnosis, roleC, knowledgeBase, sessionId)
   return { source: "real-ab", input, diagnosis, session }
 }
 
@@ -95,7 +95,7 @@ export async function evaluatePlanDiagnosis(plan: CreatedLearningPlan, answers: 
     kbVersion: knowledgeBase.version,
     runId: `RUN-${plan.session.sessionId}-diagnosed`,
   })
-  const session = buildSession(plan.input, synthesis, diagnosisRagResult, plan.diagnosis, roleC, plan.session.sessionId)
+  const session = buildSession(plan.input, synthesis, diagnosisRagResult, plan.diagnosis, roleC, knowledgeBase, plan.session.sessionId)
   session.view.diagnosisAnswers = answerMap
   session.view.diagnosisAnswer = answerMap[firstId] ?? ""
   session.view.diagnosisSubmitted = true
@@ -322,12 +322,19 @@ function buildSession(
   ragResult: RagResult,
   diagnosis: PlanDiagnosis,
   roleC: RoleCForRoleDResult,
+  knowledgeBase: KnowledgeBase,
   sessionId = `session-${input.learnerId}-${Date.now()}`,
 ): RoleDSession {
-  const knownSourceIds = new Set(synthesis.provenance.concepts
-    .filter((concept) => concept.bucket === "known")
-    .flatMap((concept) => concept.matched_source_ids))
-  const path = buildPath(ragResult, knownSourceIds)
+  const knownSourceIds = masteredSourceIds(
+    synthesis.provenance.concepts,
+    knowledgeBase,
+  )
+  const path = buildPath(
+    ragResult,
+    knownSourceIds,
+    synthesis.profile.level,
+    knowledgeBase,
+  )
   const artifacts = roleC.artifacts
   const roleCWorkflow = roleC.workflow.length > 0
     ? roleC.workflow
@@ -365,6 +372,14 @@ function buildSession(
         learningSessionId: roleC.learningSession.sessionId,
         formId: roleC.learningSession.formId,
         attemptNo: roleC.learningSession.attemptNo,
+        profileVersion: roleC.learningSession.profileVersion,
+        pathNodeId: roleC.learningSession.pathNodeId,
+        targetSourceIds: [...roleC.learningSession.targetSourceIds],
+        routing: {
+          phase: roleC.learningSession.phase,
+          routingRequestId: roleC.learningSession.routingRequestId,
+          requiredItemIds: [...roleC.learningSession.requiredItemIds],
+        },
       },
     } : {}),
     assessmentGraded: false,
@@ -387,6 +402,57 @@ function buildSession(
       detailDrawer: "none",
     },
   })
+}
+
+function masteredSourceIds(
+  concepts: ReturnType<typeof synthesizeProfile>["provenance"]["concepts"],
+  knowledgeBase: KnowledgeBase,
+): Set<string> {
+  const itemsBySourceId = new Map(knowledgeBase.items.map((item) => [item.sourceId, item]))
+  const mastered = new Set<string>()
+
+  for (const concept of concepts.filter((item) => item.bucket === "known")) {
+    const candidates = new Set(
+      concept.matched_source_ids.filter((sourceId) => itemsBySourceId.has(sourceId)),
+    )
+    const exactTitleMatches = [...candidates].filter((sourceId) =>
+      normalizeKnowledgeLabel(itemsBySourceId.get(sourceId)!.title)
+        === normalizeKnowledgeLabel(concept.concept))
+
+    if (exactTitleMatches.length > 0) {
+      exactTitleMatches.forEach((sourceId) => mastered.add(sourceId))
+      continue
+    }
+
+    for (const sourceId of candidates) {
+      if (!dependsOnMatchedSource(sourceId, candidates, itemsBySourceId)) {
+        mastered.add(sourceId)
+      }
+    }
+  }
+
+  return mastered
+}
+
+function dependsOnMatchedSource(
+  sourceId: string,
+  candidates: Set<string>,
+  itemsBySourceId: Map<string, KnowledgeItem>,
+): boolean {
+  const visited = new Set<string>()
+  const queue = [...(itemsBySourceId.get(sourceId)?.prerequisites ?? [])]
+  while (queue.length > 0) {
+    const prerequisiteId = queue.shift()!
+    if (candidates.has(prerequisiteId)) return true
+    if (visited.has(prerequisiteId)) continue
+    visited.add(prerequisiteId)
+    queue.push(...(itemsBySourceId.get(prerequisiteId)?.prerequisites ?? []))
+  }
+  return false
+}
+
+function normalizeKnowledgeLabel(value: string): string {
+  return value.toLowerCase().replace(/\s+/g, "")
 }
 
 function auditWorkflowEvents(roleC: RoleCForRoleDResult): RoleDSession["workflow"] {
@@ -425,22 +491,103 @@ function auditStatusToWorkflow(status: "pass" | "revise" | "reject"): RoleDSessi
   return "blocked"
 }
 
-function buildPath(ragResult: RagResult, knownSourceIds: Set<string>) {
-  let currentAssigned = false
-  const nodes = ragResult.results.slice(0, 5).map((item): RoleDSession["path"][number] => {
-    const completed = knownSourceIds.has(item.sourceId)
-    const status = completed ? "completed" : currentAssigned ? "upcoming" : "current"
-    if (status === "current") currentAssigned = true
-    return {
-      id: item.sourceId,
-      title: item.title,
-      difficulty: item.difficulty,
-      status,
-      reason: completed ? "B 画像将其标记为已掌握。" : item.reason,
+function buildPath(
+  ragResult: RagResult,
+  knownSourceIds: Set<string>,
+  learnerLevel: KnowledgeDifficulty,
+  knowledgeBase: KnowledgeBase,
+) {
+  const candidates = ragResult.results.slice(0, 5)
+  const completed = candidates.filter((item) =>
+    knownSourceIds.has(item.sourceId))
+  const orderedPending = orderPendingPathNodes(
+    candidates.filter((item) => !knownSourceIds.has(item.sourceId)),
+    knowledgeBase,
+  )
+  const learnerLevelIndex = KNOWLEDGE_DIFFICULTY_ORDER[learnerLevel]
+  const currentIndex = orderedPending.findIndex((item) =>
+    KNOWLEDGE_DIFFICULTY_ORDER[item.difficulty] <= learnerLevelIndex + 1)
+  const pending = currentIndex < 0
+    ? orderedPending
+    : [
+        orderedPending[currentIndex]!,
+        ...orderedPending.filter((_, index) => index !== currentIndex),
+      ]
+  return [...completed, ...pending].map(
+    (item, index): RoleDSession["path"][number] => {
+      const isCompleted = index < completed.length
+      const isCurrent = !isCompleted
+        && currentIndex >= 0
+        && index === completed.length
+      return {
+        id: item.sourceId,
+        title: item.title,
+        difficulty: item.difficulty,
+        status: isCompleted
+          ? "completed"
+          : isCurrent
+            ? "current"
+            : "upcoming",
+        reason: isCompleted
+          ? "B 画像将其标记为已掌握。"
+          : isCurrent
+            ? item.reason
+            : KNOWLEDGE_DIFFICULTY_ORDER[item.difficulty]
+                > learnerLevelIndex + 1
+              ? "该目标超出当前画像一档，保留为后续学习节点。"
+              : item.reason,
+      }
+    },
+  )
+}
+
+const KNOWLEDGE_DIFFICULTY_ORDER: Record<KnowledgeDifficulty, number> = {
+  beginner: 0,
+  basic: 1,
+  intermediate: 2,
+  integrated: 3,
+}
+
+function orderPendingPathNodes(
+  pending: RagResultItem[],
+  knowledgeBase: KnowledgeBase,
+): RagResultItem[] {
+  const bySourceId = new Map(
+    pending.map((item) => [item.sourceId, item]),
+  )
+  const originalIndex = new Map(
+    pending.map((item, index) => [item.sourceId, index]),
+  )
+  const prerequisites = new Map(
+    knowledgeBase.items.map((item) => [
+      item.sourceId,
+      item.prerequisites.filter((sourceId) => bySourceId.has(sourceId)),
+    ]),
+  )
+  const remaining = new Set(bySourceId.keys())
+  const ordered: RagResultItem[] = []
+
+  while (remaining.size > 0) {
+    const ready = [...remaining]
+      .filter((sourceId) =>
+        (prerequisites.get(sourceId) ?? []).every((prerequisiteId) =>
+          !remaining.has(prerequisiteId)))
+      .sort((left, right) =>
+        (originalIndex.get(left) ?? 0) - (originalIndex.get(right) ?? 0))
+    const next = ready[0]
+    if (!next) {
+      return [
+        ...ordered,
+        ...[...remaining]
+          .sort((left, right) =>
+            (originalIndex.get(left) ?? 0) - (originalIndex.get(right) ?? 0))
+          .map((sourceId) => bySourceId.get(sourceId)!),
+      ]
     }
-  })
-  const order: Record<RoleDSession["path"][number]["status"], number> = { completed: 0, current: 1, upcoming: 2 }
-  return nodes.sort((left, right) => order[left.status] - order[right.status])
+    ordered.push(bySourceId.get(next)!)
+    remaining.delete(next)
+  }
+  return ordered
 }
 
 function normalize(value: string): string {

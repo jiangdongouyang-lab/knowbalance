@@ -61,6 +61,11 @@ export interface GradingOptions {
   max_tool_retries?: number
   expected_path_node_id?: string
   assessment_secure_ref?: string
+  /**
+   * Trusted pre-session routing may grade exactly the public anchor set before
+   * a scored route has been frozen into a formal learning session.
+   */
+  allow_anchor_only?: boolean
 }
 
 /**
@@ -234,8 +239,15 @@ async function gradeRubric(
     return { status: "blocked", score: 0, confidence: 0, feedback_code: "rubric_judge_error" }
   }
   const expected = new Map(spec.criteria.map((criterion) => [criterion.criterion_id, criterion]))
+  const publicCriterionIds = new Map(
+    spec.criteria.map((criterion, index) => [
+      criterion.criterion_id,
+      `criterion_${index + 1}`,
+    ]),
+  )
   const seen = new Set<string>()
   const rubricResults: RubricCriterionResult[] = []
+  let weightedConfidence = 0
   for (const result of judged.criteria) {
     const criterion = expected.get(result.criterion_id)
     if (!criterion || seen.has(result.criterion_id) || !validJudgeResult(result)
@@ -243,8 +255,9 @@ async function gradeRubric(
       return { status: "blocked", score: 0, confidence: 0, feedback_code: "invalid_rubric_judgment" }
     }
     seen.add(result.criterion_id)
+    weightedConfidence += result.confidence * criterion.weight
     rubricResults.push({
-      criterion_id: result.criterion_id,
+      criterion_id: publicCriterionIds.get(result.criterion_id)!,
       status: result.status,
       awarded_score: result.status === "met" ? roundScore(maxScore * criterion.weight) : 0,
       confidence: result.confidence,
@@ -252,10 +265,7 @@ async function gradeRubric(
     })
   }
   if (seen.size !== expected.size) return { status: "blocked", score: 0, confidence: 0, feedback_code: "incomplete_rubric_judgment" }
-  const confidence = roundScore(rubricResults.reduce((sum, result) => {
-    const weight = expected.get(result.criterion_id)!.weight
-    return sum + result.confidence * weight
-  }, 0))
+  const confidence = roundScore(weightedConfidence)
   const uncertain = rubricResults.some((result) => result.status === "uncertain")
   const lowConfidence = confidence < (options.minimum_rubric_confidence ?? 0.65)
   return {
@@ -364,7 +374,11 @@ function validateSubmissionBoundary(
     if (options.public_artifact && !session.public_artifact_refs.includes(options.public_artifact.artifact_id)) {
       issues.push("session_state 未引用当前 assessment_public")
     }
-    if (publicPayload && !isAllowedRoutedItemSet(publicPayload, session.required_item_ids)) {
+    if (publicPayload && !isAllowedRoutedItemSet(
+      publicPayload,
+      session.required_item_ids,
+      options.allow_anchor_only ?? false,
+    )) {
       issues.push("session_state.required_item_ids 不是 assessment 路由策略允许的题集")
     }
     if (options.assessment_secure_ref && !session.secure_artifact_refs.includes(options.assessment_secure_ref)) {
@@ -386,7 +400,9 @@ function deriveMisconceptions(answer: SubmissionAnswer | undefined, item: Assess
   const tags = new Set<string>()
   if (answer?.selected_option_id) {
     const tag = item.misconception_by_option[answer.selected_option_id]
-    if (tag) tags.add(tag)
+    if (tag) {
+      tags.add("option_misconception")
+    }
   }
   for (const code of publicCodeFailureCategories(decision.failure_codes ?? [])) {
     tags.add(`code:${code}`)
@@ -465,8 +481,13 @@ function parseNumericResponse(
 function isAllowedRoutedItemSet(
   payload: AssessmentPublicArtifact["payload"] & {},
   requiredItemIds: string[],
+  allowAnchorOnly: boolean,
 ): boolean {
   if (!payload) return false
+  if (allowAnchorOnly
+    && sameStringSet(payload.routing.anchor_item_ids, requiredItemIds)) {
+    return true
+  }
   const candidates = payload.routing.rules.map((rule) => payload.items
     .filter((item) => payload.routing.anchor_item_ids.includes(item.item_id) || rule.reveal_tiers.includes(item.tier))
     .map((item) => item.item_id))

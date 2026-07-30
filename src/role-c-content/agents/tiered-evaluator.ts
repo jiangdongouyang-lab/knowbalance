@@ -1,4 +1,8 @@
-import { ModelOutputValidationError, ModelProviderUnavailableError } from "../contracts/model-gateway"
+import {
+  ModelOutputValidationError,
+  ModelProviderUnavailableError,
+  UnsupportedTargetError,
+} from "../contracts/model-gateway"
 import type { AssessmentArtifactPair } from "../contracts/artifacts"
 import type { RagEvidencePack } from "../contracts/evidence-pack"
 import type { GenerationSpec } from "../contracts/generation-spec"
@@ -6,6 +10,7 @@ import {
   finalizeDraft,
   invalidOutputEnvelope,
   providerBlockedEnvelope,
+  unsupportedTargetEnvelope,
 } from "./harness"
 import type {
   AssessmentDraftVerifier,
@@ -39,7 +44,9 @@ export function createTieredEvaluatorAgent(
         ],
       }
       try {
-        const draft = await provider.generateAssessment(request)
+        const draft = structuredClone(
+          await provider.generateAssessment(request),
+        )
         const structural = validateAssessmentDraftStructure(request, draft)
         if (!structural.ok) {
           return invalidPair(
@@ -49,7 +56,10 @@ export function createTieredEvaluatorAgent(
           )
         }
         const verification: Awaited<ReturnType<AssessmentDraftVerifier["verifyAssessment"]>> = verifier
-          ? await verifier.verifyAssessment(request, draft)
+          ? await verifier.verifyAssessment(
+              request,
+              structuredClone(draft),
+            )
           : { answer_key_verified: false, issues: ["未配置独立 assessment verifier"] }
         const citations = structural.citations
         const objectiveCoverage = verification.objective_coverage ?? structural.objective_coverage
@@ -67,7 +77,9 @@ export function createTieredEvaluatorAgent(
             runner_image_digest: verification.runner_image_digest,
             verified_item_count: verification.verified_item_count,
             verified_test_count: verification.verified_test_count,
-            verification_issues: verification.issues,
+            verification_issues: verification.answer_key_verified
+              ? []
+              : ["测评答案未通过可信验证"],
           }),
           secure_artifact: finalizeDraft({
             ...common,
@@ -89,10 +101,40 @@ export function createTieredEvaluatorAgent(
         if (error instanceof ModelOutputValidationError) {
           return invalidPair(common, `${error.stage} 未在有限修复次数内通过校验`, error.issues)
         }
+        if (error instanceof UnsupportedTargetError) {
+          return unsupportedPair(
+            common,
+            error.message,
+            error.target_source_ids,
+          )
+        }
         if (!(error instanceof ModelProviderUnavailableError)) throw error
         return blockedPair(common, error.message)
       }
     },
+  }
+}
+
+function unsupportedPair(
+  common: { spec: GenerationSpec; evidence: RagEvidencePack; input_refs: string[] },
+  message: string,
+  targetSourceIds: string[],
+): AssessmentArtifactPair {
+  return {
+    public_artifact: unsupportedTargetEnvelope({
+      ...common,
+      agent: "tiered-evaluator",
+      artifact_type: "assessment_public",
+      message,
+      target_source_ids: targetSourceIds,
+    }),
+    secure_artifact: unsupportedTargetEnvelope({
+      ...common,
+      agent: "tiered-evaluator",
+      artifact_type: "assessment_secure",
+      message,
+      target_source_ids: targetSourceIds,
+    }),
   }
 }
 
@@ -107,7 +149,7 @@ function invalidPair(
       agent: "tiered-evaluator",
       artifact_type: "assessment_public",
       message,
-      details,
+      details: ["tiered-evaluator Draft 未通过可信门禁"],
     }),
     secure_artifact: invalidOutputEnvelope({
       ...common,

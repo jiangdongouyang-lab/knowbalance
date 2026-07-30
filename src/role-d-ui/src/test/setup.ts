@@ -7,7 +7,15 @@ afterEach(() => cleanup())
 beforeEach(() => {
   vi.stubGlobal("scrollTo", vi.fn())
   vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
-    const request = JSON.parse(String(init?.body ?? "{}")) as { runId?: string; sessionId?: string; submissionId?: string }
+    const request = JSON.parse(String(init?.body ?? "{}")) as {
+      runId?: string
+      sessionId?: string
+      learnerId?: string
+      formId?: string
+      attemptNo?: number
+      submissionId?: string
+      routingRequestId?: string
+    }
     if (String(_input).includes("/api/role-c/submit")) {
       return new Response(JSON.stringify({
         status: "blocked",
@@ -16,13 +24,56 @@ beforeEach(() => {
         message: "测试环境未执行 C 正式评分。",
       }), { status: 422, headers: { "content-type": "application/json" } })
     }
+    if (String(_input).includes("/api/role-c/route")) {
+      return new Response(JSON.stringify({
+        status: "routed",
+        routingRequestId: request.routingRequestId ?? "ROUTING-TEST",
+        anchorScoreRatio: 0.75,
+        routeId: "ROUTE-REINFORCE-TEST",
+        action: "reinforce",
+        requiredItemIds: ["I1", "I2", "I3", "I4", "I5"],
+        learningSession: {
+          phase: "route_locked",
+          routingRequestId: request.routingRequestId ?? "ROUTING-TEST",
+          sessionId: request.sessionId ?? "C-SESSION-TEST",
+          runId: request.runId ?? "RUN-TEST",
+          formId: request.formId ?? "FORM-TEST",
+          attemptNo: request.attemptNo ?? 1,
+          routeLockId: "ROUTE-LOCK-TEST",
+          routeId: "ROUTE-REINFORCE-TEST",
+          action: "reinforce",
+          anchorScoreRatio: 0.75,
+          requiredItemIds: ["I1", "I2", "I3", "I4", "I5"],
+        },
+      }), { status: 200, headers: { "content-type": "application/json" } })
+    }
     return new Response(JSON.stringify({
       status: "ready",
       runId: request.runId ?? "RUN-TEST",
       learningSession: {
+        phase: "anchor_pending",
         sessionId: "C-SESSION-TEST",
         formId: "FORM-TEST",
         attemptNo: 1,
+        profileVersion: `${request.runId ?? "RUN-TEST"}-profile-v1`,
+        pathNodeId: `${request.runId ?? "RUN-TEST"}-PATH-K007-K009-K018`,
+        targetSourceIds: ["K007", "K009", "K018"],
+        routingRequestId: "ROUTING-TEST",
+        requiredItemIds: ["I1", "I2"],
+      },
+      deliveryToD: {
+        reviewedRelease: {
+          schema_version: "1.0",
+          delivery_kind: "reviewed_release",
+          delivery_id: "DELIVERY-REVIEWED-TEST",
+          status: "accepted",
+        },
+        learningSession: {
+          schema_version: "1.0",
+          delivery_kind: "learning_session",
+          delivery_id: "DELIVERY-SESSION-TEST",
+          status: "accepted",
+        },
       },
       artifacts: [
         {

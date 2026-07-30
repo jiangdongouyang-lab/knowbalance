@@ -1,4 +1,7 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, rm } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import type {
   ConceptLessonArtifact,
   GradeResultArtifact,
@@ -27,7 +30,13 @@ import {
   type SecureArtifactStore,
 } from "../src/role-c-content/security/secure-artifact-store"
 import {
+  continueCompletedLearningCycle,
   createRoleCAgents,
+  AtomicFileAdaptiveLearningLoopJournal,
+  InMemoryAdaptiveLearningLoopJournal,
+  InMemoryLearningCycleStore,
+  InMemoryMasteryStateStore,
+  LearningCycleService,
 } from "../src/role-c-content"
 import type {
   GeneratedContentVerifiers,
@@ -35,6 +44,7 @@ import type {
 } from "../src/role-c-content/agents/types"
 import { DeterministicCodeLabContentProvider } from "../src/role-c-content/providers"
 import { runReviewedCPipeline } from "../src/role-c-content/review/run-reviewed-pipeline"
+import { runRecoverableReviewedCPipeline } from "../src/role-c-content/review/run-recoverable-pipeline"
 import type {
   ContentReviewRequest,
   ContentReviewResult,
@@ -141,6 +151,39 @@ describe("Role C next-round planning", () => {
     expect(first.generation_spec.run_id).not.toBe(fixture.spec.run_id)
     expect(first.generation_spec.spec_id).not.toBe(fixture.spec.spec_id)
     expect(Number.isSafeInteger(first.generation_spec.policies.seed)).toBe(true)
+  })
+
+  test("uses B's newer profile and A's refreshed evidence on a current-node follow-up", () => {
+    const fixture = buildFixture()
+    const updatedProfile = structuredClone(fixture.profile)
+    updatedProfile.profile_id = "PROFILE-NEXT-ROUND-V2"
+    updatedProfile.profile_version = "profile-next-round-v2"
+    updatedProfile.known_concepts.push("循环基础")
+    updatedProfile.weak_concepts = ["循环边界"]
+    const refreshedEvidence = structuredClone(fixture.evidence)
+    refreshedEvidence.retrieval_id = "RAG-CURRENT-REFRESHED"
+    refreshedEvidence.query = "循环边界 继续练习"
+
+    const result = prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback: feedbackFor(fixture, "reinforce"),
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+      next_profile_snapshot: updatedProfile,
+      next_evidence_pack: refreshedEvidence,
+    })
+
+    expect(result.status).toBe("generation_ready")
+    if (result.status !== "generation_ready") return
+    expect(result.action).toBe("reinforce")
+    expect(result.generation_spec.path_node.node_id).toBe(fixture.path.node_id)
+    expect(result.generation_spec.profile_ref.profile_version)
+      .toBe(updatedProfile.profile_version)
+    expect(result.generation_spec.learner_adaptation.known_concepts)
+      .toEqual(updatedProfile.known_concepts)
+    expect(result.generation_spec.evidence_ref)
+      .toBe(refreshedEvidence.retrieval_id)
   })
 
   test("selects explicit current generation versions and binds them to the request identity", () => {
@@ -357,6 +400,22 @@ describe("Role C next-round planning", () => {
     })
     expect("generation_spec" in result).toBe(false)
 
+    const serverObservedProfile = structuredClone(fixture.profile)
+    serverObservedProfile.profile_version = "profile-observed-v2"
+    const withProfileObservation = prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback,
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+      next_profile_snapshot: serverObservedProfile,
+    })
+    expect(withProfileObservation).toMatchObject({
+      status: "reprofile_suggested",
+      action: "reprofile",
+    })
+    expect("generation_spec" in withProfileObservation).toBe(false)
+
     const missing = structuredClone(feedback)
     delete missing.profile_drift_suggestion
     expect(prepareNextRound({
@@ -366,6 +425,58 @@ describe("Role C next-round planning", () => {
       profile_snapshot: fixture.profile,
       current_evidence_pack: fixture.evidence,
     })).toMatchObject({ status: "blocked", code: "MISSING_PROFILE_DRIFT" })
+  })
+
+  test("continues generation after B returns a reprofiled learner and path", () => {
+    const fixture = buildFixture()
+    const updatedProfile = structuredClone(fixture.profile)
+    updatedProfile.profile_version = "profile-next-round-v2"
+    updatedProfile.level = "intermediate"
+    updatedProfile.known_concepts.push("循环")
+    updatedProfile.weak_concepts = ["列表遍历"]
+    const nextPath = pathFor("PATH-AFTER-REPROFILE", "K009", "O2")
+    const nextEvidence = evidenceFor("RAG-AFTER-REPROFILE", "K009")
+    nextEvidence.learner_level = "intermediate"
+    nextEvidence.results[0]!.difficulty = "intermediate"
+
+    expect(prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback: feedbackFor(fixture, "reprofile"),
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+      next_profile_snapshot: updatedProfile,
+      next_path_node: nextPath,
+      next_evidence_pack: nextEvidence,
+    })).toMatchObject({
+      status: "blocked",
+      code: "INVALID_ADVANCE_INPUT",
+      errors: [
+        "reprofile 继续生成时必须由上游明确提供 next_generation_action",
+      ],
+    })
+
+    const result = prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback: feedbackFor(fixture, "reprofile"),
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+      next_profile_snapshot: updatedProfile,
+      next_path_node: nextPath,
+      next_evidence_pack: nextEvidence,
+      next_generation_action: "remediate",
+    })
+
+    expect(result.status).toBe("generation_ready")
+    if (result.status !== "generation_ready") return
+    expect(result.action).toBe("reprofile")
+    expect(result.generation_action).toBe("remediate")
+    expect(result.generation_spec.profile_ref.profile_version)
+      .toBe(updatedProfile.profile_version)
+    expect(result.generation_spec.path_node.node_id).toBe(nextPath.node_id)
+    expect(result.generation_spec.evidence_ref).toBe(nextEvidence.retrieval_id)
+    expect(result.focus_objective_ids).toEqual(["O2"])
   })
 
   test("rejects mixed identity, unknown focus objectives, and path input on current-node actions", () => {
@@ -1045,6 +1156,929 @@ describe("Role C next-round execution idempotency", () => {
   })
 })
 
+describe("Role C completed-cycle continuation", () => {
+  test("uses B's updated profile/path to generate, review, and idempotently publish the next round to D", async () => {
+    const fixture = buildReviewedFixture()
+    const updatedProfile = structuredClone(fixture.profile)
+    updatedProfile.profile_id = "PROFILE-NEXT-ROUND-REVIEWED-V2"
+    updatedProfile.profile_version = "profile-next-round-reviewed-v2"
+    updatedProfile.known_concepts.push("循环")
+    updatedProfile.weak_concepts = ["列表"]
+    const updatedPath = structuredClone(fixture.path)
+    updatedPath.node_id = "PATH-NEXT-ROUND-AFTER-B"
+    const updatedEvidence = structuredClone(fixture.evidence)
+    updatedEvidence.retrieval_id = "RAG-NEXT-ROUND-AFTER-B"
+    updatedEvidence.query = "循环 列表 成绩统计"
+    const feedback = feedbackFor(fixture, "reprofile")
+    const prepared = prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback,
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+      next_profile_snapshot: updatedProfile,
+      next_path_node: updatedPath,
+      next_evidence_pack: updatedEvidence,
+      next_generation_action: "advance",
+    })
+    if (prepared.status !== "generation_ready") {
+      throw new Error("fixture completed-cycle continuation not ready")
+    }
+
+    const journal = new InMemoryNextRoundExecutionJournal()
+    const adaptiveJournal = new InMemoryAdaptiveLearningLoopJournal()
+    const delivered = new Set<string>()
+    const deliveries: string[] = []
+    const lifecycleEvents: string[] = []
+    let pipelineCalls = 0
+    const secureStore = new InMemorySecureArtifactStore()
+    const cycleService = new LearningCycleService({
+      cycle_store: new InMemoryLearningCycleStore(),
+      secure_store: secureStore,
+      mastery_store: new InMemoryMasteryStateStore(),
+    })
+    const dependencies = {
+      learning_cycle: {
+        async prepareNextRoundFromCompletedSubmission() {
+          return structuredClone(prepared)
+        },
+        async registerReadyRun(
+          request: Parameters<LearningCycleService["registerReadyRun"]>[0],
+        ) {
+          lifecycleEvents.push("register")
+          return cycleService.registerReadyRun(request)
+        },
+        async openAnchorFirstSession(
+          request: Parameters<
+            LearningCycleService["openAnchorFirstSession"]
+          >[0],
+        ) {
+          lifecycleEvents.push("open_anchor_session")
+          return cycleService.openAnchorFirstSession(request)
+        },
+      },
+      agents: reviewedAgents(),
+      secure_store: secureStore,
+      review_options: {
+        review_port: {
+          policy_version: "completed-cycle-review-v1",
+          async review(request: ContentReviewRequest) {
+            return passingReviewResult(request, this.policy_version)
+          },
+        },
+      },
+      review_execution_config_version: "completed-cycle-execution-v1",
+      recovery_policy_version: "completed-cycle-recovery-policy-v1",
+      recovery_port_version: "completed-cycle-recovery-ports-v1",
+      delivery_target_namespace: "role-d-test",
+      execution_journal: journal,
+      adaptive_execution_journal: adaptiveJournal,
+      reviewed_pipeline_runner: async (
+        ...args: Parameters<typeof runReviewedCPipeline>
+      ) => {
+        pipelineCalls += 1
+        return runReviewedCPipeline(...args)
+      },
+      role_d_port: {
+        async publishReviewedRelease(
+          release: Parameters<
+            import("../src/role-c-content").RoleDPublicDeliveryPort[
+              "publishReviewedRelease"
+            ]
+          >[0],
+        ) {
+          lifecycleEvents.push("publish_release")
+          deliveries.push(release.delivery_id)
+          const status = delivered.has(release.delivery_id)
+            ? "duplicate" as const
+            : "accepted" as const
+          delivered.add(release.delivery_id)
+          return {
+            schema_version: "1.0" as const,
+            delivery_kind: "reviewed_release" as const,
+            delivery_id: release.delivery_id,
+            status,
+          }
+        },
+        async publishLearningSession(delivery: Parameters<
+          import("../src/role-c-content").RoleDLearningSessionPort[
+            "publishLearningSession"
+          ]
+        >[0]) {
+          lifecycleEvents.push("publish_session")
+          deliveries.push(delivery.delivery_id)
+          expect(delivery.session.phase).toBe("anchor_pending")
+          const status = delivered.has(delivery.delivery_id)
+            ? "duplicate" as const
+            : "accepted" as const
+          delivered.add(delivery.delivery_id)
+          return {
+            schema_version: "1.0" as const,
+            delivery_kind: "learning_session" as const,
+            delivery_id: delivery.delivery_id,
+            status,
+          }
+        },
+        async publishReviewRecoveryStatus(delivery: Parameters<
+          import("../src/role-c-content").RoleDReviewRecoveryStatusPort[
+            "publishReviewRecoveryStatus"
+          ]
+        >[0]) {
+          throw new Error(`unexpected recovery status ${delivery.delivery_id}`)
+        },
+      },
+    }
+    const continuationInput = {
+      session_id: "SESSION-NEXT-ROUND",
+      submission_id: "SUB-NEXT-ROUND",
+      authenticated_learner_id_hash: "learner-hash",
+      profile_snapshot: fixture.profile,
+      next_profile_snapshot: updatedProfile,
+      next_path_node: updatedPath,
+      next_evidence_pack: updatedEvidence,
+      next_generation_action: "advance" as const,
+    }
+
+    const first = await continueCompletedLearningCycle(
+      continuationInput,
+      dependencies,
+    )
+    const replay = await continueCompletedLearningCycle(
+      structuredClone(continuationInput),
+      dependencies,
+    )
+
+    expect(first.status).toBe("published")
+    expect(replay.status).toBe("published")
+    if (first.status !== "published" || replay.status !== "published") return
+    expect(first.preparation.action).toBe("reprofile")
+    expect(first.preparation.generation_action).toBe("advance")
+    expect(first.preparation.profile_version)
+      .toBe(updatedProfile.profile_version)
+    expect(first.preparation.path_node_id)
+      .toBe(updatedPath.node_id)
+    expect(first.generation.pipeline_state).toBe("READY")
+    expect(first.learning_session.run_id).toBe(first.generation.run_id)
+    expect(replay.learning_session).toEqual(first.learning_session)
+    expect(first.delivery_to_d.reviewed_release.status).toBe("accepted")
+    expect(first.delivery_to_d.learning_session.status).toBe("accepted")
+    expect(replay.delivery_to_d).toEqual(first.delivery_to_d)
+    expect(deliveries).toEqual([
+      first.delivery_to_d.reviewed_release.delivery_id,
+      first.delivery_to_d.learning_session.delivery_id,
+    ])
+    expect(pipelineCalls).toBe(1)
+    expect(journal.size).toBe(1)
+    expect(adaptiveJournal.size).toBe(1)
+    expect(lifecycleEvents).toEqual([
+      "register",
+      "open_anchor_session",
+      "publish_release",
+      "publish_session",
+    ])
+    expect(JSON.stringify(first)).not.toContain(
+      updatedEvidence.results[0]!.quiz_seeds[0]!.answer,
+    )
+  })
+
+  test("opens an anchor-first session and retries safely after session creation fails", async () => {
+    const fixture = buildReviewedFixture()
+    const prepared = prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback: feedbackFor(fixture, "remediate"),
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+    })
+    if (prepared.status !== "generation_ready") {
+      throw new Error("fixture remediate continuation not ready")
+    }
+
+    const secureStore = new InMemorySecureArtifactStore()
+    const journal = new InMemoryNextRoundExecutionJournal()
+    const cycleService = new LearningCycleService({
+      cycle_store: new InMemoryLearningCycleStore(),
+      secure_store: secureStore,
+      mastery_store: new InMemoryMasteryStateStore(),
+    })
+    let openAttempts = 0
+    let pipelineCalls = 0
+    let deliveryCalls = 0
+    let sessionDeliveryCalls = 0
+    let publishedRelease:
+      | Parameters<
+          import("../src/role-c-content").RoleDPublicDeliveryPort[
+            "publishReviewedRelease"
+          ]
+        >[0]
+      | undefined
+    let publishedSession:
+      | Parameters<
+          import("../src/role-c-content").RoleDLearningSessionPort[
+            "publishLearningSession"
+          ]
+        >[0]
+      | undefined
+    const dependencies = {
+      learning_cycle: {
+        async prepareNextRoundFromCompletedSubmission() {
+          return structuredClone(prepared)
+        },
+        registerReadyRun: cycleService.registerReadyRun.bind(cycleService),
+        async openAnchorFirstSession(
+          request: Parameters<
+            LearningCycleService["openAnchorFirstSession"]
+          >[0],
+        ) {
+          openAttempts += 1
+          if (openAttempts === 1) throw new Error("temporary session failure")
+          return cycleService.openAnchorFirstSession(request)
+        },
+      },
+      agents: reviewedAgents(),
+      secure_store: secureStore,
+      review_options: {
+        review_port: {
+          policy_version: "remediate-route-review-v1",
+          async review(request: ContentReviewRequest) {
+            return passingReviewResult(request, this.policy_version)
+          },
+        },
+      },
+      review_execution_config_version: "remediate-route-execution-v1",
+      recovery_policy_version: "remediate-route-recovery-policy-v1",
+      recovery_port_version: "remediate-route-recovery-ports-v1",
+      delivery_target_namespace: "role-d-test",
+      execution_journal: journal,
+      reviewed_pipeline_runner: async (
+        ...args: Parameters<typeof runReviewedCPipeline>
+      ) => {
+        pipelineCalls += 1
+        return runReviewedCPipeline(...args)
+      },
+      role_d_port: {
+        async publishReviewedRelease(
+          release: Parameters<
+            import("../src/role-c-content").RoleDPublicDeliveryPort[
+              "publishReviewedRelease"
+            ]
+          >[0],
+        ) {
+          deliveryCalls += 1
+          publishedRelease = structuredClone(release)
+          return {
+            schema_version: "1.0" as const,
+            delivery_kind: "reviewed_release" as const,
+            delivery_id: release.delivery_id,
+            status: "accepted" as const,
+          }
+        },
+        async publishLearningSession(delivery: Parameters<
+          import("../src/role-c-content").RoleDLearningSessionPort[
+            "publishLearningSession"
+          ]
+        >[0]) {
+          sessionDeliveryCalls += 1
+          publishedSession = structuredClone(delivery)
+          return {
+            schema_version: "1.0" as const,
+            delivery_kind: "learning_session" as const,
+            delivery_id: delivery.delivery_id,
+            status: "accepted" as const,
+          }
+        },
+        async publishReviewRecoveryStatus(delivery: Parameters<
+          import("../src/role-c-content").RoleDReviewRecoveryStatusPort[
+            "publishReviewRecoveryStatus"
+          ]
+        >[0]) {
+          throw new Error(`unexpected recovery status ${delivery.delivery_id}`)
+        },
+      },
+    }
+    const continuationInput = {
+      session_id: "SESSION-REMEDIATE-PARENT",
+      submission_id: "SUB-REMEDIATE-PARENT",
+      authenticated_learner_id_hash: "learner-hash",
+      profile_snapshot: fixture.profile,
+    }
+
+    await expect(continueCompletedLearningCycle(
+      continuationInput,
+      dependencies,
+    )).rejects.toThrow("temporary session failure")
+    expect(deliveryCalls).toBe(0)
+    expect(pipelineCalls).toBe(1)
+    expect(journal.size).toBe(1)
+
+    const result = await continueCompletedLearningCycle(
+      continuationInput,
+      dependencies,
+    )
+    expect(result.status).toBe("published")
+    if (result.status !== "published"
+      || !publishedRelease
+      || !publishedSession) return
+    expect(result.learning_session.phase).toBe("anchor_pending")
+    expect(publishedSession.session).toEqual(result.learning_session)
+    expect("learning_session" in publishedRelease).toBe(false)
+    const assessment = publishedRelease.artifacts[2].payload!
+    expect(result.learning_session.required_item_ids)
+      .toEqual(assessment.routing.anchor_item_ids)
+    expect(openAttempts).toBe(2)
+    expect(deliveryCalls).toBe(1)
+    expect(sessionDeliveryCalls).toBe(1)
+    expect(pipelineCalls).toBe(1)
+  })
+
+  test("registers and publishes the recovered final input after A supplies new evidence", async () => {
+    const fixture = buildReviewedFixture()
+    const prepared = prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback: feedbackFor(fixture, "reinforce"),
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+    })
+    if (prepared.status !== "generation_ready") {
+      throw new Error("fixture evidence recovery continuation not ready")
+    }
+    const refreshed = structuredClone(prepared.evidence_pack)
+    refreshed.retrieval_id = "RAG-NEXT-ROUND-RECOVERED"
+    refreshed.query = "循环 巩固 补充证据"
+    refreshed.results[0]!.facts[0]!.content = "补充后的循环教学事实"
+    const secretAnswer = "SECRET_ADAPTIVE_RECOVERY_ANSWER_31ab"
+    refreshed.results[0]!.quiz_seeds[0]!.answer = secretAnswer
+
+    const secureStore = new InMemorySecureArtifactStore()
+    const cycleService = new LearningCycleService({
+      cycle_store: new InMemoryLearningCycleStore(),
+      secure_store: secureStore,
+      mastery_store: new InMemoryMasteryStateStore(),
+    })
+    let registered:
+      | Parameters<LearningCycleService["registerReadyRun"]>[0]
+      | undefined
+    let evidenceCalls = 0
+    let pipelineCalls = 0
+    let publishedJson = ""
+    const result = await continueCompletedLearningCycle(
+      {
+        session_id: "SESSION-EVIDENCE-PARENT",
+        submission_id: "SUB-EVIDENCE-PARENT",
+        authenticated_learner_id_hash: "learner-hash",
+        profile_snapshot: fixture.profile,
+      },
+      {
+        learning_cycle: {
+          async prepareNextRoundFromCompletedSubmission() {
+            return structuredClone(prepared)
+          },
+          async registerReadyRun(request) {
+            registered = structuredClone(request)
+            return cycleService.registerReadyRun(request)
+          },
+          openAnchorFirstSession:
+            cycleService.openAnchorFirstSession.bind(cycleService),
+        },
+        agents: reviewedAgents(),
+        secure_store: secureStore,
+        review_options: {
+          review_port: {
+            policy_version: "adaptive-evidence-recovery-review-v1",
+            async review(request) {
+              return request.generation_spec.evidence_ref
+                  === prepared.evidence_pack.retrieval_id
+                ? newEvidenceReviewResult(request, this.policy_version)
+                : passingReviewResult(request, this.policy_version)
+            },
+          },
+        },
+        review_execution_config_version:
+          "adaptive-evidence-recovery-execution-v1",
+        recovery_policy_version:
+          "adaptive-evidence-recovery-policy-v1",
+        recovery_port_version:
+          "adaptive-evidence-recovery-ports-v1",
+        delivery_target_namespace: "role-d-test",
+        execution_journal: new InMemoryNextRoundExecutionJournal(),
+        reviewed_pipeline_runner: async (
+          ...args: Parameters<typeof runReviewedCPipeline>
+        ) => {
+          pipelineCalls += 1
+          return runReviewedCPipeline(...args)
+        },
+        evidence_refresh_port: {
+          async refreshEvidence() {
+            evidenceCalls += 1
+            return structuredClone(refreshed)
+          },
+        },
+        role_d_port: {
+          async publishReviewedRelease(release) {
+            publishedJson += JSON.stringify(release)
+            return {
+              schema_version: "1.0",
+              delivery_kind: "reviewed_release",
+              delivery_id: release.delivery_id,
+              status: "accepted",
+            }
+          },
+          async publishLearningSession(delivery) {
+            publishedJson += JSON.stringify(delivery)
+            return {
+              schema_version: "1.0",
+              delivery_kind: "learning_session",
+              delivery_id: delivery.delivery_id,
+              status: "accepted",
+            }
+          },
+          async publishReviewRecoveryStatus(delivery) {
+            throw new Error(`unexpected recovery status ${delivery.delivery_id}`)
+          },
+        },
+      },
+    )
+
+    expect(result.status).toBe("published")
+    if (result.status !== "published" || !registered) return
+    expect(result.generation.recovery).toMatchObject({
+      code: "READY",
+      required_action: "request_new_evidence",
+      recovery_attempts: 1,
+    })
+    expect(registered.pipeline_input.evidence_pack.retrieval_id)
+      .toBe(refreshed.retrieval_id)
+    expect(registered.pipeline_input.generation_spec.spec_id)
+      .not.toBe(prepared.generation_spec.spec_id)
+    expect(registered.pipeline_result.generation_spec.spec_id)
+      .toBe(registered.pipeline_input.generation_spec.spec_id)
+    expect(result.generation.run_id)
+      .toBe(registered.pipeline_input.generation_spec.run_id)
+    expect(evidenceCalls).toBe(1)
+    expect(pipelineCalls).toBe(2)
+    expect(JSON.stringify(result)).not.toContain(secretAnswer)
+    expect(publishedJson).not.toContain(secretAnswer)
+  })
+
+  test("never opens or publishes when final run registration fails", async () => {
+    const fixture = buildReviewedFixture()
+    const prepared = prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback: feedbackFor(fixture, "reinforce"),
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+    })
+    if (prepared.status !== "generation_ready") {
+      throw new Error("fixture registration failure continuation not ready")
+    }
+    let registerCalls = 0
+    let openCalls = 0
+    let deliveryCalls = 0
+
+    await expect(continueCompletedLearningCycle(
+      {
+        session_id: "SESSION-REGISTER-FAIL-PARENT",
+        submission_id: "SUB-REGISTER-FAIL-PARENT",
+        authenticated_learner_id_hash: "learner-hash",
+        profile_snapshot: fixture.profile,
+      },
+      {
+        learning_cycle: {
+          async prepareNextRoundFromCompletedSubmission() {
+            return structuredClone(prepared)
+          },
+          async registerReadyRun() {
+            registerCalls += 1
+            throw new Error("registration unavailable")
+          },
+          async openAnchorFirstSession() {
+            openCalls += 1
+            return {}
+          },
+        },
+        agents: reviewedAgents(),
+        secure_store: new InMemorySecureArtifactStore(),
+        review_options: {
+          review_port: {
+            policy_version: "registration-failure-review-v1",
+            async review(request) {
+              return passingReviewResult(request, this.policy_version)
+            },
+          },
+        },
+        review_execution_config_version: "registration-failure-execution-v1",
+        recovery_policy_version: "registration-failure-recovery-policy-v1",
+        recovery_port_version: "registration-failure-recovery-ports-v1",
+        delivery_target_namespace: "role-d-test",
+        role_d_port: {
+          async publishReviewedRelease(release) {
+            deliveryCalls += 1
+            return {
+              schema_version: "1.0",
+              delivery_kind: "reviewed_release",
+              delivery_id: release.delivery_id,
+              status: "accepted",
+            }
+          },
+          async publishLearningSession(delivery) {
+            deliveryCalls += 1
+            return {
+              schema_version: "1.0",
+              delivery_kind: "learning_session",
+              delivery_id: delivery.delivery_id,
+              status: "accepted",
+            }
+          },
+          async publishReviewRecoveryStatus(delivery) {
+            deliveryCalls += 1
+            return {
+              schema_version: "1.0",
+              delivery_kind: "review_recovery_status",
+              delivery_id: delivery.delivery_id,
+              status: "accepted",
+            }
+          },
+        },
+      },
+    )).rejects.toThrow("registration unavailable")
+    expect(registerCalls).toBe(1)
+    expect(openCalls).toBe(0)
+    expect(deliveryCalls).toBe(0)
+  })
+
+  test("publishes a structured D status when the prepared target is unsupported", async () => {
+    const fixture = buildFixture()
+    const prepared = prepareNextRound({
+      authenticated_learner_id_hash: "learner-hash",
+      feedback: feedbackFor(fixture, "reinforce"),
+      parent_spec: fixture.spec,
+      profile_snapshot: fixture.profile,
+      current_evidence_pack: fixture.evidence,
+    })
+    if (prepared.status !== "generation_ready") {
+      throw new Error("fixture unsupported continuation not ready")
+    }
+    let deliveryCalls = 0
+
+    const result = await continueCompletedLearningCycle(
+      {
+        session_id: "SESSION-NEXT-ROUND",
+        submission_id: "SUB-NEXT-ROUND",
+        authenticated_learner_id_hash: "learner-hash",
+        profile_snapshot: fixture.profile,
+      },
+      {
+        learning_cycle: {
+          async prepareNextRoundFromCompletedSubmission() {
+            return structuredClone(prepared)
+          },
+          async registerReadyRun() {
+            throw new Error("blocked generation must not register")
+          },
+          async openAnchorFirstSession() {
+            throw new Error("blocked generation must not open a session")
+          },
+        },
+        agents: reviewedAgents(),
+        secure_store: new InMemorySecureArtifactStore(),
+        review_options: {
+          review_port: {
+            policy_version: "unsupported-target-review-v1",
+            async review() {
+              throw new Error("unsupported generation must not reach review")
+            },
+          },
+        },
+        review_execution_config_version: "unsupported-target-execution-v1",
+        recovery_policy_version: "unsupported-target-recovery-policy-v1",
+        recovery_port_version: "unsupported-target-recovery-ports-v1",
+        delivery_target_namespace: "role-d-test",
+        role_d_port: {
+          async publishReviewedRelease(release) {
+            throw new Error(`blocked generation released ${release.delivery_id}`)
+          },
+          async publishLearningSession(delivery) {
+            throw new Error(`blocked generation opened ${delivery.delivery_id}`)
+          },
+          async publishReviewRecoveryStatus(delivery) {
+            deliveryCalls += 1
+            return {
+              schema_version: "1.0",
+              delivery_kind: "review_recovery_status",
+              delivery_id: delivery.delivery_id,
+              status: "accepted",
+            }
+          },
+        },
+      },
+    )
+
+    expect(result.status).toBe("blocked")
+    expect(result).toMatchObject({
+      stage: "generation_review",
+      generation: {
+        pipeline_status: "blocked",
+        recovery: {
+          code: "UNSUPPORTED_TARGET",
+        },
+      },
+    })
+    expect(result).toMatchObject({
+      delivery_to_d: {
+        delivery_kind: "review_recovery_status",
+        status: "accepted",
+      },
+    })
+    expect(deliveryCalls).toBe(1)
+  })
+})
+
+describe("Role C completed-cycle restart recovery", () => {
+  test("replays a durable A result after a crash and freezes the published outcome", async () => {
+    const root = await mkdtemp(join(tmpdir(), "role-c-adaptive-restart-"))
+    try {
+      const fixture = buildReviewedFixture()
+      const prepared = prepareNextRound({
+        authenticated_learner_id_hash: "learner-hash",
+        feedback: feedbackFor(fixture, "reinforce"),
+        parent_spec: fixture.spec,
+        profile_snapshot: fixture.profile,
+        current_evidence_pack: fixture.evidence,
+      })
+      if (prepared.status !== "generation_ready") {
+        throw new Error("fixture restart continuation not ready")
+      }
+      const refreshed = structuredClone(prepared.evidence_pack)
+      refreshed.retrieval_id = "RAG-ADAPTIVE-RESTART"
+      refreshed.query = "循环 列表 恢复证据"
+      refreshed.results[0]!.facts[0]!.content = "重启后复用的证据"
+      const secretAnswer = "SECRET_DURABLE_A_RESULT_7dd1"
+      refreshed.results[0]!.quiz_seeds[0]!.answer = secretAnswer
+
+      const secureStore = new InMemorySecureArtifactStore()
+      const cycleService = new LearningCycleService({
+        cycle_store: new InMemoryLearningCycleStore(),
+        secure_store: secureStore,
+        mastery_store: new InMemoryMasteryStateStore(),
+      })
+      let evidenceCalls = 0
+      let reviewedRunnerCalls = 0
+      let registerCalls = 0
+      let openCalls = 0
+      let deliveryCalls = 0
+      const continuationInput = {
+        session_id: "SESSION-ADAPTIVE-RESTART",
+        submission_id: "SUB-ADAPTIVE-RESTART",
+        authenticated_learner_id_hash: "learner-hash",
+        profile_snapshot: fixture.profile,
+      }
+      const dependencies = () => ({
+        learning_cycle: {
+          async prepareNextRoundFromCompletedSubmission() {
+            return structuredClone(prepared)
+          },
+          async registerReadyRun(
+            request: Parameters<LearningCycleService["registerReadyRun"]>[0],
+          ) {
+            registerCalls += 1
+            return cycleService.registerReadyRun(request)
+          },
+          async openAnchorFirstSession(
+            request: Parameters<
+              LearningCycleService["openAnchorFirstSession"]
+            >[0],
+          ) {
+            openCalls += 1
+            return cycleService.openAnchorFirstSession(request)
+          },
+        },
+        agents: reviewedAgents(),
+        secure_store: secureStore,
+        review_options: {
+          review_port: {
+            policy_version: "adaptive-restart-review-v1",
+            async review(request: ContentReviewRequest) {
+              return request.generation_spec.evidence_ref
+                  === prepared.evidence_pack.retrieval_id
+                ? newEvidenceReviewResult(request, this.policy_version)
+                : passingReviewResult(request, this.policy_version)
+            },
+          },
+        },
+        review_execution_config_version: "adaptive-restart-execution-v1",
+        recovery_policy_version: "adaptive-restart-policy-v1",
+        recovery_port_version: "adaptive-restart-ports-v1",
+        delivery_target_namespace: "role-d-adaptive-restart",
+        adaptive_execution_journal:
+          new AtomicFileAdaptiveLearningLoopJournal({
+            root_directory: root,
+          }),
+        execution_journal: new InMemoryNextRoundExecutionJournal(),
+        reviewed_pipeline_runner: async (
+          ...args: Parameters<typeof runReviewedCPipeline>
+        ) => {
+          reviewedRunnerCalls += 1
+          if (reviewedRunnerCalls === 2) {
+            throw new Error("simulated process interruption")
+          }
+          return runReviewedCPipeline(...args)
+        },
+        evidence_refresh_port: {
+          async refreshEvidence() {
+            evidenceCalls += 1
+            return structuredClone(refreshed)
+          },
+        },
+        role_d_port: {
+          async publishReviewedRelease(release: Parameters<
+            import("../src/role-c-content").RoleDPublicDeliveryPort[
+              "publishReviewedRelease"
+            ]
+          >[0]) {
+            deliveryCalls += 1
+            return {
+              schema_version: "1.0" as const,
+              delivery_kind: "reviewed_release" as const,
+              delivery_id: release.delivery_id,
+              status: "accepted" as const,
+            }
+          },
+          async publishLearningSession(delivery: Parameters<
+            import("../src/role-c-content").RoleDLearningSessionPort[
+              "publishLearningSession"
+            ]
+          >[0]) {
+            deliveryCalls += 1
+            return {
+              schema_version: "1.0" as const,
+              delivery_kind: "learning_session" as const,
+              delivery_id: delivery.delivery_id,
+              status: "accepted" as const,
+            }
+          },
+          async publishReviewRecoveryStatus(delivery: Parameters<
+            import("../src/role-c-content").RoleDReviewRecoveryStatusPort[
+              "publishReviewRecoveryStatus"
+            ]
+          >[0]) {
+            throw new Error(`unexpected recovery status ${delivery.delivery_id}`)
+          },
+        },
+      })
+
+      await expect(continueCompletedLearningCycle(
+        continuationInput,
+        dependencies(),
+      )).rejects.toThrow("simulated process interruption")
+      expect(evidenceCalls).toBe(1)
+      expect(registerCalls).toBe(0)
+      expect(openCalls).toBe(0)
+      expect(deliveryCalls).toBe(0)
+
+      const recovered = await continueCompletedLearningCycle(
+        continuationInput,
+        dependencies(),
+      )
+      const replay = await continueCompletedLearningCycle(
+        structuredClone(continuationInput),
+        dependencies(),
+      )
+      expect(recovered.status).toBe("published")
+      expect(replay).toEqual(recovered)
+      expect(evidenceCalls).toBe(1)
+      expect(reviewedRunnerCalls).toBe(4)
+      expect(registerCalls).toBe(1)
+      expect(openCalls).toBe(1)
+      expect(deliveryCalls).toBe(2)
+      expect(JSON.stringify(recovered)).not.toContain(secretAnswer)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test("retries only the same terminal D delivery after an acknowledgement is lost", async () => {
+    const root = await mkdtemp(join(tmpdir(), "role-c-terminal-restart-"))
+    try {
+      const fixture = buildFixture()
+      const prepared = prepareNextRound({
+        authenticated_learner_id_hash: "learner-hash",
+        feedback: feedbackFor(fixture, "reinforce"),
+        parent_spec: fixture.spec,
+        profile_snapshot: fixture.profile,
+        current_evidence_pack: fixture.evidence,
+      })
+      if (prepared.status !== "generation_ready") {
+        throw new Error("fixture terminal restart not ready")
+      }
+      let recoverableCalls = 0
+      let statusDeliveryCalls = 0
+      const secureStore = new InMemorySecureArtifactStore()
+      const continuationInput = {
+        session_id: "SESSION-TERMINAL-RESTART",
+        submission_id: "SUB-TERMINAL-RESTART",
+        authenticated_learner_id_hash: "learner-hash",
+        profile_snapshot: fixture.profile,
+      }
+      const dependencies = () => ({
+        learning_cycle: {
+          async prepareNextRoundFromCompletedSubmission() {
+            return structuredClone(prepared)
+          },
+          async registerReadyRun() {
+            throw new Error("terminal result must not register")
+          },
+          async openAnchorFirstSession() {
+            throw new Error("terminal result must not open a session")
+          },
+        },
+        agents: reviewedAgents(),
+        secure_store: secureStore,
+        review_options: {
+          review_port: {
+            policy_version: "terminal-restart-review-v1",
+            async review() {
+              throw new Error("unsupported target must not reach review")
+            },
+          },
+        },
+        review_execution_config_version: "terminal-restart-execution-v1",
+        recovery_policy_version: "terminal-restart-policy-v1",
+        recovery_port_version: "terminal-restart-ports-v1",
+        delivery_target_namespace: "role-d-terminal-restart",
+        adaptive_execution_journal:
+          new AtomicFileAdaptiveLearningLoopJournal({
+            root_directory: root,
+          }),
+        recoverable_pipeline_runner: async (
+          ...args: Parameters<typeof runRecoverableReviewedCPipeline>
+        ) => {
+          recoverableCalls += 1
+          return runRecoverableReviewedCPipeline(...args)
+        },
+        role_d_port: {
+          async publishReviewedRelease(release: Parameters<
+            import("../src/role-c-content").RoleDPublicDeliveryPort[
+              "publishReviewedRelease"
+            ]
+          >[0]) {
+            throw new Error(`terminal result released ${release.delivery_id}`)
+          },
+          async publishLearningSession(delivery: Parameters<
+            import("../src/role-c-content").RoleDLearningSessionPort[
+              "publishLearningSession"
+            ]
+          >[0]) {
+            throw new Error(`terminal result opened ${delivery.delivery_id}`)
+          },
+          async publishReviewRecoveryStatus(delivery: Parameters<
+            import("../src/role-c-content").RoleDReviewRecoveryStatusPort[
+              "publishReviewRecoveryStatus"
+            ]
+          >[0]) {
+            statusDeliveryCalls += 1
+            if (statusDeliveryCalls === 1) {
+              throw new Error("terminal acknowledgement lost")
+            }
+            return {
+              schema_version: "1.0" as const,
+              delivery_kind: "review_recovery_status" as const,
+              delivery_id: delivery.delivery_id,
+              status: "duplicate" as const,
+            }
+          },
+        },
+      })
+
+      await expect(continueCompletedLearningCycle(
+        continuationInput,
+        dependencies(),
+      )).rejects.toThrow("terminal acknowledgement lost")
+      const recovered = await continueCompletedLearningCycle(
+        continuationInput,
+        dependencies(),
+      )
+      const replay = await continueCompletedLearningCycle(
+        structuredClone(continuationInput),
+        dependencies(),
+      )
+      expect(recovered.status).toBe("blocked")
+      expect(recovered).toMatchObject({
+        delivery_to_d: {
+          delivery_kind: "review_recovery_status",
+          status: "duplicate",
+        },
+      })
+      expect(replay).toEqual(recovered)
+      expect(recoverableCalls).toBe(1)
+      expect(statusDeliveryCalls).toBe(2)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
+
 function buildFixture(options: {
   level?: LearnerProfileSnapshot["level"]
   difficulty?: GenerationSpec["difficulty"]
@@ -1419,5 +2453,69 @@ function passingReviewResult(
       revision_instructions: [],
     })),
     revision_instructions: [],
+  }
+}
+
+function newEvidenceReviewResult(
+  request: ContentReviewRequest,
+  policyVersion: string,
+): ContentReviewResult {
+  const target = request.artifacts[0]!
+  const finding = {
+    source: "fact_audit" as const,
+    code: "evidence_support",
+    artifact_kind: target.kind,
+    artifact_id: target.artifact.artifact_id,
+    message: "当前冻结证据不足以支持教学内容",
+    proposed_action: "请求 A 补充证据后重新生成",
+    fix_scope: "new_evidence" as const,
+    evidence_refs: [target.artifact.artifact_id],
+  }
+  const instruction = {
+    ...finding,
+    instruction_id: `REV-EVIDENCE-${target.artifact.artifact_id}`,
+    target_agent: "concept-tutor" as const,
+    target_artifact_id: target.artifact.artifact_id,
+    objective_id: request.generation_spec.targets[0]!.objective_id,
+  }
+  return {
+    run_id: request.run_id,
+    pipeline_input_hash: request.pipeline_input_hash,
+    generation_spec_hash: request.generation_spec_hash,
+    policy_version: policyVersion,
+    revision_round: request.revision_round,
+    max_revision_rounds: request.max_revision_rounds,
+    evidence_hash: request.evidence_hash,
+    decision: "reject",
+    artifact_results: request.artifacts.map((artifact, index) => index === 0
+      ? {
+          artifact_kind: artifact.kind,
+          artifact_id: artifact.artifact.artifact_id,
+          artifact_hash: artifact.artifact_hash,
+          fact_status: "reject" as const,
+          teaching_status: "pass" as const,
+          decision: "reject" as const,
+          can_revise: false,
+          findings: [finding],
+          revision_instructions: [instruction],
+        }
+      : {
+          artifact_kind: artifact.kind,
+          artifact_id: artifact.artifact.artifact_id,
+          artifact_hash: artifact.artifact_hash,
+          fact_status: "pass" as const,
+          teaching_status: "pass" as const,
+          decision: "pass" as const,
+          can_revise: false,
+          findings: [],
+          revision_instructions: [],
+        }),
+    revision_instructions: [instruction],
+    failed_dimensions: ["evidence_support"],
+    missing_prerequisite_source_ids: [],
+    unknown_prerequisite_refs: [],
+    required_action: "request_new_evidence",
+    fix_scope: "new_evidence",
+    can_recover: true,
   }
 }

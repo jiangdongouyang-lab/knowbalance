@@ -852,8 +852,8 @@ function failedResult(
   }
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "C 流水线发生未知错误"
+function errorMessage(_error: unknown): string {
+  return "C 内部依赖调用失败"
 }
 
 function blockedResult(

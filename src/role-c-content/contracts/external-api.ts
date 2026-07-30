@@ -16,6 +16,11 @@ import type { AgentTraceEvent, LearningEvidenceEvent, ProfileDriftSuggestion } f
 import type { LearnerProfileSnapshot, LearningPathNode } from "./profile-adapter"
 import type { DynamicFeedbackResult } from "./dynamic-feedback"
 import type { ReviewedCPipelineResult } from "../review/types"
+import type { ReviewRecoveryPublicResult } from "../review/run-recoverable-pipeline"
+import type {
+  RoleBPathPlanningRequest,
+  RoleBPathPlanningResult,
+} from "./recovery"
 import { C_SCHEMA_VERSION, contentHash, type SchemaVersion } from "./common"
 import { assertReviewedReadyPipeline } from "../review/validate-reviewed-release"
 import { validatePublicArtifactNoSecrets } from "../validators/public-secure-leak-validator"
@@ -31,15 +36,22 @@ export type PublicArtifact =
 /** Complete inbound message inventory for Role C's current framework boundary. */
 export interface RoleCInboundMessages {
   from_a: RagEvidencePack
-  from_b: LearnerProfileSnapshot | LearningPathNode
+  from_b:
+    | LearnerProfileSnapshot
+    | LearningPathNode
+    | RoleBPathPlanningResult
   from_d: SubmissionEnvelope
 }
 
 /** Complete outbound message inventory. Secure artifacts are deliberately not part of this public API. */
 export interface RoleCOutboundMessages {
   to_a: EvidenceGapRequest | FactAuditPacket
-  to_b: RoleCLearningProgressDelivery
-  to_d: RoleCReviewedReleaseDelivery | RoleCDynamicFeedbackDelivery
+  to_b: RoleCLearningProgressDelivery | RoleBPathPlanningRequest
+  to_d:
+    | RoleCReviewedReleaseDelivery
+    | RoleCDynamicFeedbackDelivery
+    | RoleCReviewRecoveryStatusDelivery
+    | RoleCLearningSessionDelivery
 }
 
 /** Transport-neutral integration ports; HTTP/OpenCode/MCP adapters can implement these contracts. */
@@ -59,6 +71,8 @@ export type RoleCDeliveryKind =
   | "learning_progress"
   | "reviewed_release"
   | "dynamic_feedback"
+  | "review_recovery_status"
+  | "learning_session"
 export type RoleCDeliveryStatus = "accepted" | "duplicate"
 
 /**
@@ -89,12 +103,69 @@ export interface RoleCReviewedReleaseDelivery {
   trace_events: [AgentTraceEvent, ...AgentTraceEvent[]]
 }
 
+export type RoleCLearningSessionHandoff =
+  | {
+      phase: "anchor_pending"
+      routing_request_id: string
+      session_id: string
+      run_id: string
+      form_id: string
+      attempt_no: number
+      /** Exactly the public anchor set; no route has been selected yet. */
+      required_item_ids: string[]
+    }
+  | {
+      phase: "route_locked"
+      routing_request_id: string
+      session_id: string
+      run_id: string
+      form_id: string
+      attempt_no: number
+      route_lock_id: string
+      route_id: string
+      action: "remediate" | "reinforce" | "advance"
+      anchor_score_ratio: number
+      required_item_ids: string[]
+    }
+
+export interface RoleCLearningSessionDelivery {
+  schema_version: SchemaVersion
+  delivery_kind: "learning_session"
+  delivery_id: string
+  session: RoleCLearningSessionHandoff
+}
+
+export type TerminalReviewRecoveryPublicResult =
+  ReviewRecoveryPublicResult & (
+    | {
+        pipeline_status: "blocked"
+        pipeline_state: "BLOCKED"
+      }
+    | {
+        pipeline_status: "failed"
+        pipeline_state: "FAILED"
+      }
+  )
+
+export interface RoleCReviewRecoveryStatusDelivery {
+  schema_version: SchemaVersion
+  delivery_kind: "review_recovery_status"
+  delivery_id: string
+  result: TerminalReviewRecoveryPublicResult
+}
+
 export interface RoleCDynamicFeedbackDelivery {
   schema_version: SchemaVersion
   delivery_kind: "dynamic_feedback"
   delivery_id: string
   feedback: DynamicFeedbackResult
 }
+
+export type RoleCToDDelivery =
+  | RoleCReviewedReleaseDelivery
+  | RoleCDynamicFeedbackDelivery
+  | RoleCReviewRecoveryStatusDelivery
+  | RoleCLearningSessionDelivery
 
 interface RoleCLearningProgressDeliveryBase {
   schema_version: SchemaVersion
@@ -130,6 +201,25 @@ export interface RoleDDynamicFeedbackPort {
    */
   publishDynamicFeedback(
     delivery: RoleCDynamicFeedbackDelivery,
+  ): Promise<RoleCDeliveryAck>
+}
+
+export interface RoleDReviewRecoveryStatusPort {
+  /**
+   * Commits one terminal review/recovery status. READY content uses the
+   * reviewed-release boundary instead.
+   */
+  publishReviewRecoveryStatus(
+    delivery: RoleCReviewRecoveryStatusDelivery,
+  ): Promise<RoleCDeliveryAck>
+}
+
+export interface RoleDLearningSessionPort {
+  /**
+   * Commits one immutable session handoff independently of reviewed content.
+   */
+  publishLearningSession(
+    delivery: RoleCLearningSessionDelivery,
   ): Promise<RoleCDeliveryAck>
 }
 
@@ -198,7 +288,11 @@ export async function deliverRoleCToD(
   pipeline: ReviewedCPipelineResult,
 ): Promise<RoleCDeliveryAck> {
   const release = reviewedRelease(pipeline)
-  return publishReviewedReleaseToD(port, pipeline, release)
+  return publishReviewedReleaseToD(
+    port,
+    pipeline,
+    release,
+  )
 }
 
 function reviewedRelease(pipeline: ReviewedCPipelineResult): {
@@ -287,6 +381,148 @@ function reviewedReleaseDeliveryIdentity(
   }
 }
 
+/**
+ * Recomputes the stable identity carried in a C -> D delivery ID.
+ *
+ * Reviewed-release trace timing fields are observational and deliberately do
+ * not change replay identity. Every other D delivery hashes its complete body.
+ * D receivers use this same boundary to reject forged IDs and mutated replays.
+ */
+export function roleCToDDeliveryIdentityHash(
+  delivery: RoleCToDDelivery,
+): string {
+  if (delivery.delivery_kind === "reviewed_release") {
+    const { delivery_id: _deliveryId, ...body } = delivery
+    return contentHash(reviewedReleaseDeliveryIdentity(body))
+  }
+  const { delivery_id: _deliveryId, ...body } = delivery
+  return contentHash(body)
+}
+
+export async function deliverReviewRecoveryStatusToD(
+  port: RoleDReviewRecoveryStatusPort,
+  result: ReviewRecoveryPublicResult,
+): Promise<RoleCDeliveryAck> {
+  assertOutboundSchema("review_recovery_result.schema.json", result)
+  if (!isTerminalReviewRecoveryResult(result)) {
+    throw new Error("ROLE_C_D_RECOVERY_STATUS_NOT_TERMINAL")
+  }
+  assertNoOutboundSecrets("ROLE_C_D_RECOVERY_STATUS_SECRET_LEAK", result)
+  const body = {
+    schema_version: C_SCHEMA_VERSION,
+    delivery_kind: "review_recovery_status" as const,
+    result: structuredClone(result),
+  }
+  const delivery: RoleCReviewRecoveryStatusDelivery = {
+    ...body,
+    delivery_id: contentHash(body),
+  }
+  assertOutboundSchema(
+    "review_recovery_status_delivery.schema.json",
+    delivery,
+  )
+  assertNoOutboundSecrets("ROLE_C_D_RECOVERY_STATUS_SECRET_LEAK", delivery)
+  const ack = await port.publishReviewRecoveryStatus(
+    structuredClone(delivery),
+  )
+  return assertDeliveryAck(ack, delivery, "ROLE_C_D")
+}
+
+export async function deliverLearningSessionToD(
+  port: RoleDLearningSessionPort,
+  pipeline: ReviewedCPipelineResult,
+  learningSession: RoleCLearningSessionHandoff,
+): Promise<RoleCDeliveryAck> {
+  const release = reviewedRelease(pipeline)
+  const normalizedSession = validateLearningSessionHandoff(
+    learningSession,
+    release,
+  )
+  const body = {
+    schema_version: C_SCHEMA_VERSION,
+    delivery_kind: "learning_session" as const,
+    session: normalizedSession,
+  }
+  const delivery: RoleCLearningSessionDelivery = {
+    ...body,
+    delivery_id: contentHash(body),
+  }
+  assertOutboundSchema("learning_session_delivery.schema.json", delivery)
+  assertNoOutboundSecrets("ROLE_C_D_SESSION_SECRET_LEAK", delivery)
+  const ack = await port.publishLearningSession(structuredClone(delivery))
+  return assertDeliveryAck(ack, delivery, "ROLE_C_D")
+}
+
+export function validateLearningSessionHandoff(
+  session: RoleCLearningSessionHandoff,
+  reviewed: {
+    run_id: string
+    artifacts: [ConceptLessonArtifact, CodeLabPublicArtifact, AssessmentPublicArtifact]
+  },
+): RoleCLearningSessionHandoff {
+  const assessment = reviewed.artifacts[2]
+  if (!session.session_id.trim()
+    || session.run_id !== reviewed.run_id
+    || session.attempt_no < 1
+    || !Number.isSafeInteger(session.attempt_no)
+    || !session.routing_request_id.trim()
+    || assessment.payload === null
+    || session.form_id !== assessment.payload.form_id) {
+    throw new Error("ROLE_C_D_SESSION_HANDOFF_INVALID")
+  }
+  const anchorIds = assessment.payload.routing.anchor_item_ids
+  if (session.phase === "anchor_pending") {
+    if (session.required_item_ids.length === 0
+      || new Set(session.required_item_ids).size
+        !== session.required_item_ids.length
+      || !sameStringSet(session.required_item_ids, anchorIds)) {
+      throw new Error("ROLE_C_D_SESSION_ITEMS_MISMATCH")
+    }
+    return {
+      ...structuredClone(session),
+      required_item_ids: [...anchorIds],
+    }
+  }
+  if (!session.route_lock_id.trim() || !session.route_id.trim()
+    || !Number.isFinite(session.anchor_score_ratio)
+    || session.anchor_score_ratio < 0
+    || session.anchor_score_ratio > 1) {
+    throw new Error("ROLE_C_D_SESSION_HANDOFF_INVALID")
+  }
+  const route = assessment.payload.routing.rules.find((candidate) =>
+    candidate.route_id === session.route_id)
+  if (!route) throw new Error("ROLE_C_D_SESSION_ROUTE_MISMATCH")
+  const sortedRoutes = [...assessment.payload.routing.rules].sort(
+    (left, right) =>
+      left.min_anchor_score_ratio - right.min_anchor_score_ratio,
+  )
+  const routeIndex = sortedRoutes.findIndex((candidate) =>
+    candidate.route_id === route.route_id)
+  const ratioMatchesRoute =
+    session.anchor_score_ratio >= route.min_anchor_score_ratio
+      && (routeIndex === sortedRoutes.length - 1
+        ? session.anchor_score_ratio <= route.max_anchor_score_ratio
+        : session.anchor_score_ratio < route.max_anchor_score_ratio)
+  if (route.action !== session.action || !ratioMatchesRoute) {
+    throw new Error("ROLE_C_D_SESSION_ROUTE_MISMATCH")
+  }
+  const anchorIdSet = new Set(anchorIds)
+  const expectedItemIds = assessment.payload.items
+    .filter((item) =>
+      anchorIdSet.has(item.item_id)
+        || route.reveal_tiers.includes(item.tier))
+    .map((item) => item.item_id)
+  if (session.required_item_ids.length === 0
+    || new Set(session.required_item_ids).size !== session.required_item_ids.length
+    || !sameStringSet(session.required_item_ids, expectedItemIds)) {
+    throw new Error("ROLE_C_D_SESSION_ITEMS_MISMATCH")
+  }
+  return {
+    ...structuredClone(session),
+    required_item_ids: expectedItemIds,
+  }
+}
+
 export async function deliverDynamicFeedbackToD(
   port: RoleDDynamicFeedbackPort,
   feedback: DynamicFeedbackResult,
@@ -313,7 +549,11 @@ export async function deliverDynamicFeedbackToD(
 function assertDeliveryAck(
   ack: RoleCDeliveryAck,
   delivery: Pick<
-    RoleCLearningProgressDelivery | RoleCReviewedReleaseDelivery | RoleCDynamicFeedbackDelivery,
+    | RoleCLearningProgressDelivery
+    | RoleCReviewedReleaseDelivery
+    | RoleCDynamicFeedbackDelivery
+    | RoleCReviewRecoveryStatusDelivery
+    | RoleCLearningSessionDelivery,
     "delivery_kind" | "delivery_id"
   >,
   errorPrefix: "ROLE_C_B" | "ROLE_C_D",
@@ -329,6 +569,15 @@ function assertDeliveryAck(
     throw new Error(`${errorPrefix}_ACK_ID_MISMATCH`)
   }
   return structuredClone(ack)
+}
+
+function isTerminalReviewRecoveryResult(
+  result: ReviewRecoveryPublicResult,
+): result is TerminalReviewRecoveryPublicResult {
+  return (result.pipeline_status === "blocked"
+      && result.pipeline_state === "BLOCKED")
+    || (result.pipeline_status === "failed"
+      && result.pipeline_state === "FAILED")
 }
 
 function assertNoOutboundSecrets(errorCode: string, value: unknown): void {
@@ -349,4 +598,10 @@ function publicArtifactSchema(artifactType: PublicArtifact["artifact_type"]): Ro
 function assertOutboundSchema(schema: RoleCSchemaFile, value: unknown): void {
   const report = validateRoleCSchema(schema, value)
   if (!report.ok) throw new Error(`ROLE_C_OUTBOUND_SCHEMA_INVALID:${schema}:${report.issues.map((issue) => issue.path).join(",")}`)
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return left.length === right.length
+    && new Set(left).size === left.length
+    && left.every((value) => right.includes(value))
 }

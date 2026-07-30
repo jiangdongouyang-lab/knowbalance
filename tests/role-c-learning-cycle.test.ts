@@ -8,6 +8,7 @@ import {
   createRoleCAgents,
   defineLearningPathNode,
   DeterministicCodeLabContentProvider,
+  deliverLearningSessionToD,
   InMemoryLearningCycleStore,
   InMemoryMasteryStateStore,
   InMemorySecureArtifactStore,
@@ -22,6 +23,8 @@ import {
   type LearningCycleStore,
   type LearningPathNode,
   type ObjectiveMasteryState,
+  type RoleBLearningProgressPort,
+  type RoleCLearningProgressDelivery,
   type SubmissionEnvelope,
   type SecureArtifactStore,
 } from "../src/role-c-content"
@@ -206,6 +209,7 @@ async function serviceFixture(
   runner = new FixtureCodeRunner(),
   cycleStore: LearningCycleStore = new InMemoryLearningCycleStore(),
   submissionLeaseMs?: number,
+  learningProgressPort?: RoleBLearningProgressPort,
 ) {
   const fixture = await readyFixture(runId)
   const service = new LearningCycleService({
@@ -213,6 +217,14 @@ async function serviceFixture(
     secure_store: fixture.secureStore,
     mastery_store: masteryStore,
     code_runner: runner,
+    ...(learningProgressPort
+      ? {
+          learning_progress_delivery: {
+            mode: "required" as const,
+            port: learningProgressPort,
+          },
+        }
+      : {}),
     ...(submissionLeaseMs === undefined
       ? {}
       : { submission_lease_ms: submissionLeaseMs }),
@@ -230,7 +242,8 @@ async function serviceFixture(
   })
   const assessment = fixture.pipelineResult.public_artifacts.assessment!
   const requiredItemIds = assessment.payload!.items.map((item) => item.item_id)
-  const session = await service.openSession({
+  const session = await service.openTrustedPreselectedSession({
+    routing_policy: "trusted_preselected_v1",
     session_id: `SESSION-${runId}`,
     run_id: runId,
     authenticated_learner_id_hash: "learner-cycle-hash",
@@ -243,6 +256,178 @@ async function serviceFixture(
 }
 
 describe("role C formal learning cycle", () => {
+  test("freezes the assessment route from trusted anchor scores before accepting a final submission", async () => {
+    const fixture = await readyFixture("RUN-CYCLE-ANCHOR-ROUTING")
+    const cycleStore = new InMemoryLearningCycleStore()
+    const masteryStore = new InMemoryMasteryStateStore()
+    const service = new LearningCycleService({
+      cycle_store: cycleStore,
+      secure_store: fixture.secureStore,
+      mastery_store: masteryStore,
+      code_runner: new FixtureCodeRunner(),
+    })
+    await service.registerReadyRun({
+      pipeline_input: fixture.pipelineInput,
+      pipeline_result: fixture.pipelineResult,
+      profile_snapshot: fixture.snapshot,
+      learner_id_hash: "learner-cycle-hash",
+    })
+    const assessment = fixture.pipelineResult.public_artifacts.assessment!
+    const full = fullScoreSubmission(
+      fixture.pipelineInput.generation_spec.run_id,
+      assessment.payload!.form_id,
+      "SUB-ANCHOR-FINAL",
+    )
+    const anchorIds = assessment.payload!.routing.anchor_item_ids
+    const anchorSubmission: SubmissionEnvelope = {
+      ...structuredClone(full),
+      submission_id: "SUB-ANCHOR-ROUTE",
+      answers: full.answers.filter((answer) =>
+        anchorIds.includes(answer.item_id)),
+    }
+    const opened = await service.openAnchorFirstSession({
+      routing_request_id: "ROUTING-CYCLE-ANCHOR",
+      session_id: "SESSION-CYCLE-ANCHOR",
+      run_id: fixture.pipelineInput.generation_spec.run_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      attempt_no: 1,
+    })
+    expect(opened.assessment_routing_state).toMatchObject({
+      phase: "ANCHOR_PENDING",
+      anchor_item_ids: anchorIds,
+    })
+    expect(opened.session_state.required_item_ids).toEqual(anchorIds)
+
+    const premature = await service.processSubmissionInternal({
+      session_id: opened.session_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      submission: structuredClone(full),
+    })
+    expect(premature).toMatchObject({
+      status: "blocked",
+      code: "ANCHOR_ROUTING_REQUIRED",
+    })
+
+    expect(await service.routeAssessmentAnchors({
+      routing_request_id: "ROUTING-CYCLE-ANCHOR",
+      session_id: opened.session_id,
+      run_id: fixture.pipelineInput.generation_spec.run_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      attempt_no: 2,
+      anchor_submission: anchorSubmission,
+      revealed_anchor_hint_levels: Object.fromEntries(
+        anchorIds.map((itemId) => [itemId, 0 as const]),
+      ),
+    })).toMatchObject({
+      status: "blocked",
+      issues: ["锚点路由 attempt_no 与会话不一致"],
+    })
+
+    const routed = await service.routeAssessmentAnchors({
+      routing_request_id: "ROUTING-CYCLE-ANCHOR",
+      session_id: opened.session_id,
+      run_id: fixture.pipelineInput.generation_spec.run_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      attempt_no: 1,
+      anchor_submission: anchorSubmission,
+      revealed_anchor_hint_levels: Object.fromEntries(
+        anchorIds.map((itemId) => [itemId, 0 as const]),
+      ),
+    })
+    expect(routed.status).toBe("routed")
+    if (routed.status !== "routed") return
+    expect(routed.anchor_score_ratio).toBe(1)
+    expect(routed.action).toBe("advance")
+    expect(routed.learning_session).toMatchObject({
+      phase: "route_locked",
+      route_id: routed.route_id,
+      required_item_ids: routed.required_item_ids,
+    })
+    expect(JSON.stringify(routed)).not.toContain("secure://")
+    const deliveredSessions: string[] = []
+    const sessionAck = await deliverLearningSessionToD({
+      async publishLearningSession(delivery) {
+        deliveredSessions.push(delivery.delivery_id)
+        return {
+          schema_version: "1.0" as const,
+          delivery_kind: "learning_session" as const,
+          delivery_id: delivery.delivery_id,
+          status: "accepted" as const,
+        }
+      },
+    }, fixture.pipelineResult, routed.learning_session)
+    expect(sessionAck.status).toBe("accepted")
+    expect(deliveredSessions).toHaveLength(1)
+    expect((await service.openAnchorFirstSession({
+      routing_request_id: "ROUTING-CYCLE-ANCHOR",
+      session_id: "SESSION-CYCLE-ANCHOR",
+      run_id: fixture.pipelineInput.generation_spec.run_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      attempt_no: 1,
+    })).assessment_routing_state).toMatchObject({
+      phase: "ROUTE_LOCKED",
+      route_id: routed.route_id,
+    })
+
+    const replay = await service.routeAssessmentAnchors({
+      routing_request_id: "ROUTING-CYCLE-ANCHOR",
+      session_id: opened.session_id,
+      run_id: fixture.pipelineInput.generation_spec.run_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      attempt_no: 1,
+      anchor_submission: {
+        ...structuredClone(anchorSubmission),
+        answers: [...anchorSubmission.answers].reverse(),
+      },
+      revealed_anchor_hint_levels: Object.fromEntries(
+        anchorIds.map((itemId) => [itemId, 0 as const]),
+      ),
+    })
+    expect(replay).toEqual(routed)
+
+    const changedAnchor = structuredClone(anchorSubmission)
+    changedAnchor.answers[0]!.selected_option_id = "opt_stop"
+    expect(await service.routeAssessmentAnchors({
+      routing_request_id: "ROUTING-CYCLE-ANCHOR",
+      session_id: opened.session_id,
+      run_id: fixture.pipelineInput.generation_spec.run_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      attempt_no: 1,
+      anchor_submission: changedAnchor,
+      revealed_anchor_hint_levels: Object.fromEntries(
+        anchorIds.map((itemId) => [itemId, 0 as const]),
+      ),
+    })).toMatchObject({
+      status: "blocked",
+      issues: ["锚点路由已由另一份答案冻结"],
+    })
+
+    const finalSubmission = {
+      ...structuredClone(full),
+      answers: full.answers.filter((answer) =>
+        routed.required_item_ids.includes(answer.item_id)),
+    }
+    const tamperedFinal = structuredClone(finalSubmission)
+    tamperedFinal.submission_id = "SUB-ANCHOR-TAMPERED"
+    tamperedFinal.answers.find((answer) =>
+      answer.item_id === anchorIds[0])!.selected_option_id = "opt_stop"
+    expect(await service.processSubmissionInternal({
+      session_id: opened.session_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      submission: tamperedFinal,
+    })).toMatchObject({
+      status: "blocked",
+      code: "ANCHOR_ANSWERS_CHANGED",
+    })
+
+    const completed = await service.processSubmissionInternal({
+      session_id: opened.session_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      submission: finalSubmission,
+    })
+    expect(completed.status).toBe("completed")
+  })
+
   test("resolves named secure artifacts and completes full-score grading", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-FULL")
     const submission = fullScoreSubmission(
@@ -266,6 +451,10 @@ describe("role C formal learning cycle", () => {
     expect(result.completion.outbound_to_b.evidence_events.every(
       (event) => event.recommendation.action === "advance",
     )).toBe(true)
+    expect(result.completion.delivery_to_b).toEqual({
+      mode: "deferred",
+      reason: "port_not_configured",
+    })
     expect(JSON.stringify(result.completion.feedback)).not.toContain("secure://")
     const publicReplay = await fixture.service.processSubmission({
       session_id: fixture.session.session_id,
@@ -302,6 +491,65 @@ describe("role C formal learning cycle", () => {
       forged,
       stored!.revision,
     )).rejects.toMatchObject({ code: "INVALID_RECORD" })
+  })
+
+  test("delivers every completed formal submission to B through the production cycle", async () => {
+    const received: RoleCLearningProgressDelivery[] = []
+    const committed = new Set<string>()
+    const port: RoleBLearningProgressPort = {
+      async publishLearningProgress(delivery) {
+        received.push(structuredClone(delivery))
+        const duplicate = committed.has(delivery.delivery_id)
+        committed.add(delivery.delivery_id)
+        return {
+          schema_version: "1.0",
+          delivery_kind: "learning_progress",
+          delivery_id: delivery.delivery_id,
+          status: duplicate ? "duplicate" : "accepted",
+        }
+      },
+    }
+    const fixture = await serviceFixture(
+      "RUN-CYCLE-B-DELIVERY",
+      new InMemoryMasteryStateStore(),
+      new FixtureCodeRunner(),
+      new InMemoryLearningCycleStore(),
+      undefined,
+      port,
+    )
+    const submission = fullScoreSubmission(
+      fixture.pipelineInput.generation_spec.run_id,
+      fixture.assessment.payload!.form_id,
+      "SUB-B-DELIVERY",
+    )
+
+    const first = await fixture.service.processSubmissionInternal({
+      session_id: fixture.session.session_id,
+      authenticated_learner_id_hash: submission.learner_id_hash,
+      submission,
+    })
+    const replay = await fixture.service.processSubmissionInternal({
+      session_id: fixture.session.session_id,
+      authenticated_learner_id_hash: submission.learner_id_hash,
+      submission: structuredClone(submission),
+    })
+
+    expect(first.status).toBe("completed")
+    expect(replay.status).toBe("completed")
+    if (first.status !== "completed" || replay.status !== "completed") return
+    expect(first.completion.delivery_to_b).toMatchObject({
+      mode: "required",
+      ack: { status: "accepted" },
+    })
+    expect(replay.completion.delivery_to_b).toMatchObject({
+      mode: "required",
+      ack: { status: "duplicate" },
+    })
+    expect(received).toHaveLength(2)
+    expect(received[0]!.delivery_id).toBe(received[1]!.delivery_id)
+    expect(received[0]!.profile_version)
+      .toBe(fixture.pipelineInput.generation_spec.profile_ref.profile_version)
+    expect(received[0]!.evidence_events.length).toBeGreaterThan(0)
   })
 
   test("prepares the next round only from a persisted completed submission", async () => {
@@ -443,7 +691,8 @@ describe("role C formal learning cycle", () => {
     })
     const assessment = fixture.pipelineResult.public_artifacts.assessment!
     const requiredItemIds = assessment.payload!.items.map((item) => item.item_id)
-    const session = await service.openSession({
+    const session = await service.openTrustedPreselectedSession({
+      routing_policy: "trusted_preselected_v1",
       session_id: "SESSION-SECURE-RETRY",
       run_id: fixture.pipelineInput.generation_spec.run_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -524,7 +773,10 @@ describe("role C formal learning cycle", () => {
     const replay = await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
-      submission: structuredClone(submission),
+      submission: {
+        ...structuredClone(submission),
+        answers: [...submission.answers].reverse(),
+      },
       expected_session_revision: fixture.session.revision,
     })
     expect(first.status).toBe("completed")
@@ -652,7 +904,9 @@ describe("role C formal learning cycle", () => {
       submission,
     })
     const requiredItemIds = fixture.assessment.payload!.items.map((item) => item.item_id)
-    const secondSession = await fixture.service.openSession({
+    const secondSession =
+      await fixture.service.openTrustedPreselectedSession({
+      routing_policy: "trusted_preselected_v1",
       session_id: "SESSION-CROSS-SECOND",
       run_id: fixture.pipelineInput.generation_spec.run_id,
       authenticated_learner_id_hash: submission.learner_id_hash,
@@ -850,7 +1104,8 @@ describe("role C formal learning cycle", () => {
     })
     const assessment = fixture.pipelineResult.public_artifacts.assessment!
     const ids = assessment.payload!.items.map((item) => item.item_id)
-    const session = await service.openSession({
+    const session = await service.openTrustedPreselectedSession({
+      routing_policy: "trusted_preselected_v1",
       session_id: "SESSION-BLOCKED",
       run_id: fixture.pipelineInput.generation_spec.run_id,
       authenticated_learner_id_hash: "learner-cycle-hash",

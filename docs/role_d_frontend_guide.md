@@ -48,6 +48,8 @@ B 还会用诊断题的 `source_id` 对齐概念表述，避免“循环”和�
 
 等级更新保持保守但不再“只降不升”：任一答错仍触发客观封顶；至少 3 道真实客观题全部答对时，教学起点可在自评基础上最多上调一档，且不会超过本轮题目实际覆盖的最高难度。
 
+学习路径与 C 初始目标沿用 B 的同一难度边界：当前节点最多高于画像一档。超出该范围的综合项目显示为后续节点，不会提前交给 C 生成；需要先由 B 安排中间学习节点。
+
 ## C 分阶测评作答
 
 Role D 按 C 返回的动态 `modality` 渲染：
@@ -68,7 +70,20 @@ Role D 按 C 返回的动态 `modality` 渲染：
 
 当前 D 已把公开作答转换为 C 的 `SubmissionEnvelope`，并通过 `/api/role-c/submit` 消费 C 返回的公开正式评分、逐目标掌握度及 `remediate/reinforce/advance/reprofile` 决策。D 会校验 run/session/learner/form/attempt/submission 身份和响应结构，不在浏览器计算分数，也不会恢复本地缓存或导入文件中的“正式评分”。
 
-当前接线仍是本地 Vite dev/preview middleware：默认 deterministic Provider 使用进程内学习周期和参考 runner，服务重启后需要重新生成计划；真实 Docker 代码执行、持久化 C 后端、C→B 正式学习进展投递和下一轮自动生成仍由 C/后端负责，D 不伪造这些能力。
+## 继续下一轮
+
+可信评分完成后，反馈页提供“继续下一轮”。D 向 `/api/role-c/continue` 只发送已完成轮次的 `sessionId`、`submissionId` 与 `learnerId`，并只接受与父反馈、新 run/session 及两份交付回执一致的 `status: published` 响应。成功后：
+
+- 使用 `role_d_handoff` 替换当前 C artifacts、审核摘要和 learning session；
+- 保留同一个本机计划及其 D 会话编号；
+- 清空上一轮答案和正式反馈，切回学习实操；
+- 以新会话的 `anchor_pending` 状态继续复用 `/route` 与 `/submit`。
+
+重复点击在前端单飞；迟到响应只有在计划仍停留于原完成轮次时才能写入。`awaiting_input`、`blocked`、服务重启或合同不匹配均不会替换当前轮次，页面会保留正式评分并给出可重试提示。
+
+`role_d_handoff` 当前携带 C 产物与会话身份。新 artifacts 的引用只有在当前计划已有的 retrieval facts 中可验证时才标为 grounded；新 source 会进入 `evidenceGaps`，补入对应检索证据后再标为 grounded。
+
+本地 Vite dev/preview middleware 使用进程内学习周期，并把 C 的学习证据交给同一学习者绑定的 B 接收器。`/continue` 只接收已完成轮次的三个身份字段；`remediate/reinforce` 从服务端上下文续跑。`advance/reprofile` 需要部署后端调用 B 路径规划与 A 新检索并向 C 提供可信输入，本地端点在输入未就绪时返回结构化 `awaiting_input/blocked`。服务重启后进程内会话会过期；跨重启部署需要持久化 C 后端、Docker runner 和独立认证。
 
 ## 本地用户与计划存储
 
@@ -119,11 +134,12 @@ LearningWorkspaceState
 - D 本机用户、多计划、断点恢复、资源展示和完整公开题型作答；
 - 成绩统计金标路径端到端跑通。
 
-### Week 2 当前接入状态
+### Week 2 接入状态
 
-- **已接入 D**：A/B 审核发布门禁与仲裁可视化；C 公开正式评分、逐目标掌握度和动态决策展示；评分响应身份/结构校验；跨计划异步隔离；浏览器缓存和进度导入的正式评分降级。
-- **仍由 C/后端完成**：digest-pinned OCI 学生代码执行和公开执行摘要；跨重启持久化会话/掌握度；C→B 正式学习进展投递；评分后自动准备、审核并发布下一轮；独立认证后端。
-- **范围限制**：默认 deterministic Provider 仍以 K007/K009/K018 成绩统计金标路径为主；其他目标不满足证据或审核要求时会诚实 blocked。
+- **页面与接口**：A/B 审核与仲裁、C 正式评分、逐目标掌握度、动态决策、锚点路由、整套提交和继续下一轮均已接入。
+- **学习闭环**：C 学习证据会幂等更新 B 画像；同节点下一轮完成审核、run/session 注册和双投递后，D 安装新的 `anchor_pending` 会话并复用路由与提交接口。
+- **部署条件**：代码执行使用 digest-pinned Docker runner；跨重启运行配置持久化会话、掌握度与自适应日志存储，并由认证后端校验学习者身份。
+- **已验证路径**：K007/K009/K018 成绩统计目标已完成 `reinforce` 两轮联调；证据不足、审核未通过或进阶输入未就绪时返回结构化状态。
 
 当前 C 使用官方确定性 Provider、运行时 Schema、可信 verifier 和 public/secure 发布门禁，不需要模型 API Key，也不等同于实时大模型生成。顶部“A/B/C 本次实跑”表示一次同步调用已真实执行，不代表已接入实时事件流。K007 + K009 + K018 成绩统计目标是已验证金标路径；不支持的目标会明确 blocked，不回退成伪造内容。
 
@@ -131,6 +147,8 @@ LearningWorkspaceState
 
 ```bash
 bun install
+bun run docker:role-c:build
+bun run docker:role-c:doctor
 bun run role-d:dev
 bun run check
 bun run role-d:test
@@ -139,7 +157,7 @@ bun run role-d:build
 bun audit
 ```
 
-生产构建位于 `dist/role-d-ui/`。当前 Vite 开发/预览服务提供 `/api/role-c/generate` 与 `/api/role-c/submit`；部署纯静态 `dist` 时需要由 C/后端部署等价 API、可信 runner 和持久化存储，不能把 C 的安全逻辑打包进浏览器。
+生产构建位于 `dist/role-d-ui/`。当前 Vite 开发/预览服务提供 `/api/role-c/generate`、`/api/role-c/route`、`/api/role-c/submit` 与 `/api/role-c/continue`；部署纯静态 `dist` 时需要由 C/后端部署等价 API、可信 runner 和持久化存储，不能把 C 的安全逻辑打包进浏览器。
 
 ## 主要目录
 

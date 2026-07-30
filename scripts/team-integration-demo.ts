@@ -1,10 +1,21 @@
 import { retrieveKnowledge } from "../src/rag/retriever"
 import { loadKnowledgeBase } from "../src/knowledge/loader"
 import type { KnowledgeDifficulty } from "../src/knowledge/types"
-import { generateRoleCForRoleD } from "../src/role-d-integration/role-c-service"
+import { RoleBLearningProgressAdapter } from "../src/role-b-profile/teaching-audit"
+import { RoleDRoleCDeliveryReceiver } from "../src/role-d-integration/role-c-delivery-receiver"
+import {
+  continueRoleCAfterSubmission,
+  generateRoleCForRoleDWithRuntime,
+  routeRoleCAssessment,
+  submitRoleCAssessment,
+} from "../src/role-d-integration/role-c-service"
 import { adaptHandoff } from "../src/role-d-ui/src/domain/adapt-handoff"
 import { exportProgressJson } from "../src/role-d-ui/src/domain/progress-file"
 import { isValidRoleDSession } from "../src/role-d-ui/src/domain/session-store"
+import {
+  createDockerPythonCodeRunnerFromEnv,
+  NodeDockerCommandExecutor,
+} from "../src/role-c-content"
 
 interface LearnerProfile {
   learner_id: string
@@ -14,7 +25,17 @@ interface LearnerProfile {
   goal: string
 }
 
-const profile = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
+const profileInput = (await Bun.file(
+  "examples/learner_project_goal.json",
+).json()) as LearnerProfile
+const profile: LearnerProfile = {
+  ...profileInput,
+  learner_id: "demo_project_goal",
+  level: "intermediate",
+  known_concepts: [
+    ...new Set([...profileInput.known_concepts, "基本数据类型"]),
+  ],
+}
 
 const query = [
   `学习者水平：${profile.level}`,
@@ -25,12 +46,91 @@ const query = [
 
 const ragResult = await retrieveKnowledge({ query, learnerLevel: profile.level, topK: 5 })
 const knowledgeBase = await loadKnowledgeBase()
-const roleC = await generateRoleCForRoleD({
+const runId = "RUN-team-integration-demo"
+const roleB = new RoleBLearningProgressAdapter({
+  knowledgeBase,
+  learners: [{
+    learnerIdHash: profile.learner_id,
+    currentProfile: profile,
+    profileVersion: `${runId}-profile-v1`,
+    profileRevision: 1,
+  }],
+})
+const roleD = new RoleDRoleCDeliveryReceiver(
+  "role-d-team-integration-demo",
+)
+const runner = await createDockerPythonCodeRunnerFromEnv(process.env, {
+  executor: new NodeDockerCommandExecutor(),
+})
+const roleC = await generateRoleCForRoleDWithRuntime({
   profile,
   ragResult,
   kbVersion: knowledgeBase.version,
-  runId: "RUN-team-integration-demo",
+  runId,
+}, {
+  runner,
+  learningProgressPort: roleB,
+  roleDPort: roleD,
 })
+if (roleC.status !== "ready") {
+  throw new Error(`TEAM_ROLE_C_GENERATION_FAILED:${roleC.reason}`)
+}
+const firstIdentity = {
+  sessionId: roleC.learningSession.sessionId,
+  runId: roleC.runId,
+  learnerId: profile.learner_id,
+  formId: roleC.learningSession.formId,
+  attemptNo: roleC.learningSession.attemptNo,
+}
+const firstRoute = await routeRoleCAssessment({
+  ...firstIdentity,
+  routingRequestId: roleC.learningSession.routingRequestId,
+  submissionId: "SUB-team-integration-anchors-1",
+  answers: anchorAnswers(),
+})
+if (firstRoute.status !== "routed") {
+  throw new Error(`TEAM_ROLE_C_ROUTE_FAILED:${JSON.stringify(firstRoute)}`)
+}
+const firstCompletion = await submitRoleCAssessment({
+  ...firstIdentity,
+  submissionId: "SUB-team-integration-final-1",
+  answers: reinforcementAnswers().filter((answer) =>
+    firstRoute.requiredItemIds.includes(answer.item_id)),
+})
+if (firstCompletion.status !== "completed") {
+  throw new Error(
+    `TEAM_ROLE_C_SUBMISSION_FAILED:${JSON.stringify(firstCompletion)}`,
+  )
+}
+const updatedBState = roleB.getCurrentState(profile.learner_id)
+if (!updatedBState) throw new Error("TEAM_ROLE_B_STATE_MISSING")
+const continuation = await continueRoleCAfterSubmission({
+  sessionId: firstIdentity.sessionId,
+  submissionId: "SUB-team-integration-final-1",
+  learnerId: profile.learner_id,
+  nextProfileSnapshot: updatedBState.currentSnapshot,
+})
+if (continuation.status !== "published") {
+  throw new Error(
+    `TEAM_ROLE_C_CONTINUATION_FAILED:${JSON.stringify(continuation)}`,
+  )
+}
+const nextSession = continuation.learning_session
+const nextRoute = await routeRoleCAssessment({
+  sessionId: nextSession.session_id,
+  runId: nextSession.run_id,
+  learnerId: profile.learner_id,
+  formId: nextSession.form_id,
+  attemptNo: nextSession.attempt_no,
+  routingRequestId: nextSession.routing_request_id,
+  submissionId: "SUB-team-integration-anchors-2",
+  answers: anchorAnswers(),
+})
+if (nextRoute.status !== "routed") {
+  throw new Error(
+    `TEAM_ROLE_C_NEXT_ROUTE_FAILED:${JSON.stringify(nextRoute)}`,
+  )
+}
 const roleDSession = adaptHandoff({
   eventMode: "demo",
   planSource: "real-ab",
@@ -75,7 +175,6 @@ const handoff = {
   },
   b_profile: {
     ...profile,
-    learner_id: "demo_loop_weak",
   },
   a_rag_request: {
     learner_profile: profile,
@@ -124,6 +223,58 @@ const handoff = {
       evidence_gaps: roleDSession.evidenceGaps,
     },
   },
+  adaptive_learning_loop: {
+    first_session_phase: roleC.learningSession.phase,
+    first_route_phase: firstRoute.learningSession.phase,
+    first_round_accuracy: firstCompletion.feedback.round_score.accuracy,
+    first_round_action: firstCompletion.feedback.final_decision.action,
+    b_profile_revision: updatedBState.profileRevision,
+    b_profile_version: updatedBState.profileVersion,
+    next_round_status: continuation.status,
+    next_round_action: continuation.preparation.action,
+    next_session_phase: continuation.learning_session.phase,
+    next_route_status: nextRoute.status,
+    next_route_phase: nextRoute.learningSession.phase,
+    d_reviewed_releases: roleD.snapshot().reviewed_releases.length,
+    d_learning_session_updates: roleD.snapshot().learning_sessions.length,
+  },
 }
 
 console.log(JSON.stringify(handoff, null, 2))
+
+function anchorAnswers() {
+  return [
+    {
+      item_id: "ITEM-O1-T1-MCQ",
+      selected_option_id: "opt_iterate",
+      hint_level_used: 0 as const,
+    },
+    {
+      item_id: "ITEM-O2-T1-TF",
+      selected_option_id: "opt_true",
+      hint_level_used: 0 as const,
+    },
+    {
+      item_id: "ITEM-O1-T2-TRACE",
+      text_response: "8",
+      hint_level_used: 0 as const,
+    },
+  ]
+}
+
+function reinforcementAnswers() {
+  return [
+    ...anchorAnswers(),
+    {
+      item_id: "ITEM-O2-T2-SHORT",
+      text_response:
+        "列表保存一组成绩并保持顺序，程序可以逐项处理。",
+      hint_level_used: 0 as const,
+    },
+    {
+      item_id: "ITEM-O3-T3-CODE",
+      code_response: "def average_score(scores):\n    return None",
+      hint_level_used: 0 as const,
+    },
+  ]
+}

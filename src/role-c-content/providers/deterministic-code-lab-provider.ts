@@ -13,7 +13,10 @@ import type {
   ConceptLessonPayload,
 } from "../contracts/artifacts"
 import { stableId, type CitationRef } from "../contracts/common"
-import { ModelProviderUnavailableError } from "../contracts/model-gateway"
+import {
+  ModelProviderUnavailableError,
+  UnsupportedTargetError,
+} from "../contracts/model-gateway"
 import { DeterministicConceptContentProvider } from "./deterministic-concept-provider"
 import { buildDeterministicAssessmentDraft } from "./deterministic-assessment-provider"
 
@@ -27,8 +30,16 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
 
   async generateCodeLab(request: CodeLabRequest): Promise<CodeLabDraft> {
     const objectiveIds = request.generation_spec.targets.map((target) => target.objective_id)
-    if (objectiveIds.length !== 3) {
-      throw new ModelProviderUnavailableError(
+    const targetSourceIds = request.generation_spec.targets.map(
+      (target) => target.source_id,
+    )
+    if (!sameOrderedTargets(
+      targetSourceIds,
+      ["K007", "K009", "K018"],
+    )) {
+      throw new UnsupportedTargetError(
+        "code-lab",
+        targetSourceIds,
         "阶段 2 离线 code-lab 基准实现仅支持包含 3 个目标的 K018 金标任务",
       )
     }
@@ -82,9 +93,9 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
 
     const hiddenTests: CodeLabSecurePayload["hidden_tests"] = [
       { test_id: "HT-O1-ALL", input: [10, 20, 30, 40], expected: 25, objective_id: objectiveIds[0], weight: 0.2, comparison: numeric() },
-      { test_id: "HT-O2-SINGLE", input: [100], expected: 100, objective_id: objectiveIds[1] ?? objectiveIds[0], weight: 0.2, comparison: numeric() },
+      { test_id: "HT-O2-SINGLE", input: [91], expected: 91, objective_id: objectiveIds[1] ?? objectiveIds[0], weight: 0.2, comparison: numeric() },
       { test_id: "HT-O2-MIXED", input: [0, 50, 100, 70], expected: 55, objective_id: objectiveIds[1] ?? objectiveIds[0], weight: 0.2, comparison: numeric() },
-      { test_id: "HT-O3-DECIMAL", input: [72.5, 87.5], expected: 80, objective_id: objectiveIds[2] ?? objectiveIds.at(-1)!, weight: 0.2, comparison: numeric() },
+      { test_id: "HT-O3-DECIMAL", input: [73.5, 86.5], expected: 80, objective_id: objectiveIds[2] ?? objectiveIds.at(-1)!, weight: 0.2, comparison: numeric() },
       { test_id: "HT-O3-FRACTION", input: [1, 2], expected: 1.5, objective_id: objectiveIds[2] ?? objectiveIds.at(-1)!, weight: 0.2, comparison: numeric() },
     ]
     const mutations: CodeLabSecurePayload["mutation_variants"] = [
@@ -194,6 +205,14 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
   async generateAssessment(request: Parameters<RoleCContentProvider["generateAssessment"]>[0]): Promise<AssessmentDraft> {
     return buildDeterministicAssessmentDraft(request)
   }
+}
+
+function sameOrderedTargets(
+  actual: string[],
+  expected: string[],
+): boolean {
+  return actual.length === expected.length
+    && actual.every((sourceId, index) => sourceId === expected[index])
 }
 
 function adaptiveInstruction(request: CodeLabRequest, title: string, fact: string): string {

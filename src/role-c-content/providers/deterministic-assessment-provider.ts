@@ -14,7 +14,10 @@ import type {
   PublicOption,
 } from "../contracts/artifacts"
 import { stableId, type CitationRef } from "../contracts/common"
-import { ModelProviderUnavailableError } from "../contracts/model-gateway"
+import {
+  ModelProviderUnavailableError,
+  UnsupportedTargetError,
+} from "../contracts/model-gateway"
 
 /** Deterministic K007/K009/K018 Author used as an executable gold reference. */
 export class DeterministicAssessmentContentProvider implements RoleCContentProvider {
@@ -34,9 +37,14 @@ export class DeterministicAssessmentContentProvider implements RoleCContentProvi
 export function buildDeterministicAssessmentDraft(request: TieredEvaluatorRequest): AssessmentDraft {
   const spec = request.generation_spec
   const blueprint = spec.assessment_blueprint
-  if (spec.targets.length !== 3 ||
+  const targetSourceIds = spec.targets.map((target) => target.source_id)
+  if (!sameOrderedTargets(targetSourceIds, ["K007", "K009", "K018"]) ||
     blueprint.tier_1_count !== 2 || blueprint.tier_2_count !== 2 || blueprint.tier_3_count !== 1) {
-    throw new ModelProviderUnavailableError("阶段 3 离线 assessment 金标仅支持 K007/K009/K018 的 2/2/1 蓝图")
+    throw new UnsupportedTargetError(
+      "tiered-evaluator",
+      targetSourceIds,
+      "阶段 3 离线 assessment 金标仅支持 K007/K009/K018 的 2/2/1 蓝图",
+    )
   }
   const [o1, o2, o3] = spec.targets
   const required: AssessmentItemPublic["modality"][] = ["mcq", "trace", "code"]
@@ -165,6 +173,14 @@ export function buildDeterministicAssessmentDraft(request: TieredEvaluatorReques
     objective_coverage: secureCoverage,
   }
   return { public_draft: { payload: publicPayload }, secure_draft: { payload: securePayload } }
+}
+
+function sameOrderedTargets(
+  actual: string[],
+  expected: string[],
+): boolean {
+  return actual.length === expected.length
+    && actual.every((sourceId, index) => sourceId === expected[index])
 }
 
 function publicItem(

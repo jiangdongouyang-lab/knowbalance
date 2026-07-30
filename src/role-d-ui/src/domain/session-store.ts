@@ -43,6 +43,16 @@ export function loadSession(): RoleDSession | null {
 }
 
 export function downgradePersistedTrust(session: RoleDSession): RoleDSession {
+  if (session.view.assessmentStatus === "submitting") {
+    return {
+      ...session,
+      view: {
+        ...session.view,
+        assessmentStatus: "blocked",
+        assessmentMessage: "上次请求结果尚未确认，请使用当前答案重试。",
+      },
+    }
+  }
   if (session.assessmentGraded !== true && session.feedback === undefined) return session
   return {
     ...session,
@@ -264,10 +274,47 @@ function isAuditStatus(value: unknown): boolean {
 
 function isRoleCSession(value: unknown): boolean {
   return isRecord(value)
-    && typeof value.runId === "string"
-    && typeof value.learningSessionId === "string"
-    && typeof value.formId === "string"
-    && typeof value.attemptNo === "number"
+    && nonEmptyString(value.runId)
+    && nonEmptyString(value.learningSessionId)
+    && nonEmptyString(value.formId)
+    && Number.isSafeInteger(value.attemptNo)
+    && Number(value.attemptNo) >= 1
+    && (value.profileVersion === undefined || nonEmptyString(value.profileVersion))
+    && (value.pathNodeId === undefined || nonEmptyString(value.pathNodeId))
+    && (value.targetSourceIds === undefined
+      || isNonEmptyUniqueStringArray(value.targetSourceIds))
+    && (value.routing === undefined || isRoleCRouting(value.routing))
+}
+
+function isRoleCRouting(value: unknown): boolean {
+  if (!isRecord(value)
+    || (value.phase !== "anchor_pending" && value.phase !== "route_locked")
+    || !nonEmptyString(value.routingRequestId)
+    || !isNonEmptyUniqueStringArray(value.requiredItemIds)) return false
+  if (value.phase === "anchor_pending") return true
+  const anchorItemIdsAreValid = value.anchorItemIds === undefined
+    || (isNonEmptyUniqueStringArray(value.anchorItemIds)
+      && value.anchorItemIds.every((itemId) =>
+        (value.requiredItemIds as string[]).includes(itemId)))
+  return anchorItemIdsAreValid
+    && nonEmptyString(value.routeLockId)
+    && nonEmptyString(value.routeId)
+    && (value.action === "remediate" || value.action === "reinforce" || value.action === "advance")
+    && typeof value.anchorScoreRatio === "number"
+    && Number.isFinite(value.anchorScoreRatio)
+    && value.anchorScoreRatio >= 0
+    && value.anchorScoreRatio <= 1
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0
+}
+
+function isNonEmptyUniqueStringArray(value: unknown): value is string[] {
+  return isStringArray(value)
+    && value.length > 0
+    && value.every((entry) => entry.trim().length > 0)
+    && new Set(value).size === value.length
 }
 
 function isRoleCFeedback(value: unknown): boolean {
@@ -374,6 +421,10 @@ function isDecision(value: unknown): boolean {
 function hasValidReferences(session: RoleDSession): boolean {
   const sourceIds = new Set(session.retrieval.items.map((item) => item.sourceId))
   const factIds = new Set(session.retrieval.items.flatMap((item) => item.facts.map((fact) => `${fact.sourceId}-${fact.factId}`)))
+  const pathIds = new Set(session.path.map((node) => node.id))
+  const roleCTargetsAreValid = session.roleC?.targetSourceIds === undefined
+    || session.roleC.targetSourceIds.every((sourceId) =>
+      pathIds.has(sourceId))
   const selectedSourceIsValid = session.view.selectedSourceId === "" || sourceIds.has(session.view.selectedSourceId)
   const currentDiagnosisItems = diagnosisItems(session.diagnosis)
   const diagnosisIds = new Set(currentDiagnosisItems.map((item) => item.id))
@@ -409,11 +460,31 @@ function hasValidReferences(session: RoleDSession): boolean {
         && item.citations.every((citation) => factIds.has(`${citation.sourceId}-${citation.factId}`)))))
   const assessmentItems = session.artifacts.flatMap((artifact) => artifact.kind === "assessment" ? artifact.items ?? [] : [])
   const itemById = new Map(assessmentItems.map((item) => [item.id, item]))
+  const routingItemIds = session.roleC?.routing?.requiredItemIds
+  const routingReferencesAreValid = routingItemIds === undefined
+    || (routingItemIds.length > 0
+      && new Set(routingItemIds).size === routingItemIds.length
+      && routingItemIds.every((itemId) => itemById.has(itemId)))
+  const requiredAssessmentItems = routingItemIds
+    ? routingItemIds.flatMap((itemId) => {
+        const item = itemById.get(itemId)
+        return item ? [item] : []
+      })
+    : assessmentItems
   const answers = session.view.assessmentAnswers ?? {}
   const answersAreValid = Object.entries(answers).every(([itemId, answer]) => {
     const item = itemById.get(itemId)
     return item ? isAssessmentAnswerValid(item, answer) : false
   })
-  const submissionIsValid = session.view.assessmentSubmitted !== true || isAssessmentComplete(assessmentItems, answers)
-  return selectedSourceIsValid && diagnosisIsValid && diagnosisAnswersAreValid && diagnosisSubmissionIsValid && citationsAreValid && answersAreValid && submissionIsValid
+  const submissionIsValid = session.view.assessmentSubmitted !== true
+    || isAssessmentComplete(requiredAssessmentItems, answers)
+  return selectedSourceIsValid
+    && diagnosisIsValid
+    && diagnosisAnswersAreValid
+    && diagnosisSubmissionIsValid
+    && citationsAreValid
+    && roleCTargetsAreValid
+    && routingReferencesAreValid
+    && answersAreValid
+    && submissionIsValid
 }

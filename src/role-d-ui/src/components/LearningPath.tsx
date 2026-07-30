@@ -23,7 +23,7 @@ export function LearningPath({ nodes }: LearningPathProps) {
           </li>
         ))}
       </ol>
-      <p className="path-rationale"><strong>当前路径依据：</strong>{nodes.find((node) => node.status === "current")?.reason}</p>
+      <p className="path-rationale"><strong>当前路径依据：</strong>{nodes.find((node) => node.status === "current")?.reason ?? (nodes.length > 0 && nodes.every((node) => node.status === "completed") ? "当前路径已完成，等待下一轮路径。" : "等待路径节点就绪。")}</p>
     </section>
   )
 }

@@ -23,6 +23,8 @@ git clone https://github.com/jiangdongouyang-lab/knowbalance.git
 cd knowbalance
 npm install -g bun
 bun install
+bun run docker:role-c:build
+bun run docker:role-c:doctor
 bun run check
 bun scripts/team-integration-demo.ts
 ```
@@ -33,6 +35,8 @@ bun scripts/team-integration-demo.ts
 cd knowbalance
 git pull origin main
 bun install
+bun run docker:role-c:build
+bun run docker:role-c:doctor
 bun run check
 bun scripts/team-integration-demo.ts
 ```
@@ -49,6 +53,8 @@ knowbalance/
 ├── examples/learner_*.json            # B/C/D 联调画像样例
 ├── examples/rag_result_example.json   # C/D 消费的 RAG 输出样例
 ├── scripts/team-integration-demo.ts   # B→A→C→D 端到端联调演示
+├── src/role-d-integration/             # C/D 后端接收与学习会话接口
+├── tests/team-adaptive-flow.test.ts    # 两轮自适应闭环测试
 └── docs/knowledge_base_changelog.md   # 知识库更新日志
 ```
 
@@ -113,7 +119,7 @@ C 只能基于 `rag_result.results[*].facts/examples/practiceTasks/quizItems` �
 
 ### D 展示与状态
 
-D 展示：
+D 展示画像、检索依据、引用、公开内容和当前学习会话：
 
 - `profile`
 - `rag_result`
@@ -122,11 +128,60 @@ D 展示：
 
 让评委看到“为什么推荐这个知识点”。
 
+学习流程按以下顺序调用：
+
+1. `generateRoleCForRoleDWithRuntime` 返回审核后的内容和
+   `anchor_pending`，D 先展示 `requiredItemIds` 中的锚点题；
+2. D 将锚点答案交给 `routeRoleCAssessment`，保存返回的
+   `route_locked`、路线和新 `requiredItemIds`，并冻结已确认的锚点答案；
+3. D 按冻结后的题集调用 `submitRoleCAssessment`，展示公开评分和建议；
+4. C 将学习进展交给 B 更新画像；
+5. 后端调用 `continueRoleCAfterSubmission` 生成下一轮内容；成功结果中的
+   `role_d_handoff` 包含 D 可直接接入的内容、路径身份和锚点会话。
+
+D 页面以 `role_d_handoff` 建立下一轮学习计划；独立 delivery 用于接收、去重和审计。
+浏览器调用 `/api/role-c/continue` 时只提交已完成轮次的 `sessionId`、
+`submissionId` 和 `learnerId`。新版画像由 B 会话绑定读取。同节点续跑使用
+当前可信路径和证据；进阶或重建画像时，由后端取得 B 新路径和 A 新证据后
+调用 C。
+
+D 页面将当前 `anchor_pending` 或 `route_locked` 保存在学习计划中，只展示
+当前 `requiredItemIds` 指定的题目。路由和最终提交使用稳定请求编号；请求
+结果未确认时可用原答案重试。`profileVersion`、`pathNodeId` 和
+`targetSourceIds` 随学习计划持久化，用于校验反馈身份和更新对应路径节点。
+
+D 按 C 的 `GradeResult.item_results` 读取分数和 `feedback_code`；题型从已发布
+测评中按 `item_id` 关联。D 在写入完成状态前校验冻结分数、提交身份、完整
+逐题结果和最终建议的一致性。
+
+本地开发服务提供：
+
+```text
+POST /api/role-c/generate
+POST /api/role-c/route
+POST /api/role-c/submit
+POST /api/role-c/continue
+```
+
+启动 D 本地服务前构建并检查隔离代码运行环境：
+
+```bash
+bun run docker:role-c:build
+bun run docker:role-c:doctor
+bun run role-d:dev
+```
+
+`RoleDRoleCDeliveryReceiver` 分别保存审核内容、恢复状态和学习会话；
+重复投递返回 `duplicate`。`RoleBLearningProgressAdapter` 接收 C 的学习
+证据并生成 B 的新版画像。
+
 ## 6. 一键联调验证
 
 BCD 下载仓库后运行：
 
 ```bash
+bun run docker:role-c:build
+bun run docker:role-c:doctor
 bun scripts/team-integration-demo.ts
 ```
 
@@ -137,9 +192,15 @@ b_profile
 a_rag_result
 c_content_contract
 d_display_contract
+adaptive_learning_loop
 ```
 
-这说明 B→A→C→D 的数据链路打通。
+`adaptive_learning_loop` 会显示第一轮锚点选路、正式评分、B 画像更新、
+下一轮发布和下一轮路线冻结。完整自动测试可运行：
+
+```bash
+bun test --isolate tests/team-adaptive-flow.test.ts
+```
 
 ## 7. 更新规则
 
@@ -167,4 +228,7 @@ bun run check
 | 每个人手动复制文件 | 版本不一致 | 统一以 GitHub main 为准 |
 | C 不用 rag_result | 容易幻觉 | 只用 facts/examples/quizItems |
 | D 不展示 trace | 看不到推荐依据 | 展示 retrieval_trace/citations |
+| D 在锚点选路前提交全部题目 | 会话拒绝提交 | 先调用 route，再提交返回的必答题集 |
+| D 在路线冻结后修改锚点答案 | 正式提交被拒绝 | 保存锚点题集合并禁用对应输入 |
+| B 未保存 C 回传后的画像版本 | 下一轮版本不一致 | 以 B 接收端生成的新版本启动下一轮 |
 | A 改完不 push | B/C/D 拿不到更新 | 每次改完 commit + push |

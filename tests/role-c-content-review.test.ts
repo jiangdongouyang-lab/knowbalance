@@ -476,6 +476,42 @@ describe("runReviewedCPipeline publication gate", () => {
     expect(deliveryCalls).toBe(0)
   })
 
+  test("accepts a structured non-recoverable review without a revision instruction", async () => {
+    const context = await goldenContext()
+    const destination = recordingStore()
+    const result = await runReviewedCPipeline(
+      context.input,
+      context.agents,
+      destination.store,
+      {
+        review_port: {
+          policy_version: "terminal-review-v1",
+          async review(request) {
+            return {
+              ...reviewResult(request, "reject", this.policy_version),
+              failed_dimensions: ["UNSUPPORTED_TARGET"],
+              missing_prerequisite_source_ids: [],
+              unknown_prerequisite_refs: [],
+              required_action: "replan_path",
+              fix_scope: "new_spec",
+              can_recover: false,
+            }
+          },
+        },
+      },
+    )
+
+    expect(result.status).toBe("blocked")
+    expect(result.review_reports.at(-1)).toMatchObject({
+      failed_dimensions: ["UNSUPPORTED_TARGET"],
+      required_action: "replan_path",
+      fix_scope: "new_spec",
+      can_recover: false,
+      revision_instructions: [],
+    })
+    expect(destination.batchWrites).toBe(0)
+  })
+
   test("rejects a forged last-review artifact ID before invoking D", async () => {
     const context = await goldenContext()
     const result = await runReviewedCPipeline(
@@ -544,6 +580,34 @@ describe("runReviewedCPipeline publication gate", () => {
     )
     expect(result.status).toBe("failed")
     expect(result.failure_reason?.code).toBe("PROVIDER_ERROR")
+    expect(destination.batchWrites).toBe(0)
+  })
+
+  test("rejects an unknown-prerequisite field attached to a pass response", async () => {
+    const context = await goldenContext()
+    const destination = recordingStore()
+    const result = await runReviewedCPipeline(
+      context.input,
+      context.agents,
+      destination.store,
+      {
+        review_port: {
+          policy_version: "invalid-pass-recovery-v1",
+          async review(request) {
+            return {
+              ...reviewResult(request, "pass", this.policy_version),
+              unknown_prerequisite_refs: ["UNKNOWN-KB-REF"],
+            }
+          },
+        },
+      },
+    )
+    expect(result).toMatchObject({
+      status: "failed",
+      failure_reason: {
+        code: "PROVIDER_ERROR",
+      },
+    })
     expect(destination.batchWrites).toBe(0)
   })
 

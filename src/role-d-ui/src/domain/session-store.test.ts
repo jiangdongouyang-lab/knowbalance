@@ -55,6 +55,75 @@ describe("session-store", () => {
     expect(loadSession()).toEqual(session)
   })
 
+  test("restores an interrupted HTTP request as retryable instead of leaving the UI locked", () => {
+    const interrupted: RoleDSession = {
+      ...session,
+      view: {
+        ...session.view,
+        assessmentStatus: "submitting",
+        assessmentMessage: "正在等待响应",
+      },
+    }
+    expect(saveSession(interrupted)).toBe(true)
+    expect(loadSession()).toMatchObject({
+      view: {
+        assessmentStatus: "blocked",
+        assessmentMessage: "上次请求结果尚未确认，请使用当前答案重试。",
+      },
+    })
+  })
+
+  test("persists a route lock only when its frozen anchors belong to the required public items", () => {
+    const routed: RoleDSession = {
+      ...session,
+      artifacts: [{
+        id: "ASSESSMENT-1",
+        kind: "assessment",
+        title: "分阶测评",
+        status: "real",
+        content: "公开题面",
+        options: [],
+        citations: [],
+        evidenceStatus: "gap",
+        items: [
+          { id: "I1", tier: 1, modality: "mcq", prompt: "题 1", options: ["A"], optionIds: ["A"], citations: [] },
+          { id: "I2", tier: 2, modality: "short_answer", prompt: "题 2", options: [], citations: [] },
+        ],
+      }],
+      roleC: {
+        runId: "RUN-1",
+        learningSessionId: "SESSION-1",
+        formId: "FORM-1",
+        attemptNo: 1,
+        routing: {
+          phase: "route_locked",
+          routingRequestId: "ROUTING-1",
+          routeLockId: "LOCK-1",
+          routeId: "ROUTE-1",
+          action: "reinforce",
+          anchorScoreRatio: 0.5,
+          anchorItemIds: ["I1"],
+          requiredItemIds: ["I1", "I2"],
+        },
+      },
+    }
+    expect(saveSession(routed)).toBe(true)
+    expect(loadSession()?.roleC?.routing).toMatchObject({
+      phase: "route_locked",
+      anchorItemIds: ["I1"],
+    })
+
+    const invalid = structuredClone(routed)
+    if (invalid.roleC?.routing?.phase === "route_locked") {
+      invalid.roleC.routing.anchorItemIds = ["I3"]
+    }
+    localStorage.setItem(
+      "knowbalance.role-d.session",
+      JSON.stringify({ version: 1, data: invalid }),
+    )
+    expect(loadSession()).toBeNull()
+  })
+
   test("round-trips persisted A/B audit and arbitration summaries", () => {
     const audited: RoleDSession = {
       ...session,

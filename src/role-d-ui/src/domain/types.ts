@@ -177,6 +177,24 @@ export interface RoleCFeedbackView {
   feedbackSummary: string
 }
 
+export type RoleCAssessmentRoutingView =
+  | {
+      phase: "anchor_pending"
+      routingRequestId: string
+      requiredItemIds: string[]
+    }
+  | {
+      phase: "route_locked"
+      routingRequestId: string
+      routeLockId: string
+      routeId: string
+      action: "remediate" | "reinforce" | "advance"
+      anchorScoreRatio: number
+      /** Answers frozen by C when the route lock was created. */
+      anchorItemIds?: string[]
+      requiredItemIds: string[]
+    }
+
 export interface RoleDSession {
   version: 1
   eventMode: "demo" | "live"
@@ -196,6 +214,12 @@ export interface RoleDSession {
     learningSessionId: string
     formId: string
     attemptNo: number
+    /** Bound to C's frozen GenerationSpec for feedback identity and path updates. */
+    profileVersion?: string
+    pathNodeId?: string
+    targetSourceIds?: string[]
+    /** Present on current sessions; omitted only by legacy/imported sessions. */
+    routing?: RoleCAssessmentRoutingView
   }
   feedback?: RoleCFeedbackView
   evidenceGaps: string[]

@@ -3,9 +3,36 @@ import react from "@vitejs/plugin-react"
 import { resolve } from "node:path"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { Plugin } from "vite"
-import { generateRoleCForRoleDWithRuntime, submitRoleCAssessment } from "../role-d-integration/role-c-service"
-import type { GenerateRoleCForRoleDInput } from "../role-d-integration/contracts"
-import type { SubmitRoleCAssessmentInput } from "../role-d-integration/role-c-service"
+import { loadKnowledgeBase } from "../knowledge/loader"
+import {
+  continueRoleCAfterSubmission,
+  generateRoleCForRoleDWithRuntime,
+  routeRoleCAssessment,
+  submitRoleCAssessment,
+} from "../role-d-integration/role-c-service"
+import {
+  isRoleCContinuationHttpRequest,
+  type GenerateRoleCForRoleDInput,
+  type RoleCForRoleDResult,
+  type RoleCContinuationHttpRequest,
+} from "../role-d-integration/contracts"
+import type {
+  RouteRoleCAssessmentInput,
+  SubmitRoleCAssessmentInput,
+} from "../role-d-integration/role-c-service"
+import {
+  contentHash,
+  createDockerPythonCodeRunnerFromEnv,
+  NodeDockerCommandExecutor,
+} from "../role-c-content"
+import {
+  SessionRoleBBridge,
+  toRoleCContinuationContextFailure,
+  type SessionRoleBGenerationBinding,
+} from "../role-d-integration/session-role-b-bridge"
+import {
+  SingleFlightRunJournal,
+} from "../role-d-integration/single-flight-run-journal"
 
 export default defineConfig({
   root: __dirname,
@@ -22,22 +49,118 @@ export default defineConfig({
 })
 
 function roleCApiPlugin(): Plugin {
+  const roleBBridge = loadKnowledgeBase()
+    .then((knowledgeBase) => new SessionRoleBBridge(knowledgeBase))
+  const generationJournal = new SingleFlightRunJournal<
+    SessionRoleBGenerationBinding,
+    RoleCForRoleDResult
+  >()
+
+  const dispatch = async (url: string, body: unknown) => {
+    if (url === "/api/role-c/continue") {
+      if (!isRoleCContinueRequest(body)) {
+        throw new Error("ROLE_C_CONTINUE_INVALID")
+      }
+      const bridge = await roleBBridge
+      let nextProfileSnapshot
+      try {
+        nextProfileSnapshot = bridge.getOrFreezeContinuationSnapshot(
+          body.sessionId,
+          body.submissionId,
+          body.learnerId,
+        )
+      } catch (error) {
+        const failure = toRoleCContinuationContextFailure(error)
+        if (failure) return failure
+        throw error
+      }
+      const result = await continueRoleCAfterSubmission({
+        sessionId: body.sessionId,
+        submissionId: body.submissionId,
+        learnerId: body.learnerId,
+        nextProfileSnapshot,
+      })
+      if (result.status === "published") {
+        bridge.bindPublishedSession(
+          body.sessionId,
+          result.role_d_handoff.learningSession.sessionId,
+          body.learnerId,
+        )
+      }
+      return result
+    }
+    if (url === "/api/role-c/submit") {
+      if (!isRoleCSubmissionRequest(body)) {
+        throw new Error("ROLE_C_SUBMISSION_INVALID")
+      }
+      return submitRoleCAssessment(body)
+    }
+    if (url === "/api/role-c/route") {
+      if (!isRoleCRouteRequest(body)) {
+        throw new Error("ROLE_C_ROUTE_INVALID")
+      }
+      return routeRoleCAssessment(body)
+    }
+    if (!isRoleCRequest(body)) {
+      throw new Error("ROLE_C_REQUEST_INVALID")
+    }
+
+    const bridge = await roleBBridge
+    const requestHash = contentHash({
+      contract: "role-d-local-generate-request-v1",
+      input: body,
+    })
+    return generationJournal.execute({
+      runId: body.runId,
+      requestHash,
+      createBinding: () => bridge.createGenerationBinding({
+        learnerIdHash: body.profile.learner_id,
+        currentProfile: body.profile,
+        profileVersion: `${body.runId}-profile-v1`,
+        profileRevision: 1,
+      }),
+      generate: async (binding) => {
+      const result = await generateRoleCForRoleDWithRuntime(
+        body,
+        {
+          ...await roleCRuntimeOptions(),
+          learningProgressPort: binding.progressPort,
+        },
+      )
+      if (result.status === "ready") {
+        bridge.bindGeneratedSession(
+          result.learningSession.sessionId,
+          binding,
+        )
+      }
+      return result
+      },
+      shouldRetainResult: (result) => result.status === "ready",
+    })
+  }
+
   const middleware = async (request: IncomingMessage, response: ServerResponse, next: () => void) => {
-    if (request.url !== "/api/role-c/generate" && request.url !== "/api/role-c/submit") return next()
+    if (![
+      "/api/role-c/generate",
+      "/api/role-c/route",
+      "/api/role-c/submit",
+      "/api/role-c/continue",
+    ].includes(request.url ?? "")) return next()
     if (request.method !== "POST") {
       response.statusCode = 405
       return response.end(JSON.stringify({ error: "METHOD_NOT_ALLOWED" }))
     }
     try {
       const body = await readJsonBody(request)
-      const result = request.url === "/api/role-c/submit"
-        ? isRoleCSubmissionRequest(body)
-          ? await submitRoleCAssessment(body)
-          : (() => { throw new Error("ROLE_C_SUBMISSION_INVALID") })()
-        : isRoleCRequest(body)
-          ? await generateRoleCForRoleDWithRuntime(body, roleCRuntimeOptions())
-          : (() => { throw new Error("ROLE_C_REQUEST_INVALID") })()
-      response.statusCode = result.status === "ready" || result.status === "completed" || result.status === "needs_review" ? 200 : 422
+      const result = await dispatch(request.url!, body)
+      response.statusCode = result.status === "ready"
+        || result.status === "routed"
+        || result.status === "completed"
+        || result.status === "needs_review"
+        || result.status === "published"
+        || result.status === "awaiting_input"
+        ? 200
+        : 422
       response.setHeader("content-type", "application/json; charset=utf-8")
       response.end(JSON.stringify(result))
     } catch (error) {
@@ -57,7 +180,7 @@ function roleCApiPlugin(): Plugin {
   }
 }
 
-function roleCRuntimeOptions() {
+async function roleCRuntimeOptions() {
   const providerMode = process.env.ROLE_C_MODEL_ENDPOINT && process.env.ROLE_C_MODEL_ID
     ? "model" as const
     : "deterministic" as const
@@ -65,6 +188,10 @@ function roleCRuntimeOptions() {
     providerMode,
     env: process.env,
     cwd: resolve(__dirname, "../.."),
+    runner: await createDockerPythonCodeRunnerFromEnv(
+      process.env,
+      { executor: new NodeDockerCommandExecutor() },
+    ),
   }
 }
 
@@ -87,6 +214,21 @@ function isRoleCSubmissionRequest(value: unknown): value is SubmitRoleCAssessmen
     && typeof record.submissionId === "string" && record.submissionId.length > 0
     && Array.isArray(record.answers)
     && record.answers.every(isSubmissionAnswer)
+}
+
+function isRoleCRouteRequest(
+  value: unknown,
+): value is RouteRoleCAssessmentInput {
+  if (!isRoleCSubmissionRequest(value)) return false
+  const record = value as unknown as Record<string, unknown>
+  return typeof record.routingRequestId === "string"
+    && record.routingRequestId.length > 0
+}
+
+function isRoleCContinueRequest(
+  value: unknown,
+): value is RoleCContinuationHttpRequest {
+  return isRoleCContinuationHttpRequest(value)
 }
 
 function isSubmissionAnswer(value: unknown): boolean {

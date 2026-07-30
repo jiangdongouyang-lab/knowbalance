@@ -29,15 +29,20 @@ export class OpenCodeConceptContentProvider implements RoleCContentProvider {
     request: ConceptTutorRequest,
   ): Promise<ArtifactDraft<ConceptLessonPayload>> {
     assertPromptVersion(request)
-    const result = await this.invoker.invoke({ worker: "concept-tutor", request: buildConceptTutorModelInput(request) })
+    const result = await invokeWorker(
+      this.invoker,
+      {
+        worker: "concept-tutor",
+        request: buildConceptTutorModelInput(request),
+      },
+    )
     if (!isRecord(result)) {
       return { payload: result as unknown as ConceptLessonPayload }
     }
     if (result.status === "blocked") {
-      const reason = isRecord(result.blocked_reason) && typeof result.blocked_reason.message === "string"
-        ? result.blocked_reason.message
-        : "OpenCode concept-tutor 返回 blocked"
-      throw new ModelProviderUnavailableError(reason)
+      throw new ModelProviderUnavailableError(
+        "OpenCode concept-tutor 未生成可发布内容",
+      )
     }
     assertCompletedResult(result, "concept-tutor")
     const draft = result.provider_draft
@@ -49,13 +54,15 @@ export class OpenCodeConceptContentProvider implements RoleCContentProvider {
 
   async generateCodeLab(request: CodeLabRequest): Promise<CodeLabDraft> {
     assertPromptVersion(request)
-    const result = await this.invoker.invoke({ worker: "code-lab", request: buildCodeLabModelInput(request) })
+    const result = await invokeWorker(
+      this.invoker,
+      { worker: "code-lab", request: buildCodeLabModelInput(request) },
+    )
     if (!isRecord(result)) return result as unknown as CodeLabDraft
     if (result.status === "blocked") {
-      const reason = isRecord(result.blocked_reason) && typeof result.blocked_reason.message === "string"
-        ? result.blocked_reason.message
-        : "OpenCode code-lab 返回 blocked"
-      throw new ModelProviderUnavailableError(reason)
+      throw new ModelProviderUnavailableError(
+        "OpenCode code-lab 未生成可发布内容",
+      )
     }
     assertCompletedResult(result, "code-lab")
     const draft = result.provider_draft
@@ -67,13 +74,18 @@ export class OpenCodeConceptContentProvider implements RoleCContentProvider {
 
   async generateAssessment(request: Parameters<RoleCContentProvider["generateAssessment"]>[0]): Promise<AssessmentDraft> {
     assertPromptVersion(request)
-    const result = await this.invoker.invoke({ worker: "tiered-evaluator", request: buildAssessmentAuthorModelInput(request) })
+    const result = await invokeWorker(
+      this.invoker,
+      {
+        worker: "tiered-evaluator",
+        request: buildAssessmentAuthorModelInput(request),
+      },
+    )
     if (!isRecord(result)) return result as unknown as AssessmentDraft
     if (result.status === "blocked") {
-      const reason = isRecord(result.blocked_reason) && typeof result.blocked_reason.message === "string"
-        ? result.blocked_reason.message
-        : "OpenCode tiered-evaluator 返回 blocked"
-      throw new ModelProviderUnavailableError(reason)
+      throw new ModelProviderUnavailableError(
+        "OpenCode tiered-evaluator 未生成可发布内容",
+      )
     }
     assertCompletedResult(result, "tiered-evaluator")
     const draft = result.provider_draft
@@ -101,6 +113,21 @@ function assertPromptVersion(request: ConceptTutorRequest | CodeLabRequest): voi
 
 function assertCompletedResult(result: Record<string, unknown>, worker: string): void {
   if (result.status !== "completed" || (result.blocked_reason !== null && result.blocked_reason !== undefined)) {
-    throw new Error(`OpenCode ${worker} 返回非 completed 或自相矛盾的执行状态`)
+    throw new ModelProviderUnavailableError(
+      `OpenCode ${worker} 返回非 completed 或自相矛盾的执行状态`,
+    )
+  }
+}
+
+async function invokeWorker(
+  invoker: RoleCWorkerInvoker,
+  input: Parameters<RoleCWorkerInvoker["invoke"]>[0],
+): Promise<unknown> {
+  try {
+    return await invoker.invoke(input)
+  } catch {
+    throw new ModelProviderUnavailableError(
+      `OpenCode ${input.worker} 调用失败`,
+    )
   }
 }

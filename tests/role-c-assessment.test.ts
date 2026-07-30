@@ -102,6 +102,28 @@ describe("role C phase-three trusted assessment Author", () => {
     expect(pair.secure_artifact.payload?.code_test_suites).toHaveLength(1)
   })
 
+  test("returns structured UNSUPPORTED_TARGET for an arbitrary three-target offline assessment", async () => {
+    const { request, provider } = await buildContext()
+    const unsupported = structuredClone(request)
+    unsupported.generation_spec.targets[0]!.source_id = "K001"
+    unsupported.generation_spec.targets[1]!.source_id = "K002"
+    unsupported.generation_spec.targets[2]!.source_id = "K003"
+
+    const pair = await generateAssessment(
+      unsupported,
+      provider,
+      new TrustedAssessmentVerifier(new AssessmentFixtureRunner()),
+    )
+
+    expect(pair.public_artifact.status).toBe("blocked")
+    expect(pair.public_artifact.blocked_reason).toMatchObject({
+      code: "UNSUPPORTED_TARGET",
+      details: ["target_source_ids=K001,K002,K003"],
+    })
+    expect(pair.public_artifact.payload).toBeNull()
+    expect(pair.secure_artifact.payload).toBeNull()
+  })
+
   test("rejects nested shape, blueprint and option-diagnostic errors", async () => {
     const { request, provider } = await buildContext()
     const draft = await provider.generateAssessment(request)
@@ -141,6 +163,30 @@ describe("role C phase-three trusted assessment Author", () => {
     ]))
   })
 
+  test("blocks an explicit correct-option disclosure in a public prompt", async () => {
+    const { request, provider } = await buildContext()
+    const leaked = await provider.generateAssessment(request)
+    leaked.public_draft.payload.items[0]!.prompt +=
+      " 本题正确选项 ID 为 opt_iterate。"
+
+    const report = validateAssessmentDraftStructure(request, leaked)
+
+    expect(report.ok).toBe(false)
+    expect(report.issues.some(
+      (entry) => entry.code === "explicit_answer_leak",
+    )).toBe(true)
+
+    const indirect = await provider.generateAssessment(request)
+    indirect.public_draft.payload.items[0]!.prompt +=
+      " 评分器只接受 opt_iterate，选择它会获得满分。"
+    const indirectReport =
+      validateAssessmentDraftStructure(request, indirect)
+    expect(indirectReport.ok).toBe(false)
+    expect(indirectReport.issues.some(
+      (entry) => entry.code === "explicit_answer_leak",
+    )).toBe(true)
+  })
+
   test("does not let an accepting custom verifier bypass deterministic Author gates", async () => {
     const { request, provider } = await buildContext()
     const draft = await provider.generateAssessment(request)
@@ -151,6 +197,30 @@ describe("role C phase-three trusted assessment Author", () => {
     })
     expect(pair.public_artifact.status).toBe("blocked")
     expect(pair.public_artifact.blocked_reason?.code).toBe("BLOCKED_INVALID_OUTPUT")
+  })
+
+  test("snapshots assessment output before an asynchronous verifier can mutate it", async () => {
+    const { request, provider } = await buildContext()
+    const providerDraft = await provider.generateAssessment(request)
+    const originalFormId = providerDraft.secure_draft.payload.form_id
+    provider.generateAssessment = async () => providerDraft
+
+    const pair = await generateAssessment(request, provider, {
+      async verifyAssessment(_request, verifierDraft) {
+        verifierDraft.secure_draft.payload.form_id =
+          "FORM-MUTATED-BY-VERIFIER"
+        return {
+          answer_key_verified: true,
+          runner_image_digest: RUNNER_DIGEST,
+          issues: [],
+        }
+      },
+    })
+    providerDraft.secure_draft.payload.form_id =
+      "FORM-MUTATED-BY-PROVIDER-AFTER-RETURN"
+
+    expect(pair.secure_artifact.status).toBe("ready")
+    expect(pair.secure_artifact.payload?.form_id).toBe(originalFormId)
   })
 
   test("applies anchor routing deterministically at exact interval boundaries", async () => {
@@ -235,6 +305,7 @@ describe("role C phase-three trusted assessment Author", () => {
     const pair = await generateAssessment(request, provider, new TrustedAssessmentVerifier(new AssessmentFixtureRunner(true)))
     expect(pair.public_artifact.status).toBe("blocked")
     expect(pair.public_artifact.blocked_reason?.code).toBe("BLOCKED_ANSWER_KEY_UNVERIFIED")
+    expect(JSON.stringify(pair.public_artifact)).not.toContain("AT-O3")
   })
 
   test("repairs one invalid model Draft and adapts OpenCode provider_draft", async () => {

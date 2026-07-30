@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test"
+import Ajv from "ajv"
+import { adaptRagResult } from "../src/role-c-content/contracts/evidence-pack"
 
 const REQUIRED_DOC_PHRASES = [
   "https://github.com/jiangdongouyang-lab/knowbalance.git",
@@ -28,13 +30,31 @@ describe("team integration assets", () => {
   })
 
   test("ships an example RAG result that C/D can consume", async () => {
+    const schema = await Bun.file("schemas/rag_result.schema.json").json()
     const example = await Bun.file("examples/rag_result_example.json").json()
+    const validate = new Ajv({ allErrors: true }).compile(schema)
 
+    expect(validate(example), JSON.stringify(validate.errors)).toBe(true)
     expect(example.query.length).toBeGreaterThan(0)
     expect(example.results.length).toBeGreaterThan(0)
     expect(example.results[0].source_id).toMatch(/^K\d{3}$/)
     expect(example.results[0].facts[0].fact_id).toMatch(/^F\d{3}$/)
     expect(example.results[0].retrieval_trace.matched_keywords.length).toBeGreaterThan(0)
+
+    const evidencePack = adaptRagResult(example, {
+      kb_version: "python-basic@0.1.0",
+      rag_version: "rule-rag-0.1",
+    })
+    expect(evidencePack.results[0]).toMatchObject({
+      source_id: "K007",
+      quiz_seeds: [{
+        source_id: "K007",
+        fact_id: "F001",
+      }],
+      retrieval_trace: {
+        matched_keywords: ["循环"],
+      },
+    })
   })
 
   test("ships a knowledge base changelog with current GitHub sync entry", async () => {
@@ -56,7 +76,7 @@ describe("team integration assets", () => {
     const output = JSON.parse(stdout)
     expect(output.workflow).toEqual("B_profile_to_A_rag_to_C_content_to_D_display")
     expect(output.github.repository).toBe("https://github.com/jiangdongouyang-lab/knowbalance.git")
-    expect(output.b_profile.learner_id).toBe("demo_loop_weak")
+    expect(output.b_profile.learner_id).toBe("demo_project_goal")
     expect(output.a_rag_result.results.length).toBeGreaterThanOrEqual(3)
     expect(output.c_content_contract.required_citations[0]).toHaveProperty("source_id")
     expect(output.d_display_contract.required_sections).toEqual(expect.arrayContaining(["profile", "rag_result", "retrieval_trace", "citations"]))
@@ -84,5 +104,19 @@ describe("team integration assets", () => {
       artifacts: 3,
     })
     expect(output.d_display_contract.role_d_session_summary.workflow_events).toBeGreaterThan(0)
+    expect(output.adaptive_learning_loop).toMatchObject({
+      first_session_phase: "anchor_pending",
+      first_route_phase: "route_locked",
+      first_round_accuracy: 0.6,
+      first_round_action: "reinforce",
+      b_profile_revision: 2,
+      next_round_status: "published",
+      next_round_action: "reinforce",
+      next_session_phase: "anchor_pending",
+      next_route_status: "routed",
+      next_route_phase: "route_locked",
+      d_reviewed_releases: 2,
+      d_learning_session_updates: 4,
+    })
   })
 })

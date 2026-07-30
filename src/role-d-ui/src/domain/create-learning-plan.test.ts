@@ -52,6 +52,11 @@ describe("createLearningPlan", () => {
     expect(plan.session.workflow.some((event) => event.agent === "concept-tutor" && event.status === "completed")).toBe(true)
     expect(plan.session.workflow.some((event) => event.agent === "code-lab" && event.status === "completed")).toBe(true)
     expect(plan.session.workflow.some((event) => event.agent === "tiered-evaluator" && event.status === "completed")).toBe(true)
+    expect(plan.session.roleC).toMatchObject({
+      profileVersion: expect.stringContaining("-profile-v1"),
+      pathNodeId: expect.stringContaining("-PATH-K007-K009-K018"),
+      targetSourceIds: ["K007", "K009", "K018"],
+    })
   })
 
   test("marks path nodes completed from B concept provenance source IDs", async () => {
@@ -60,7 +65,34 @@ describe("createLearningPlan", () => {
     expect(plan.session.path.find((node) => node.id === "K009")?.status).toBe("completed")
     expect(plan.session.path.find((node) => node.id === "K002")?.status).toBe("completed")
     expect(plan.session.path.find((node) => node.id === "K007")?.status).not.toBe("completed")
+    expect(plan.session.path.find((node) => node.id === "K018")?.status).not.toBe("completed")
+    expect(plan.session.path.find((node) => node.status === "current")?.id).toBe("K007")
+    expect(plan.session.path.findIndex((node) => node.id === "K007"))
+      .toBeLessThan(plan.session.path.findIndex((node) => node.id === "K018"))
     expect(plan.session.path.map((node) => node.status)).toEqual([...plan.session.path.map((node) => node.status)].sort((left, right) => ({ completed: 0, current: 1, upcoming: 2 })[left] - ({ completed: 0, current: 1, upcoming: 2 })[right]))
+  })
+
+  test("does not treat a composite project as mastered from its component keywords", async () => {
+    const plan = await createLearningPlan({
+      ...input,
+      knownConcepts: ["列表", "循环", "函数"],
+      weakConcepts: [],
+    }, async ({ runId }) => ({
+      status: "blocked",
+      artifacts: [],
+      workflow: [],
+      runId,
+      reason: "test fixture",
+    }))
+
+    expect(plan.session.path.find((node) => node.id === "K009")?.status).toBe("completed")
+    expect(plan.session.path.find((node) => node.id === "K007")?.status).toBe("completed")
+    expect(plan.session.path.find((node) => node.id === "K013")?.status).toBe("completed")
+    expect(plan.session.path.find((node) => node.id === "K018")?.status).toBe("upcoming")
+    expect(plan.session.path.find((node) => node.status === "current")?.difficulty)
+      .not.toBe("integrated")
+    expect(plan.session.path.find((node) => node.id === "K018")?.reason)
+      .toContain("超出当前画像一档")
   })
 
   test("feeds all selected diagnosis answers back through B and reruns A", async () => {

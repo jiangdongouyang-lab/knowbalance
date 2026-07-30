@@ -399,6 +399,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:fo
 .feedback-grid article { min-height: 150px; padding: 23px; display: grid; align-content: center; gap: 8px; border: 1px solid var(--border); border-radius: 12px; background: rgba(255,255,255,.012); }
 .feedback-grid strong { color: #dce3e1; font-size: 20px; }
 .feedback-grid p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.round-continuation-error { margin: 22px 0 -18px; padding: 13px 15px; color: #ecb0b0; border: 1px solid rgba(227,125,125,.26); border-radius: 9px; background: rgba(227,125,125,.08); font-size: 13px; line-height: 1.55; }
 
 .app-footer { width: min(100%, 1020px); margin: auto auto 0; padding: 22px 4px 0; display: flex; justify-content: space-between; color: #75817e; font: 12px Consolas, monospace; }
 .drawer-backdrop { position: fixed; inset: 0; z-index: 80; display: flex; justify-content: flex-end; background: rgba(0,0,0,.56); }
