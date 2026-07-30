@@ -4,6 +4,8 @@ import { describe, expect, test } from "bun:test"
 import { loadKnowledgeBase } from "../src/knowledge/loader"
 import { auditTeaching } from "../src/role-b-profile/teaching-audit/auditor"
 import { arbitrate } from "../src/role-b-profile/teaching-audit/arbitrator"
+import { planRecoveryPath } from "../src/role-b-profile/teaching-audit/path-planner"
+import { receiveLearningProgress } from "../src/role-b-profile/teaching-audit/progress-receiver"
 import type { LearnerProfile } from "../src/role-b-profile/types"
 import type { KnowledgeBase } from "../src/knowledge/types"
 
@@ -320,5 +322,343 @@ describe("arbitration", () => {
     })
     expect(result.canRevise).toBe(true)
     expect(result.maxRevisionRounds).toBe(2)
+  })
+})
+
+// ── Week3: 结构化恢复信息 ──
+
+describe("structured recovery fields", () => {
+  test("passing audit has empty failedDimensions and canRecover true", async () => {
+    const kb = await getKB()
+    const result = auditTeaching({
+      artifactId: "struct-1",
+      learnerProfile: makeProfile({
+        level: "beginner",
+        known_concepts: ["变量", "数据类型", "条件判断"],
+        weak_concepts: ["循环"],
+        goal: "学会循环遍历数据",
+      }),
+      knowledgeBase: kb,
+      citedSourceIds: ["K007"],
+    })
+    expect(result.status).toBe("pass")
+    expect(result.failedDimensions).toEqual([])
+    expect(result.missingPrerequisiteSourceIds).toEqual([])
+    expect(result.unknownPrerequisiteRefs).toEqual([])
+    expect(result.requiredAction).toBe("adjust_content")
+    expect(result.fixScope).toBe("artifact")
+    expect(result.recommendedLevel).toBeNull()
+    expect(result.canRecover).toBe(true)
+  })
+
+  test("difficulty misaligned → replan_path + recommendedLevel + fixScope new_spec", async () => {
+    const kb = await getKB()
+    const result = auditTeaching({
+      artifactId: "struct-2",
+      learnerProfile: makeProfile(),
+      knowledgeBase: kb,
+      citedSourceIds: ["K018"],  // integrated, learner is beginner
+    })
+    expect(result.status).toBe("reject")
+    expect(result.failedDimensions).toContain("difficulty_alignment")
+    expect(result.requiredAction).toBe("replan_path")
+    expect(result.fixScope).toBe("new_spec")
+    expect(result.recommendedLevel).toBe("intermediate")  // integrated - 1 = intermediate
+    expect(result.canRecover).toBe(true)
+  })
+
+  test("prerequisites missing → replan_path + missingPrerequisiteSourceIds populated", async () => {
+    const kb = await getKB()
+    const result = auditTeaching({
+      artifactId: "struct-3",
+      learnerProfile: makeProfile({ known_concepts: [] }),
+      knowledgeBase: kb,
+      citedSourceIds: ["K018"],
+    })
+    expect(result.status).toBe("reject")
+    expect(result.failedDimensions).toContain("prerequisite_coverage")
+    expect(result.failedDimensions).toContain("difficulty_alignment")
+    expect(result.requiredAction).toBe("replan_path")
+    expect(result.missingPrerequisiteSourceIds.length).toBeGreaterThan(0)
+    // K018 prereqs: K007, K009, K013
+    expect(result.missingPrerequisiteSourceIds).toContain("K007")
+    expect(result.missingPrerequisiteSourceIds).toContain("K009")
+    expect(result.missingPrerequisiteSourceIds).toContain("K013")
+  })
+
+  test("unknown prerequisite refs tracked separately", async () => {
+    const kb = await getKB()
+    // Create profile with a KB item that has unknown prereq
+    // We use actual KB items; unknown prereqs are those whose sourceId isn't in the KB
+    const result = auditTeaching({
+      artifactId: "struct-4",
+      learnerProfile: makeProfile({ known_concepts: [] }),
+      knowledgeBase: kb,
+      citedSourceIds: ["K018"],
+    })
+    // K018's prereqs (K007, K009, K013) exist in KB, so unknownPrerequisiteRefs should be empty
+    // if they were unknown, they'd be listed
+    expect(Array.isArray(result.unknownPrerequisiteRefs)).toBe(true)
+  })
+
+  test("weak concept incomplete → adjust_content + fixScope artifact + canRecover true", async () => {
+    const kb = await getKB()
+    const result = auditTeaching({
+      artifactId: "struct-5",
+      learnerProfile: makeProfile({
+        level: "beginner",
+        known_concepts: ["变量", "数据类型", "条件判断"],
+        weak_concepts: ["循环", "列表"],
+        goal: "学会循环遍历数据",
+      }),
+      knowledgeBase: kb,
+      citedSourceIds: ["K001"],  // Python是什么 — unrelated to weak points
+    })
+    expect(result.status).toBe("revise")
+    expect(result.failedDimensions).toContain("weak_concept_coverage")
+    expect(result.requiredAction).toBe("adjust_content")
+    expect(result.fixScope).toBe("artifact")
+    expect(result.canRecover).toBe(true)
+    expect(result.missingPrerequisiteSourceIds).toEqual([])
+    expect(result.recommendedLevel).toBeNull()
+  })
+})
+
+// ── Week3: 路径规划 ──
+
+describe("planRecoveryPath", () => {
+  test("difficulty misaligned → lower-difficulty path", async () => {
+    const kb = await getKB()
+    // K015(文件读写, intermediate) — learner is beginner, but known_concepts cover prereqs
+    // K015 prereqs: none explicitly, but let's verify
+    const auditResult = auditTeaching({
+      artifactId: "plan-1",
+      learnerProfile: makeProfile({
+        level: "beginner",
+        known_concepts: ["变量", "数据类型", "条件判断"],
+      }),
+      knowledgeBase: kb,
+      citedSourceIds: ["K015"],  // intermediate, learner is beginner → difficulty misaligned only
+    })
+    const result = planRecoveryPath({
+      learnerProfile: makeProfile({ level: "beginner" }),
+      knowledgeBase: kb,
+      auditResult,
+      currentPathNode: { target_source_ids: ["K015"], prerequisite_source_ids: [], goal: "学会文件操作" },
+    })
+    expect(result.pathNode.target_source_ids.length).toBeGreaterThan(0)
+    expect(result.pathNode.target_source_ids).not.toContain("K015")  // K015 is excluded because difficulty too high
+    expect(result.pathNode.node_id).toContain("RECOVERY")
+    expect(result.requiresNewRag).toBe(true)
+    expect(result.rationale.length).toBeGreaterThan(0)
+  })
+
+  test("prerequisites missing → prerequisite-first path", async () => {
+    const kb = await getKB()
+    const auditResult = auditTeaching({
+      artifactId: "plan-2",
+      learnerProfile: makeProfile({ known_concepts: ["变量", "数据类型"] }),
+      knowledgeBase: kb,
+      citedSourceIds: ["K018"],
+    })
+    const result = planRecoveryPath({
+      learnerProfile: makeProfile({ known_concepts: ["变量", "数据类型"] }),
+      knowledgeBase: kb,
+      auditResult,
+    })
+    expect(result.pathNode.target_source_ids.length).toBeGreaterThan(0)
+    // Should include the missing prereqs (K007, K009, K013)
+    const targetIds = result.pathNode.target_source_ids
+    const hasPrereq = targetIds.some((id) => ["K007", "K009", "K013"].includes(id))
+    expect(hasPrereq).toBe(true)
+    expect(result.rationale).toContain("前置知识缺失")
+  })
+
+  test("returns valid LearningPathNode structure", async () => {
+    const kb = await getKB()
+    const auditResult = auditTeaching({
+      artifactId: "plan-3",
+      learnerProfile: makeProfile(),
+      knowledgeBase: kb,
+      citedSourceIds: ["K018"],
+    })
+    const result = planRecoveryPath({
+      learnerProfile: makeProfile(),
+      knowledgeBase: kb,
+      auditResult,
+    })
+    expect(result.pathNode.schema_version).toBe("1.0")
+    expect(result.pathNode.objectives.length).toBeGreaterThan(0)
+    expect(result.pathNode.assessment_blueprint).toBeDefined()
+    expect(result.pathNode.assessment_blueprint.tier_1_count).toBeGreaterThan(0)
+  })
+})
+
+// ── Week3: 学习进展接收 ──
+
+describe("receiveLearningProgress", () => {
+  test("accepts valid DynamicFeedbackResult and returns updated profile", () => {
+    const result = receiveLearningProgress({
+      feedback: {
+        schema_version: "1.0",
+        feedback_id: "test-feedback-1",
+        run_id: "test-run",
+        session_id: "test-session",
+        submission_id: "test-sub",
+        learner_id_hash: "test-learner-001",
+        profile_version: "test-run-profile-v1",
+        path_node_id: "test-path",
+        form_id: "test-form",
+        attempt_no: 1,
+        round_score: { raw_score: 8, max_score: 10, accuracy: 0.8, evidence_score: 0.75 },
+        objective_results: [
+          { objective_id: "O1", raw_score: 4, max_score: 5, accuracy: 0.8, evidence_score: 0.8, misconception_tags: [] },
+        ],
+        grade_result: {
+          schema_version: "1.0",
+          run_id: "test-run",
+          artifact_id: "grade-1",
+          artifact_type: "grade_result",
+          agent: "tiered-evaluator",
+          status: "ready",
+          versions: {
+            profile_version: "v1",
+            kb_version: "v1",
+            rag_version: "v1",
+            prompt_version: "v1",
+            model_config_hash: "abc",
+            schema_version: "1.0",
+          },
+          seed: 42,
+          input_refs: [],
+          citations: [],
+          quality: { schema_ok: true, citation_coverage: 1, objective_coverage: 1, alignment_score: 1 },
+          payload: {
+            form_id: "test-form",
+            submission_id: "test-sub",
+            score_frozen: true,
+            raw_score: 8,
+            max_score: 10,
+            evidence_score: 0.75,
+            recommendation: { action: "advance", confidence: 0.85, reason_codes: ["round_accuracy_at_or_above_advancement_threshold"] },
+            item_results: [{ item_id: "I1", objective_id: "O1", raw_score: 4, max_score: 5, evidence_score: 0.8, grader_confidence: 0.9, hint_factor: 0, repeat_factor: 0, misconception_tags: [], feedback_code: "correct" }],
+            feedback: { generated_after_score_freeze: true, mode: "formative", summary: "做得不错", item_feedback: [] },
+          },
+          trace_ref: "trace-1",
+        },
+        mastery_snapshot: [
+          { objective_id: "O1", mastery: 0.8, evidence_batches: 2, observed_modalities: ["mcq", "trace"], revision: 1 },
+        ],
+        final_decision: {
+          action: "advance",
+          basis: "round_accuracy",
+          confidence: 0.85,
+          reason_codes: ["round_accuracy_at_or_above_advancement_threshold"],
+          target_objective_ids: [],
+          policy_ref: "role-c-round-accuracy-v1",
+        },
+      },
+      currentProfile: makeProfile({ level: "beginner" }),
+      profileVersion: "test-run-profile-v2",
+    })
+
+    expect(result.profile.learner_id).toBe("test-learner-001")
+    expect(result.snapshot.profile_version).toBe("test-run-profile-v2")
+    expect(result.snapshot.schema_version).toBe("1.0")
+    expect(result.changes).toBeDefined()
+  })
+
+  test("advance action with high mastery promotes learner level", () => {
+    const result = receiveLearningProgress({
+      feedback: {
+        schema_version: "1.0",
+        feedback_id: "test-fb-2",
+        run_id: "test-run",
+        session_id: "test-session",
+        submission_id: "test-sub",
+        learner_id_hash: "test-learner-001",
+        profile_version: "v1",
+        path_node_id: "test-path",
+        form_id: "test-form",
+        attempt_no: 1,
+        round_score: { raw_score: 10, max_score: 10, accuracy: 1.0, evidence_score: 0.9 },
+        objective_results: [
+          { objective_id: "O1", raw_score: 5, max_score: 5, accuracy: 1.0, evidence_score: 0.9, misconception_tags: [] },
+        ],
+        grade_result: {
+          schema_version: "1.0", run_id: "test-run", artifact_id: "grade-2", artifact_type: "grade_result",
+          agent: "tiered-evaluator", status: "ready",
+          versions: { profile_version: "v1", kb_version: "v1", rag_version: "v1", prompt_version: "v1", model_config_hash: "abc", schema_version: "1.0" },
+          seed: 42, input_refs: [], citations: [],
+          quality: { schema_ok: true, citation_coverage: 1, objective_coverage: 1, alignment_score: 1 },
+          payload: {
+            form_id: "test-form", submission_id: "test-sub", score_frozen: true,
+            raw_score: 10, max_score: 10, evidence_score: 0.9,
+            recommendation: { action: "advance", confidence: 0.9, reason_codes: ["round_accuracy_at_or_above_advancement_threshold"] },
+            item_results: [{ item_id: "I1", objective_id: "O1", raw_score: 5, max_score: 5, evidence_score: 0.9, grader_confidence: 0.95, hint_factor: 0, repeat_factor: 0, misconception_tags: [], feedback_code: "excellent" }],
+            feedback: { generated_after_score_freeze: true, mode: "summative", summary: "完美", item_feedback: [] },
+          },
+          trace_ref: "trace-2",
+        },
+        mastery_snapshot: [
+          { objective_id: "O1", mastery: 1.0, evidence_batches: 3, observed_modalities: ["mcq", "trace", "code"], revision: 1 },
+        ],
+        final_decision: {
+          action: "advance", basis: "round_accuracy", confidence: 0.9,
+          reason_codes: ["round_accuracy_at_or_above_advancement_threshold"], target_objective_ids: [], policy_ref: "role-c-round-accuracy-v1",
+        },
+      },
+      currentProfile: makeProfile({ level: "beginner" }),
+      profileVersion: "test-run-profile-v2",
+    })
+
+    expect(result.changes.levelChanged).toBe(true)
+    expect(result.changes.oldLevel).toBe("beginner")
+    expect(result.changes.newLevel).toBe("basic")
+  })
+
+  test("remediate action with low accuracy demotes learner level", () => {
+    const result = receiveLearningProgress({
+      feedback: {
+        schema_version: "1.0",
+        feedback_id: "test-fb-3",
+        run_id: "test-run", session_id: "test-session", submission_id: "test-sub",
+        learner_id_hash: "test-learner-001", profile_version: "v1", path_node_id: "test-path",
+        form_id: "test-form", attempt_no: 1,
+        round_score: { raw_score: 1, max_score: 10, accuracy: 0.1, evidence_score: 0.1 },
+        objective_results: [
+          { objective_id: "O1", raw_score: 1, max_score: 5, accuracy: 0.2, evidence_score: 0.1, misconception_tags: [] },
+        ],
+        grade_result: {
+          schema_version: "1.0", run_id: "test-run", artifact_id: "grade-3", artifact_type: "grade_result",
+          agent: "tiered-evaluator", status: "ready",
+          versions: { profile_version: "v1", kb_version: "v1", rag_version: "v1", prompt_version: "v1", model_config_hash: "abc", schema_version: "1.0" },
+          seed: 42, input_refs: [], citations: [],
+          quality: { schema_ok: true, citation_coverage: 1, objective_coverage: 1, alignment_score: 1 },
+          payload: {
+            form_id: "test-form", submission_id: "test-sub", score_frozen: true,
+            raw_score: 1, max_score: 10, evidence_score: 0.1,
+            recommendation: { action: "remediate", confidence: 0.75, reason_codes: ["round_accuracy_below_remediation_threshold"] },
+            item_results: [{ item_id: "I1", objective_id: "O1", raw_score: 1, max_score: 5, evidence_score: 0.1, grader_confidence: 0.6, hint_factor: 0, repeat_factor: 0, misconception_tags: ["K007"], feedback_code: "needs_review" }],
+            feedback: { generated_after_score_freeze: true, mode: "formative", summary: "需加强", item_feedback: [] },
+          },
+          trace_ref: "trace-3",
+        },
+        mastery_snapshot: [
+          { objective_id: "O1", mastery: 0.1, evidence_batches: 1, observed_modalities: ["mcq"], revision: 1 },
+        ],
+        final_decision: {
+          action: "remediate", basis: "round_accuracy", confidence: 0.75,
+          reason_codes: ["round_accuracy_below_remediation_threshold"],
+          target_objective_ids: ["O1"], policy_ref: "role-c-round-accuracy-v1",
+        },
+      },
+      currentProfile: makeProfile({ level: "basic" }),
+      profileVersion: "v2",
+    })
+
+    expect(result.changes.levelChanged).toBe(true)
+    expect(result.changes.oldLevel).toBe("basic")
+    expect(result.changes.newLevel).toBe("beginner")
   })
 })
