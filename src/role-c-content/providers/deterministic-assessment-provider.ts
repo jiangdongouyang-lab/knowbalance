@@ -14,9 +14,19 @@ import type {
   PublicOption,
 } from "../contracts/artifacts"
 import { stableId, type CitationRef } from "../contracts/common"
-import { ModelProviderUnavailableError } from "../contracts/model-gateway"
+import {
+  ModelProviderUnavailableError,
+  UnsupportedTargetError,
+} from "../contracts/model-gateway"
+import {
+  isPassingCountTargetSet,
+  PASSING_COUNT_HIDDEN_CASES,
+  PASSING_COUNT_REFERENCE_SOLUTION,
+  PASSING_COUNT_STARTER_CODE,
+  passingCountExecutionContract,
+} from "./deterministic-passing-count-template"
 
-/** Deterministic K007/K009/K018 Author used as an executable gold reference. */
+/** Deterministic Author for the two executable Python-basics references. */
 export class DeterministicAssessmentContentProvider implements RoleCContentProvider {
   async generateAssessment(request: TieredEvaluatorRequest): Promise<AssessmentDraft> {
     return buildDeterministicAssessmentDraft(request)
@@ -34,9 +44,27 @@ export class DeterministicAssessmentContentProvider implements RoleCContentProvi
 export function buildDeterministicAssessmentDraft(request: TieredEvaluatorRequest): AssessmentDraft {
   const spec = request.generation_spec
   const blueprint = spec.assessment_blueprint
-  if (spec.targets.length !== 3 ||
-    blueprint.tier_1_count !== 2 || blueprint.tier_2_count !== 2 || blueprint.tier_3_count !== 1) {
-    throw new ModelProviderUnavailableError("阶段 3 离线 assessment 金标仅支持 K007/K009/K018 的 2/2/1 蓝图")
+  const targetSourceIds = spec.targets.map((target) => target.source_id)
+  const supportedBlueprint = blueprint.tier_1_count === 2
+    && blueprint.tier_2_count === 2
+    && blueprint.tier_3_count === 1
+  if (isPassingCountTargetSet(targetSourceIds)) {
+    if (!supportedBlueprint) {
+      throw new UnsupportedTargetError(
+        "tiered-evaluator",
+        targetSourceIds,
+        "阶段 3 条件统计模板要求 2/2/1 蓝图",
+      )
+    }
+    return buildPassingCountAssessmentDraft(request)
+  }
+  if (!sameOrderedTargets(targetSourceIds, ["K007", "K009", "K018"])
+    || !supportedBlueprint) {
+    throw new UnsupportedTargetError(
+      "tiered-evaluator",
+      targetSourceIds,
+      "阶段 3 离线 assessment 金标仅支持 K007/K009/K018 的 2/2/1 蓝图",
+    )
   }
   const [o1, o2, o3] = spec.targets
   const required: AssessmentItemPublic["modality"][] = ["mcq", "trace", "code"]
@@ -165,6 +193,293 @@ export function buildDeterministicAssessmentDraft(request: TieredEvaluatorReques
     objective_coverage: secureCoverage,
   }
   return { public_draft: { payload: publicPayload }, secure_draft: { payload: securePayload } }
+}
+
+function buildPassingCountAssessmentDraft(
+  request: TieredEvaluatorRequest,
+): AssessmentDraft {
+  const spec = request.generation_spec
+  const blueprint = spec.assessment_blueprint
+  const required: AssessmentItemPublic["modality"][] = [
+    "mcq",
+    "trace",
+    "code",
+  ]
+  if (required.some(
+    (modality) => !blueprint.required_modalities.includes(modality),
+  )) {
+    throw new ModelProviderUnavailableError(
+      "阶段 3 条件统计模板要求 mcq、trace、code 三种题型",
+    )
+  }
+  const [o1, o2, o3] = spec.targets
+  const facts = [o1, o2, o3].map((target) => {
+    const source = request.evidence_pack.results.find(
+      (entry) => entry.source_id === target.source_id,
+    )
+    const fact = source?.facts.find(
+      (entry) => target.required_fact_ids.includes(entry.fact_id),
+    )
+    if (!source || !fact) {
+      throw new ModelProviderUnavailableError(
+        `assessment 缺少目标事实 ${target.source_id}`,
+      )
+    }
+    return { target, fact }
+  })
+  const citeFor = (index: number): CitationRef => ({
+    source_id: facts[index]!.fact.source_id,
+    fact_id: facts[index]!.fact.fact_id,
+    relation: "derived_from",
+  })
+  const formId = stableId("FORM", {
+    spec_id: spec.spec_id,
+    seed: spec.policies.seed,
+    version: "assessment-passing-count-v1",
+  })
+  const codeSuiteId = stableId("TS", {
+    form_id: formId,
+    item: "passing-count",
+  })
+  const [mcqPosition, trueFalsePosition] = seededShuffle(
+    [0, 1],
+    spec.policies.seed,
+  )
+  const mcqOptions = arrangeOptions([
+    { option_id: "opt_iterate", text: "依次处理列表中的每个元素" },
+    { option_id: "opt_import", text: "从网络安装新的第三方包" },
+    { option_id: "opt_branch_once", text: "只判断一个固定成绩" },
+    { option_id: "opt_literal", text: "把结果直接写成固定常量" },
+  ], "opt_iterate", mcqPosition, spec.policies.seed + 11)
+  const trueFalseOptions = arrangeOptions([
+    { option_id: "opt_true", text: "正确" },
+    { option_id: "opt_false", text: "错误" },
+  ], "opt_true", trueFalsePosition, spec.policies.seed + 17)
+  const publicItems: AssessmentItemPublic[] = [
+    publicItem(
+      "ITEM-O1-T1-MCQ",
+      "FAMILY-O1-ITERATION",
+      "V1",
+      1,
+      o1!.objective_id,
+      1,
+      "mcq",
+      `${facts[0]!.fact.content} 统计达标人数时最适合承担哪项任务？`,
+      1,
+      [citeFor(0)],
+      { options: mcqOptions },
+    ),
+    publicItem(
+      "ITEM-O2-T1-TF",
+      "FAMILY-O2-LIST",
+      "V1",
+      2,
+      o2!.objective_id,
+      1,
+      "true_false",
+      `${facts[1]!.fact.content} 请判断该表述。`,
+      1,
+      [citeFor(1)],
+      { options: trueFalseOptions },
+    ),
+    publicItem(
+      "ITEM-O1-T2-TRACE",
+      "FAMILY-O1-TRACE",
+      "V1",
+      3,
+      o1!.objective_id,
+      2,
+      "trace",
+      `${facts[0]!.fact.content} count 从零开始，循环依次处理 [42, 67, 91]，每轮都执行 count += 1。最终 count 是多少？`,
+      2,
+      [citeFor(0)],
+    ),
+    publicItem(
+      "ITEM-O2-T2-SHORT",
+      "FAMILY-O2-APPLICATION",
+      "V1",
+      4,
+      o2!.objective_id,
+      2,
+      "short_answer",
+      `${facts[1]!.fact.content} 请说明它如何支持程序逐项处理并统计一组成绩。`,
+      2,
+      [citeFor(1)],
+    ),
+    publicItem(
+      "ITEM-O3-T3-CODE",
+      "FAMILY-O3-CODE",
+      "V1",
+      5,
+      o3!.objective_id,
+      3,
+      "code",
+      `${facts[2]!.fact.content} 请补全 count_passing_scores(scores, pass_mark)，遍历成绩列表并返回达到阈值的项目数量。`,
+      4,
+      [citeFor(2)],
+      { starter_code: PASSING_COUNT_STARTER_CODE },
+    ),
+  ]
+  const secureItems: AssessmentItemSecure[] = [
+    secureItem(publicItems[0]!, {
+      kind: "exact_set",
+      accepted: ["opt_iterate"],
+      normalization: [
+        "trim",
+        "casefold",
+        "unicode",
+        "collapse_whitespace",
+      ],
+    }, 0.65, "opt_iterate", {
+      opt_import: "requests_external_capability",
+      opt_branch_once: "checks_only_one_item",
+      opt_literal: "hardcodes_result",
+    }),
+    secureItem(publicItems[1]!, {
+      kind: "exact_set",
+      accepted: ["opt_true"],
+      normalization: [
+        "trim",
+        "casefold",
+        "unicode",
+        "collapse_whitespace",
+      ],
+    }, 0.65, "opt_true", {
+      opt_false: "does_not_recognize_list_collection",
+    }),
+    secureItem(publicItems[2]!, {
+      kind: "numeric",
+      target: 3,
+      abs_tolerance: 0,
+      rel_tolerance: 0,
+    }, 0.8),
+    secureItem(publicItems[3]!, {
+      kind: "concept_rubric",
+      criteria: [
+        {
+          criterion_id: "CR-COLLECTION",
+          description: "说明列表保存一组成绩",
+          weight: 0.34,
+          required_evidence: ["列表", "成绩"],
+        },
+        {
+          criterion_id: "CR-ORDER",
+          description: "说明列表元素具有顺序",
+          weight: 0.33,
+          required_evidence: ["顺序"],
+        },
+        {
+          criterion_id: "CR-PROCESS",
+          description: "说明可逐项处理列表元素",
+          weight: 0.33,
+          required_evidence: ["逐项"],
+        },
+      ],
+      contradictions: ["列表不能保存多个成绩", "不能逐项处理"],
+    }, 0.85),
+    secureItem(
+      publicItems[4]!,
+      { kind: "code", test_suite_id: codeSuiteId },
+      1,
+    ),
+  ]
+  const objectiveIds = spec.targets.map((target) => target.objective_id)
+  const citations = deduplicate(
+    publicItems.flatMap((item) => item.citations),
+  )
+  const publicCoverage = objectiveIds.map((objectiveId) => {
+    const items = publicItems.filter(
+      (item) => item.objective_id === objectiveId,
+    )
+    return {
+      objective_id: objectiveId,
+      item_ids: items.map((item) => item.item_id),
+      modalities: unique(items.map((item) => item.modality)),
+    }
+  })
+  const secureCoverage = objectiveIds.map((objectiveId) => {
+    const items = secureItems.filter(
+      (item) => item.objective_id === objectiveId,
+    )
+    return {
+      objective_id: objectiveId,
+      item_ids: items.map((item) => item.item_id),
+      answer_kinds: unique(
+        items.map((item) => item.answer_spec.kind),
+      ),
+    }
+  })
+  const executionContract = passingCountExecutionContract()
+  const hiddenTests = PASSING_COUNT_HIDDEN_CASES.map((testCase) => ({
+    test_id: `AT-COUNT-${testCase.id}`,
+    input: structuredClone(testCase.input),
+    expected: testCase.expected,
+    objective_id: o3!.objective_id,
+    weight: 0.2,
+    comparison: { kind: "exact" as const },
+  }))
+  const publicPayload: AssessmentPublicPayload = {
+    form_id: formId,
+    title: "循环、列表与条件判断分阶测评",
+    objective_ids: objectiveIds,
+    items: publicItems,
+    submission_policy: { max_attempts: 3, formative: true },
+    routing: {
+      anchor_item_ids: publicItems
+        .filter((item) => item.tier <= 2)
+        .slice(0, 3)
+        .map((item) => item.item_id),
+      rules: [
+        {
+          route_id: "ROUTE-REMEDIATE",
+          min_anchor_score_ratio: 0,
+          max_anchor_score_ratio: 0.4,
+          action: "remediate",
+          reveal_tiers: [1],
+        },
+        {
+          route_id: "ROUTE-REINFORCE",
+          min_anchor_score_ratio: 0.4,
+          max_anchor_score_ratio: 0.8,
+          action: "reinforce",
+          reveal_tiers: [1, 2],
+        },
+        {
+          route_id: "ROUTE-ADVANCE",
+          min_anchor_score_ratio: 0.8,
+          max_anchor_score_ratio: 1,
+          action: "advance",
+          reveal_tiers: [2, 3],
+        },
+      ],
+    },
+    objective_coverage: publicCoverage,
+    used_evidence: citations,
+  }
+  const securePayload: AssessmentSecurePayload = {
+    form_id: formId,
+    items: secureItems,
+    option_order_seed: spec.policies.seed,
+    code_test_suites: [{
+      test_suite_id: codeSuiteId,
+      execution_contract: executionContract,
+      reference_solution: PASSING_COUNT_REFERENCE_SOLUTION,
+      hidden_tests: hiddenTests,
+    }],
+    objective_coverage: secureCoverage,
+  }
+  return {
+    public_draft: { payload: publicPayload },
+    secure_draft: { payload: securePayload },
+  }
+}
+
+function sameOrderedTargets(
+  actual: string[],
+  expected: string[],
+): boolean {
+  return actual.length === expected.length
+    && actual.every((sourceId, index) => sourceId === expected[index])
 }
 
 function publicItem(

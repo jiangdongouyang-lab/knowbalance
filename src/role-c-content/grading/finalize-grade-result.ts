@@ -24,6 +24,8 @@ export interface FinalizeGradeResultInput {
   spec: GenerationSpec
   evidence: RagEvidencePack
   assessment_secure: AssessmentSecureArtifact
+  /** Public assessment provenance; secure artifact IDs never cross this boundary. */
+  assessment_public_artifact_id: string
   formative: boolean
   /** Authoritative cycle decision. When omitted, the deterministic round-accuracy policy is used. */
   recommendation?: FinalLearningDecision
@@ -47,7 +49,10 @@ export function finalizeGradeResult(input: FinalizeGradeResultInput): GradeResul
       evidence: input.evidence,
       agent: "tiered-evaluator",
       artifact_type: "grade_result",
-      input_refs: [input.assessment_secure.artifact_id, input.grade.submission_id],
+      input_refs: [
+        input.assessment_public_artifact_id,
+        input.grade.submission_id,
+      ],
       message: input.grade.status === "needs_review"
         ? "评分包含待复核项，不能冻结成绩"
         : !input.grade.boundary_verified
@@ -86,7 +91,10 @@ export function finalizeGradeResult(input: FinalizeGradeResultInput): GradeResul
     agent: "tiered-evaluator",
     artifact_type: "grade_result",
     draft: { payload },
-    input_refs: [input.assessment_secure.artifact_id, input.grade.submission_id],
+    input_refs: [
+      input.assessment_public_artifact_id,
+      input.grade.submission_id,
+    ],
     public_payload: true,
     objective_ids: [...new Set(payload.item_results.map((result) => result.objective_id))],
     answer_key_verified: true,

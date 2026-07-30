@@ -21,7 +21,7 @@ import {
 
 describe("Role C next-round authoring semantics", () => {
   test("applies one versioned next-round policy to all three author Agents and stages", () => {
-    expect(ROLE_C_PROMPT_MANIFEST_VERSION).toBe("c-prompts-1.8.1")
+    expect(ROLE_C_PROMPT_MANIFEST_VERSION).toBe("c-prompts-1.8.2")
     for (const prompt of [
       CONCEPT_TUTOR_SYSTEM_PROMPT,
       CODE_LAB_SYSTEM_PROMPT,
@@ -34,6 +34,17 @@ describe("Role C next-round authoring semantics", () => {
     ]) {
       expect(prompt).toContain(ROLE_C_NEXT_ROUND_CONTEXT_POLICY)
     }
+  })
+
+  test("requires hidden tests to use inputs absent from public material", () => {
+    expect(CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT)
+      .toContain("与 public_payload.public_tests 中的全部 input 结构化不同")
+    expect(ASSESSMENT_SECURE_STAGE_SYSTEM_PROMPT)
+      .toContain("每个隐藏输入必须与公开题干、示例和 starter 中出现的输入值不同")
+    expect(CODE_LAB_SYSTEM_PROMPT)
+      .toContain("每个 hidden input 必须与所有 public test input 结构化不同")
+    expect(EVALUATOR_AUTHOR_SYSTEM_PROMPT)
+      .toContain("隐藏输入必须与公开题干、示例和 starter 中出现的输入值不同")
   })
 
   test("locks focus coverage and the remediate, reinforce, and advance meanings", () => {

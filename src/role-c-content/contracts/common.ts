@@ -81,6 +81,7 @@ export interface BlockedReason {
     | "BLOCKED_EXECUTION_UNVERIFIED"
     | "BLOCKED_ANSWER_KEY_UNVERIFIED"
     | "BLOCKED_PROVIDER_UNAVAILABLE"
+    | "UNSUPPORTED_TARGET"
     | "BLOCKED_INVALID_OUTPUT"
   message: string
   details?: string[]

@@ -11,10 +11,17 @@ import type {
   CPipelineOptions,
   CPipelineResult,
 } from "../orchestrator/content-pipeline"
+import type { LearnerLevel } from "../contracts/common"
 
 export type ReviewArtifactKind = "concept" | "code_lab" | "assessment"
 export type ContentReviewDecision = "pass" | "revise" | "reject"
 export type ReviewFixScope = "artifact" | "new_evidence" | "new_spec"
+/** B's requested operation; fix_scope separately identifies C's mutation boundary. */
+export type ContentRecoveryAction =
+  | "adjust_content"
+  | "request_new_evidence"
+  | "replan_path"
+  | "reprofile_learner"
 
 export interface ReviewBlockLocator {
   field:
@@ -111,6 +118,19 @@ export interface ContentReviewResult {
   decision: ContentReviewDecision
   artifact_results: ArtifactReviewResult[]
   revision_instructions: ContentRevisionInstruction[]
+  /**
+   * Optional structured recovery fields returned by the B review adapter.
+   * Older adapters remain valid; the recovery orchestrator derives the same
+   * decision from revision_instructions when these fields are absent.
+   */
+  failed_dimensions?: string[]
+  missing_prerequisite_source_ids?: string[]
+  /** Knowledge references that B could not resolve in the active knowledge base. */
+  unknown_prerequisite_refs?: string[]
+  required_action?: ContentRecoveryAction
+  fix_scope?: ReviewFixScope
+  recommended_level?: LearnerLevel
+  can_recover?: boolean
 }
 
 /** Transport-neutral boundary. A local adapter, HTTP service, or MCP service can implement it. */

@@ -372,7 +372,9 @@ describe("role C pipeline single-flight", () => {
     const provider: RoleCContentProvider = {
       async generateConceptLesson(request) {
         conceptCalls += 1
-        if (conceptCalls === 1) throw new Error("transient concept failure")
+        if (conceptCalls === 1) {
+          throw new Error("PRIVATE_TRANSIENT_PROVIDER_DETAIL")
+        }
         return context.provider.generateConceptLesson(request)
       },
       generateCodeLab: (request) => context.provider.generateCodeLab(request),
@@ -392,6 +394,8 @@ describe("role C pipeline single-flight", () => {
 
     expect(failed.status).toBe("failed")
     expect(failed.failure_reason?.code).toBe("PROVIDER_ERROR")
+    expect(JSON.stringify(failed))
+      .not.toContain("PRIVATE_TRANSIENT_PROVIDER_DETAIL")
     expect(retried.status).toBe("ready")
     expect(conceptCalls).toBe(2)
   })

@@ -86,6 +86,26 @@ describe("role C phase-one trusted concept generation", () => {
     expect(Object.isFrozen(spec.targets)).toBe(true)
   })
 
+  test("publishes a snapshot instead of retaining the provider's mutable payload", async () => {
+    const { pack, spec } = await buildContext()
+    const provider = new DeterministicConceptContentProvider()
+    const providerDraft = await provider.generateConceptLesson({
+      generation_spec: spec,
+      evidence_pack: pack,
+    })
+    const originalTitle = providerDraft.payload.title
+    provider.generateConceptLesson = async () => providerDraft
+
+    const artifact = await generateConceptLesson(
+      { generation_spec: spec, evidence_pack: pack },
+      provider,
+    )
+    providerDraft.payload.title = "MUTATED_AFTER_RETURN"
+
+    expect(artifact.status).toBe("ready")
+    expect(artifact.payload?.title).toBe(originalTitle)
+  })
+
   test("rejects nested payload errors instead of accepting top-level shape only", () => {
     const report = validateRoleCSchema("concept_lesson_payload.schema.json", {
       title: "不完整讲义",
@@ -242,6 +262,53 @@ describe("role C phase-one trusted concept generation", () => {
     })
     await expect(provider.generateConceptLesson({ generation_spec: spec, evidence_pack: pack }))
       .rejects.toThrow("非 completed")
+  })
+
+  test("does not publish an OpenCode worker's raw blocked message", async () => {
+    const { pack, spec } = await buildContext()
+    const provider = new OpenCodeConceptContentProvider({
+      async invoke() {
+        return {
+          status: "blocked",
+          provider_draft: null,
+          blocked_reason: {
+            code: "PRIVATE",
+            message: "PRIVATE_WORKER_DETAIL_ANSWER_IS_B",
+          },
+        }
+      },
+    })
+
+    const artifact = await generateConceptLesson(
+      { generation_spec: spec, evidence_pack: pack },
+      provider,
+    )
+
+    expect(artifact.status).toBe("blocked")
+    expect(JSON.stringify(artifact))
+      .not.toContain("PRIVATE_WORKER_DETAIL_ANSWER_IS_B")
+    expect(artifact.blocked_reason?.message)
+      .toBe("OpenCode concept-tutor 未生成可发布内容")
+  })
+
+  test("does not publish an exception thrown by an OpenCode worker", async () => {
+    const { pack, spec } = await buildContext()
+    const provider = new OpenCodeConceptContentProvider({
+      async invoke() {
+        throw new Error("PRIVATE_WORKER_STDERR_ANSWER_IS_B")
+      },
+    })
+
+    const artifact = await generateConceptLesson(
+      { generation_spec: spec, evidence_pack: pack },
+      provider,
+    )
+
+    expect(artifact.status).toBe("blocked")
+    expect(JSON.stringify(artifact))
+      .not.toContain("PRIVATE_WORKER_STDERR_ANSWER_IS_B")
+    expect(artifact.blocked_reason?.message)
+      .toBe("OpenCode concept-tutor 调用失败")
   })
 
   test("the role-c demo now emits a verified concept artifact", async () => {

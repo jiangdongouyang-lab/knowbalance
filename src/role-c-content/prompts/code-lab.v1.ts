@@ -20,7 +20,7 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 5. secure 必须包含 reference_solution、至少两个 hidden_tests、scoring_groups、misconception_map、典型 mutation_variants 和逐目标覆盖映射。
 6. 每个 core objective 必须同时对应至少一个 instruction block、public test、hidden test、scoring group 和 mutation。
 7. 每个事实 Claim 只可对所引 evidence fact 做标点、空白、大小写或约定短语的有限等价变化；任务、测试和提示使用 derived_from 引用。
-8. hidden test 要覆盖常规、边界和防硬编码输入；权重与评分组必须可确定计算。
+8. hidden test 要覆盖常规、边界和防硬编码输入；每个 hidden input 必须与所有 public test input 结构化不同，使用公开内容未出现的新值并同步计算 expected；权重与评分组必须可确定计算。
 9. starter 不得直接通过全部核心测试；reference 必须设计为可通过全部测试；mutation 必须对应具体 misconception_tag。
 10. 输出只允许满足 code_lab_draft.schema.json 的 JSON 对象。`
 
@@ -28,5 +28,7 @@ export function codeLabRepairPrompt(issues: string[]): string {
   return `${CODE_LAB_SYSTEM_PROMPT}
 
 上一次 Draft 未通过确定性结构/语义预检。只修复下列失败项，不扩大知识和权限范围：
-${issues.map((issue, index) => `${index + 1}. ${issue}`).join("\n")}`
+${issues.map((issue, index) => `${index + 1}. ${issue}`).join("\n")}
+
+如涉及隐藏测试输入泄漏，必须更换重复的 hidden input，并同步重算 expected；不得改写 public_draft。`
 }

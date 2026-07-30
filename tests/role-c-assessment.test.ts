@@ -40,7 +40,11 @@ const profile: LearnerProfile = {
   goal: "完成成绩统计分阶测评",
 }
 
-async function buildContext(modelConfigHash = "deterministic-code-lab-reference-v1", seed = 42): Promise<{
+async function buildContext(
+  modelConfigHash = "deterministic-code-lab-reference-v1",
+  seed = 42,
+  targetTemplate: "average" | "passing-count" = "average",
+): Promise<{
   pack: RagEvidencePack
   spec: GenerationSpec
   request: TieredEvaluatorRequest
@@ -51,6 +55,11 @@ async function buildContext(modelConfigHash = "deterministic-code-lab-reference-
   const kb = await loadKnowledgeBase()
   const pack = adaptRagResult(rag, { kb_version: kb.version, rag_version: "rule-rag-0.1" })
   const rawPath = await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()
+  if (targetTemplate === "passing-count") {
+    rawPath.target_source_ids = ["K007", "K009", "K006"]
+    rawPath.prerequisite_source_ids = ["K002", "K003"]
+    rawPath.objectives[2].source_id = "K006"
+  }
   const path = defineLearningPathNode({
     node_id: rawPath.node_id,
     target_source_ids: rawPath.target_source_ids,
@@ -84,6 +93,29 @@ async function buildContext(modelConfigHash = "deterministic-code-lab-reference-
 }
 
 describe("role C phase-three trusted assessment Author", () => {
+  test("builds the passing-count assessment for the K007/K009/K006 target set", async () => {
+    const { request, provider } = await buildContext(
+      "deterministic-passing-count-reference-v1",
+      42,
+      "passing-count",
+    )
+    const draft = await provider.generateAssessment(request)
+
+    expect(validateAssessmentDraftStructure(request, draft).ok).toBe(true)
+    expect(draft.public_draft.payload.title)
+      .toBe("循环、列表与条件判断分阶测评")
+    expect(draft.public_draft.payload.items.map((item) => item.tier))
+      .toEqual([1, 1, 2, 2, 3])
+    expect(draft.secure_draft.payload.code_test_suites[0]).toMatchObject({
+      execution_contract: {
+        entry_point: "count_passing_scores",
+      },
+    })
+    expect(
+      draft.secure_draft.payload.code_test_suites[0]!.hidden_tests,
+    ).toHaveLength(5)
+  })
+
   test("publishes a blueprint-aligned public/secure assessment after independent verification", async () => {
     const { request, provider } = await buildContext()
     const pair = await generateAssessment(request, provider, new TrustedAssessmentVerifier(new AssessmentFixtureRunner()))
@@ -100,6 +132,28 @@ describe("role C phase-three trusted assessment Author", () => {
     expect(JSON.stringify(pair.public_artifact)).not.toContain("correct_option_id")
     expect(JSON.stringify(pair.public_artifact)).not.toContain("answer_spec")
     expect(pair.secure_artifact.payload?.code_test_suites).toHaveLength(1)
+  })
+
+  test("returns structured UNSUPPORTED_TARGET for an arbitrary three-target offline assessment", async () => {
+    const { request, provider } = await buildContext()
+    const unsupported = structuredClone(request)
+    unsupported.generation_spec.targets[0]!.source_id = "K001"
+    unsupported.generation_spec.targets[1]!.source_id = "K002"
+    unsupported.generation_spec.targets[2]!.source_id = "K003"
+
+    const pair = await generateAssessment(
+      unsupported,
+      provider,
+      new TrustedAssessmentVerifier(new AssessmentFixtureRunner()),
+    )
+
+    expect(pair.public_artifact.status).toBe("blocked")
+    expect(pair.public_artifact.blocked_reason).toMatchObject({
+      code: "UNSUPPORTED_TARGET",
+      details: ["target_source_ids=K001,K002,K003"],
+    })
+    expect(pair.public_artifact.payload).toBeNull()
+    expect(pair.secure_artifact.payload).toBeNull()
   })
 
   test("rejects nested shape, blueprint and option-diagnostic errors", async () => {
@@ -141,6 +195,30 @@ describe("role C phase-three trusted assessment Author", () => {
     ]))
   })
 
+  test("blocks an explicit correct-option disclosure in a public prompt", async () => {
+    const { request, provider } = await buildContext()
+    const leaked = await provider.generateAssessment(request)
+    leaked.public_draft.payload.items[0]!.prompt +=
+      " 本题正确选项 ID 为 opt_iterate。"
+
+    const report = validateAssessmentDraftStructure(request, leaked)
+
+    expect(report.ok).toBe(false)
+    expect(report.issues.some(
+      (entry) => entry.code === "explicit_answer_leak",
+    )).toBe(true)
+
+    const indirect = await provider.generateAssessment(request)
+    indirect.public_draft.payload.items[0]!.prompt +=
+      " 评分器只接受 opt_iterate，选择它会获得满分。"
+    const indirectReport =
+      validateAssessmentDraftStructure(request, indirect)
+    expect(indirectReport.ok).toBe(false)
+    expect(indirectReport.issues.some(
+      (entry) => entry.code === "explicit_answer_leak",
+    )).toBe(true)
+  })
+
   test("does not let an accepting custom verifier bypass deterministic Author gates", async () => {
     const { request, provider } = await buildContext()
     const draft = await provider.generateAssessment(request)
@@ -151,6 +229,30 @@ describe("role C phase-three trusted assessment Author", () => {
     })
     expect(pair.public_artifact.status).toBe("blocked")
     expect(pair.public_artifact.blocked_reason?.code).toBe("BLOCKED_INVALID_OUTPUT")
+  })
+
+  test("snapshots assessment output before an asynchronous verifier can mutate it", async () => {
+    const { request, provider } = await buildContext()
+    const providerDraft = await provider.generateAssessment(request)
+    const originalFormId = providerDraft.secure_draft.payload.form_id
+    provider.generateAssessment = async () => providerDraft
+
+    const pair = await generateAssessment(request, provider, {
+      async verifyAssessment(_request, verifierDraft) {
+        verifierDraft.secure_draft.payload.form_id =
+          "FORM-MUTATED-BY-VERIFIER"
+        return {
+          answer_key_verified: true,
+          runner_image_digest: RUNNER_DIGEST,
+          issues: [],
+        }
+      },
+    })
+    providerDraft.secure_draft.payload.form_id =
+      "FORM-MUTATED-BY-PROVIDER-AFTER-RETURN"
+
+    expect(pair.secure_artifact.status).toBe("ready")
+    expect(pair.secure_artifact.payload?.form_id).toBe(originalFormId)
   })
 
   test("applies anchor routing deterministically at exact interval boundaries", async () => {
@@ -235,6 +337,7 @@ describe("role C phase-three trusted assessment Author", () => {
     const pair = await generateAssessment(request, provider, new TrustedAssessmentVerifier(new AssessmentFixtureRunner(true)))
     expect(pair.public_artifact.status).toBe("blocked")
     expect(pair.public_artifact.blocked_reason?.code).toBe("BLOCKED_ANSWER_KEY_UNVERIFIED")
+    expect(JSON.stringify(pair.public_artifact)).not.toContain("AT-O3")
   })
 
   test("repairs one invalid model Draft and adapts OpenCode provider_draft", async () => {

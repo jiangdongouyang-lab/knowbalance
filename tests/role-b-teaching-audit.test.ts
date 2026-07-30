@@ -6,8 +6,18 @@ import { auditTeaching } from "../src/role-b-profile/teaching-audit/auditor"
 import { arbitrate } from "../src/role-b-profile/teaching-audit/arbitrator"
 import { planRecoveryPath } from "../src/role-b-profile/teaching-audit/path-planner"
 import { receiveLearningProgress } from "../src/role-b-profile/teaching-audit/progress-receiver"
+import { RoleBLearningProgressAdapter } from "../src/role-b-profile/teaching-audit/learning-progress-adapter"
 import type { LearnerProfile } from "../src/role-b-profile/types"
 import type { KnowledgeBase } from "../src/knowledge/types"
+import { contentHash } from "../src/role-c-content/contracts/common"
+import {
+  deliverRoleCToB,
+  type RoleCLearningProgressDelivery,
+} from "../src/role-c-content/contracts/external-api"
+import type {
+  LearningEvidenceEvent,
+  ProfileDriftSuggestion,
+} from "../src/role-c-content/contracts/learning-evidence-event"
 
 let kb: KnowledgeBase
 
@@ -79,6 +89,25 @@ describe("teaching audit", () => {
     expect(result.checks.prerequisite.verdict).toBe("aligned")
   })
 
+  test("prerequisite: an explicitly mastered target does not require its prerequisites again", async () => {
+    const kb = await getKB()
+    const result = auditTeaching({
+      artifactId: "test-mastered-target",
+      learnerProfile: makeProfile({
+        known_concepts: ["变量", "数据类型", "条件判断"],
+        weak_concepts: ["循环", "列表"],
+      }),
+      knowledgeBase: kb,
+      citedSourceIds: ["K007", "K009", "K006"],
+      targetSourceIds: ["K007", "K009", "K006"],
+    })
+    const masteredTarget = result.checks.prerequisite.checkedConcepts.find(
+      (concept) => concept.sourceId === "K006",
+    )
+    expect(result.checks.prerequisite.verdict).toBe("aligned")
+    expect(masteredTarget?.missingPrerequisites).toEqual([])
+  })
+
   test("prerequisite: K018 requires K007+K009+K013 which learner doesn't know", async () => {
     const kb = await getKB()
     const result = auditTeaching({
@@ -144,6 +173,30 @@ describe("teaching audit", () => {
       citedSourceIds: ["K007"],
     })
     expect(result.checks.weakConcept.verdict).toBe("aligned")
+  })
+
+  test("weak_concept: unmapped free text does not require C to invent unsupported content", async () => {
+    const kb = await getKB()
+    const result = auditTeaching({
+      artifactId: "test-9-unmapped",
+      learnerProfile: makeProfile({
+        level: "integrated",
+        known_concepts: ["变量与赋值", "基本数据类型", "for 循环", "列表", "函数定义与调用"],
+        weak_concepts: ["项目组织"],
+        goal: "完成成绩统计程序，能够遍历列表并计算平均分",
+      }),
+      knowledgeBase: kb,
+      citedSourceIds: ["K007", "K009", "K018"],
+      targetSourceIds: ["K007", "K009", "K018"],
+    })
+
+    expect(result.checks.weakConcept).toMatchObject({
+      verdict: "aligned",
+      learnerWeakConcepts: ["项目组织"],
+      coveredWeakConcepts: [],
+      uncoveredWeakConcepts: [],
+    })
+    expect(result.status).toBe("pass")
   })
 
   test("goal: content keywords match learner's goal", async () => {
@@ -386,19 +439,52 @@ describe("structured recovery fields", () => {
     expect(result.missingPrerequisiteSourceIds).toContain("K013")
   })
 
-  test("unknown prerequisite refs tracked separately", async () => {
+  test("pure prerequisite failure is recoverable through a new path spec", async () => {
     const kb = await getKB()
-    // Create profile with a KB item that has unknown prereq
-    // We use actual KB items; unknown prereqs are those whose sourceId isn't in the KB
     const result = auditTeaching({
       artifactId: "struct-4",
-      learnerProfile: makeProfile({ known_concepts: [] }),
+      learnerProfile: makeProfile({
+        level: "integrated",
+        known_concepts: [],
+        weak_concepts: ["综合项目"],
+        goal: "完成成绩统计综合项目",
+      }),
       knowledgeBase: kb,
       citedSourceIds: ["K018"],
     })
-    // K018's prereqs (K007, K009, K013) exist in KB, so unknownPrerequisiteRefs should be empty
-    // if they were unknown, they'd be listed
-    expect(Array.isArray(result.unknownPrerequisiteRefs)).toBe(true)
+    expect(result.status).toBe("reject")
+    expect(result.failedDimensions).toEqual(["prerequisite_coverage"])
+    expect(result.recommendedLevel).toBeNull()
+    expect(result.fixScope).toBe("new_spec")
+    expect(result.missingPrerequisiteSourceIds).toEqual(["K007", "K009", "K013"])
+    expect(result.unknownPrerequisiteRefs).toEqual([])
+    expect(result.canRecover).toBe(true)
+  })
+
+  test("unknown prerequisite refs remain canonical hard blockers", async () => {
+    const kbWithUnknownPrerequisite = structuredClone(await getKB())
+    const target = kbWithUnknownPrerequisite.items.find((item) => item.sourceId === "K007")
+    if (!target) throw new Error("test knowledge item K007 missing")
+    target.prerequisites = ["K999"]
+
+    const result = auditTeaching({
+      artifactId: "struct-unknown-prerequisite",
+      learnerProfile: makeProfile({
+        level: "beginner",
+        known_concepts: [],
+        weak_concepts: ["循环"],
+        goal: "学会循环遍历数据",
+      }),
+      knowledgeBase: kbWithUnknownPrerequisite,
+      citedSourceIds: ["K007"],
+    })
+
+    expect(result.status).toBe("reject")
+    expect(result.failedDimensions).toEqual(["prerequisite_coverage"])
+    expect(result.missingPrerequisiteSourceIds).toEqual([])
+    expect(result.unknownPrerequisiteRefs).toEqual(["K999"])
+    expect(result.checks.prerequisite.reason).toContain("K999")
+    expect(result.canRecover).toBe(false)
   })
 
   test("weak concept incomplete → adjust_content + fixScope artifact + canRecover true", async () => {
@@ -662,3 +748,277 @@ describe("receiveLearningProgress", () => {
     expect(result.changes.newLevel).toBe("beginner")
   })
 })
+
+describe("RoleBLearningProgressAdapter", () => {
+  test("commits a C envelope once, updates concepts, and returns an exact duplicate ACK on replay", async () => {
+    const kb = await getKB()
+    const adapter = makeProgressAdapter(kb, {
+      weak_concepts: ["for 循环"],
+      level: "beginner",
+    })
+    const event = makeProgressEvent({
+      eventId: "EVENT-ACCEPTED",
+      evidenceScore: 0.9,
+      action: "advance",
+    })
+
+    const accepted = await deliverRoleCToB(adapter, [event])
+    const acceptedState = adapter.getCurrentState("learner-hash")
+
+    expect(accepted).toEqual({
+      schema_version: "1.0",
+      delivery_kind: "learning_progress",
+      delivery_id: accepted.delivery_id,
+      status: "accepted",
+    })
+    expect(Object.keys(accepted).sort()).toEqual([
+      "delivery_id",
+      "delivery_kind",
+      "schema_version",
+      "status",
+    ])
+    expect(acceptedState?.profileRevision).toBe(2)
+    expect(acceptedState?.profileVersion).toMatch(/^role-b-profile-v2-[a-f0-9]{12}$/)
+    expect(acceptedState?.currentProfile.known_concepts).toContain("for 循环")
+    expect(acceptedState?.currentProfile.weak_concepts).not.toContain("for 循环")
+    // C 的事件信封没有完整轮次正确率，B 不据此推断 level。
+    expect(acceptedState?.currentProfile.level).toBe("beginner")
+    expect(adapter.getCurrentSnapshot("learner-hash")?.profile_version)
+      .toBe(acceptedState?.profileVersion)
+
+    const duplicate = await deliverRoleCToB(adapter, [structuredClone(event)])
+    expect(duplicate).toEqual({
+      schema_version: "1.0",
+      delivery_kind: "learning_progress",
+      delivery_id: accepted.delivery_id,
+      status: "duplicate",
+    })
+    expect(adapter.getCurrentState("learner-hash")).toEqual(acceptedState)
+  })
+
+  test("serializes concurrent replays so exactly one commit advances the revision", async () => {
+    const adapter = makeProgressAdapter(await getKB())
+    const event = makeProgressEvent({ eventId: "EVENT-CONCURRENT" })
+
+    const acknowledgements = await Promise.all([
+      deliverRoleCToB(adapter, [structuredClone(event)]),
+      deliverRoleCToB(adapter, [structuredClone(event)]),
+    ])
+
+    expect(acknowledgements.map((ack) => ack.status).sort()).toEqual(["accepted", "duplicate"])
+    expect(adapter.getCurrentState("learner-hash")?.profileRevision).toBe(2)
+  })
+
+  test("does not demote mastered component concepts when a composite project is weak", async () => {
+    const adapter = makeProgressAdapter(await getKB(), {
+      known_concepts: ["列表", "函数"],
+      weak_concepts: [],
+    })
+
+    await deliverRoleCToB(adapter, [
+      makeProgressEvent({
+        eventId: "EVENT-WEAK-PROJECT",
+        sourceId: "K018",
+        objectiveId: "OBJECTIVE-K018",
+        evidenceScore: 0,
+        action: "reinforce",
+      }),
+    ])
+
+    const profile = adapter.getCurrentProfile("learner-hash")
+    expect(profile?.known_concepts).toEqual(["列表", "函数"])
+    expect(profile?.weak_concepts).toContain("成绩统计器综合项目")
+  })
+
+  test("matches an ambiguous component concept by knowledge semantics instead of source-id order", async () => {
+    const adapter = makeProgressAdapter(await getKB(), {
+      known_concepts: ["循环"],
+      weak_concepts: [],
+    })
+
+    await deliverRoleCToB(adapter, [
+      makeProgressEvent({
+        eventId: "EVENT-WEAK-WHILE",
+        sourceId: "K008",
+        objectiveId: "OBJECTIVE-K008",
+        evidenceScore: 0,
+        action: "reinforce",
+      }),
+    ])
+
+    const profile = adapter.getCurrentProfile("learner-hash")
+    expect(profile?.known_concepts).not.toContain("循环")
+    expect(profile?.weak_concepts).toContain("while 循环")
+  })
+
+  test("rejects a different delivery based on a stale profile version without changing state", async () => {
+    const adapter = makeProgressAdapter(await getKB())
+    await deliverRoleCToB(adapter, [
+      makeProgressEvent({ eventId: "EVENT-FIRST", evidenceScore: 0.8 }),
+    ])
+    const committedState = adapter.getCurrentState("learner-hash")
+
+    await expect(deliverRoleCToB(adapter, [
+      makeProgressEvent({
+        eventId: "EVENT-STALE",
+        profileVersion: "profile-v1",
+        evidenceScore: 0.2,
+        action: "remediate",
+      }),
+    ])).rejects.toThrow("ROLE_B_PROGRESS_PROFILE_VERSION_MISMATCH")
+    expect(adapter.getCurrentState("learner-hash")).toEqual(committedState)
+  })
+
+  test("accepts a drift-only envelope and produces the next B snapshot", async () => {
+    const adapter = makeProgressAdapter(await getKB())
+    const profileBefore = adapter.getCurrentProfile("learner-hash")
+    const ack = await deliverRoleCToB(adapter, [], makeProfileDrift())
+
+    expect(ack.status).toBe("accepted")
+    expect(adapter.getCurrentProfile("learner-hash")).toEqual(profileBefore)
+    expect(adapter.getCurrentState("learner-hash")?.profileRevision).toBe(2)
+    expect(adapter.getCurrentSnapshot("learner-hash")?.provenance_ref)
+      .toContain(ack.delivery_id)
+  })
+
+  test("rejects forged hashes, mixed identities, mixed recommendations, and unknown sources", async () => {
+    const kb = await getKB()
+
+    const forgedHashAdapter = makeProgressAdapter(kb)
+    const forgedHash = makeProgressDelivery([
+      makeProgressEvent({ eventId: "EVENT-FORGED-HASH" }),
+    ])
+    forgedHash.delivery_id = `sha256:${"0".repeat(64)}`
+    await expect(forgedHashAdapter.publishLearningProgress(forgedHash))
+      .rejects.toThrow("ROLE_B_PROGRESS_DELIVERY_HASH_MISMATCH")
+
+    const mixedIdentityAdapter = makeProgressAdapter(kb)
+    const mixedIdentity = makeProgressDelivery([
+      makeProgressEvent({ eventId: "EVENT-IDENTITY-1" }),
+      makeProgressEvent({
+        eventId: "EVENT-IDENTITY-2",
+        learnerIdHash: "another-learner",
+      }),
+    ])
+    await expect(mixedIdentityAdapter.publishLearningProgress(mixedIdentity))
+      .rejects.toThrow("ROLE_B_PROGRESS_EVENT_IDENTITY_MISMATCH")
+
+    const mixedRecommendationAdapter = makeProgressAdapter(kb)
+    const mixedRecommendation = makeProgressDelivery([
+      makeProgressEvent({ eventId: "EVENT-ACTION-1", action: "advance" }),
+      makeProgressEvent({ eventId: "EVENT-ACTION-2", action: "reinforce" }),
+    ])
+    await expect(mixedRecommendationAdapter.publishLearningProgress(mixedRecommendation))
+      .rejects.toThrow("ROLE_B_PROGRESS_RECOMMENDATION_MISMATCH")
+
+    const unknownSourceAdapter = makeProgressAdapter(kb)
+    const unknownSource = makeProgressDelivery([
+      makeProgressEvent({ eventId: "EVENT-UNKNOWN-SOURCE", sourceId: "K999" }),
+    ])
+    await expect(unknownSourceAdapter.publishLearningProgress(unknownSource))
+      .rejects.toThrow("ROLE_B_PROGRESS_SOURCE_UNKNOWN:K999")
+  })
+})
+
+function makeProgressAdapter(
+  knowledgeBase: KnowledgeBase,
+  profileOverrides: Partial<LearnerProfile> = {},
+): RoleBLearningProgressAdapter {
+  return new RoleBLearningProgressAdapter({
+    knowledgeBase,
+    learners: [{
+      learnerIdHash: "learner-hash",
+      currentProfile: makeProfile(profileOverrides),
+      profileVersion: "profile-v1",
+      profileRevision: 1,
+    }],
+  })
+}
+
+function makeProgressEvent(options: {
+  eventId: string
+  learnerIdHash?: string
+  profileVersion?: string
+  sourceId?: string
+  objectiveId?: string
+  evidenceScore?: number
+  action?: LearningEvidenceEvent["recommendation"]["action"]
+}): LearningEvidenceEvent {
+  const learnerIdHash = options.learnerIdHash ?? "learner-hash"
+  const profileVersion = options.profileVersion ?? "profile-v1"
+  const sourceId = options.sourceId ?? "K007"
+  const objectiveId = options.objectiveId ?? "OBJECTIVE-K007"
+  const evidenceScore = options.evidenceScore ?? 0.8
+  const action = options.action ?? "reinforce"
+  return {
+    schema_version: "1.0",
+    event_id: options.eventId,
+    learner_id_hash: learnerIdHash,
+    profile_version: profileVersion,
+    path_node_id: "PATH-1",
+    objective_id: objectiveId,
+    source_id: sourceId,
+    evidence: {
+      modality: "mcq",
+      raw_score: evidenceScore,
+      evidence_score: evidenceScore,
+      grader_confidence: 0.9,
+      hint_level: 0,
+      attempt_no: 1,
+    },
+    misconceptions: evidenceScore <= 0.3 ? ["concept_not_yet_mastered"] : [],
+    recommendation: {
+      action,
+      confidence: 0.9,
+      reason_codes: [`test_${action}`],
+    },
+    provenance: {
+      artifact_id: `GRADE-${options.eventId}`,
+      idempotency_key: contentHash({ eventId: options.eventId }),
+      item_id: `ITEM-${options.eventId}`,
+      grader_version: "test-grader-v1",
+    },
+  }
+}
+
+function makeProfileDrift(): ProfileDriftSuggestion {
+  return {
+    schema_version: "1.0",
+    suggestion_id: "DRIFT-1",
+    learner_id_hash: "learner-hash",
+    profile_version: "profile-v1",
+    conflicting_objective_ids: ["OBJECTIVE-K007"],
+    reason_codes: ["repeated_profile_evidence_conflict"],
+    confidence: 0.9,
+    action: "reprofile",
+  }
+}
+
+function makeProgressDelivery(
+  events: LearningEvidenceEvent[],
+  drift?: ProfileDriftSuggestion,
+): RoleCLearningProgressDelivery {
+  if (events.length === 0 && !drift) throw new Error("test delivery cannot be empty")
+  const identity = events[0] ?? drift!
+  const base = {
+    schema_version: "1.0" as const,
+    delivery_kind: "learning_progress" as const,
+    learner_id_hash: identity.learner_id_hash,
+    profile_version: identity.profile_version,
+  }
+  const body = events.length > 0
+    ? {
+      ...base,
+      evidence_events: structuredClone(events) as [LearningEvidenceEvent, ...LearningEvidenceEvent[]],
+      ...(drift ? { profile_drift_suggestion: structuredClone(drift) } : {}),
+    }
+    : {
+      ...base,
+      evidence_events: [] as [],
+      profile_drift_suggestion: structuredClone(drift!),
+    }
+  return {
+    ...body,
+    delivery_id: contentHash(body),
+  }
+}

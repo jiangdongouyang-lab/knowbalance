@@ -1,7 +1,16 @@
 export { auditTeaching } from "./auditor"
 export { arbitrate } from "./arbitrator"
 export { planRecoveryPath } from "./path-planner"
-export { receiveLearningProgress } from "./progress-receiver"
+export {
+  applyProgressObservation,
+  receiveLearningProgress,
+} from "./progress-receiver"
+export { RoleBLearningProgressAdapter } from "./learning-progress-adapter"
+export type {
+  RoleBLearnerProgressRegistration,
+  RoleBLearnerProgressState,
+  RoleBLearningProgressAdapterOptions,
+} from "./learning-progress-adapter"
 export type {
   TeachingAuditInput,
   TeachingAuditResult,
@@ -17,4 +26,6 @@ export type {
   PlanRecoveryPathResult,
   ReceiveProgressInput,
   ReceiveProgressResult,
+  ProgressObservation,
+  ApplyProgressObservationInput,
 } from "./types"

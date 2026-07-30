@@ -1,3 +1,4 @@
+export * from "./adaptive-learning-loop-journal"
 export * from "./content-cache"
 export * from "./checkpoint-store"
 export * from "./learning-cycle-store"

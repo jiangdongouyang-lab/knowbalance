@@ -66,7 +66,10 @@ export function finalizeDraft<
    */
   stable_identity?: unknown
 }): ArtifactEnvelope<TPayload, TArtifactType, AgentForArtifact<TArtifactType>> {
-  const derived = derivePayloadMetadata(input.draft.payload)
+  // Provider output is untrusted and may retain mutable references. Take one
+  // private snapshot before validation and never publish the provider object.
+  const payload = structuredClone(input.draft.payload)
+  const derived = derivePayloadMetadata(payload)
   const citations = deduplicateCitations(input.trusted_citations ?? derived.citations)
   const citationReport = validateCitations(citations, input.evidence)
   if (!citationReport.ok) {
@@ -78,7 +81,7 @@ export function finalizeDraft<
   }
 
   if (input.public_payload) {
-    const leakReport = validatePublicArtifactNoSecrets(input.draft.payload)
+    const leakReport = validatePublicArtifactNoSecrets(payload)
     if (!leakReport.ok) {
       return blockedEnvelope(input, {
         code: "BLOCKED_PUBLIC_SECURE_LEAK",
@@ -117,7 +120,7 @@ export function finalizeDraft<
     artifact_type: input.artifact_type,
     seed: input.spec.policies.seed,
     ...(input.stable_identity === undefined
-      ? { payload: input.draft.payload }
+      ? { payload }
       : { stable_identity: input.stable_identity }),
   })
   const artifact: ArtifactEnvelope<
@@ -138,7 +141,7 @@ export function finalizeDraft<
     input_refs: [...input.input_refs],
     citations,
     quality,
-    payload: input.draft.payload,
+    payload,
     trace_ref: stableId("TRACE", { artifact_id: artifactId }),
   }
 
@@ -175,6 +178,33 @@ export function providerBlockedEnvelope<
       objective_ids: [],
     },
     { code: "BLOCKED_PROVIDER_UNAVAILABLE", message: input.message },
+  )
+}
+
+export function unsupportedTargetEnvelope<
+  TPayload,
+  TArtifactType extends RoleCArtifactType,
+>(input: {
+  spec: GenerationSpec
+  evidence: RagEvidencePack
+  agent: AgentForArtifact<TArtifactType>
+  artifact_type: TArtifactType
+  input_refs: string[]
+  message: string
+  target_source_ids: string[]
+}): ArtifactEnvelope<TPayload, TArtifactType, AgentForArtifact<TArtifactType>> {
+  return blockedEnvelope(
+    {
+      ...input,
+      draft: { payload: null as TPayload },
+      public_payload: true,
+      objective_ids: [],
+    },
+    {
+      code: "UNSUPPORTED_TARGET",
+      message: input.message,
+      details: [`target_source_ids=${input.target_source_ids.join(",")}`],
+    },
   )
 }
 

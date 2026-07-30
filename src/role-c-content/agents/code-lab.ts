@@ -1,8 +1,17 @@
-import { ModelOutputValidationError, ModelProviderUnavailableError } from "../contracts/model-gateway"
+import {
+  ModelOutputValidationError,
+  ModelProviderUnavailableError,
+  UnsupportedTargetError,
+} from "../contracts/model-gateway"
 import type { CodeLabArtifactPair } from "../contracts/artifacts"
 import type { RagEvidencePack } from "../contracts/evidence-pack"
 import type { GenerationSpec } from "../contracts/generation-spec"
-import { finalizeDraft, invalidOutputEnvelope, providerBlockedEnvelope } from "./harness"
+import {
+  finalizeDraft,
+  invalidOutputEnvelope,
+  providerBlockedEnvelope,
+  unsupportedTargetEnvelope,
+} from "./harness"
 import type { CodeLabAgent, CodeLabDraftVerifier, CodeLabRequest, RoleCContentProvider } from "./types"
 import { validateCodeLabDraftStructure } from "../validators/code-lab-validator"
 
@@ -30,7 +39,9 @@ export function createCodeLabAgent(
         ],
       }
       try {
-        const draft = await provider.generateCodeLab(request)
+        const draft = structuredClone(
+          await provider.generateCodeLab(request),
+        )
         const structural = validateCodeLabDraftStructure(request, draft)
         if (!structural.ok) {
           return invalidPair(
@@ -40,7 +51,7 @@ export function createCodeLabAgent(
           )
         }
         const verification = verifier
-          ? await verifier.verifyCodeLab(request, draft)
+          ? await verifier.verifyCodeLab(request, structuredClone(draft))
           : { execution_verified: false, issues: ["未配置独立 code-lab verifier"] }
         const objectiveCoverage = verification.objective_coverage ?? structural.objective_coverage
         return {
@@ -56,7 +67,9 @@ export function createCodeLabAgent(
             mutation_kill_rate: verification.mutation_kill_rate,
             verified_test_count: verification.verified_test_count,
             trusted_objective_coverage: objectiveCoverage,
-            verification_issues: verification.issues,
+            verification_issues: verification.execution_verified
+              ? []
+              : ["代码实验未通过可信执行验证"],
           }),
           secure_artifact: finalizeDraft({
             ...common,
@@ -77,10 +90,40 @@ export function createCodeLabAgent(
         if (error instanceof ModelOutputValidationError) {
           return invalidPair(common, `${error.stage} 未在有限修复次数内通过校验`, error.issues)
         }
+        if (error instanceof UnsupportedTargetError) {
+          return unsupportedPair(
+            common,
+            error.message,
+            error.target_source_ids,
+          )
+        }
         if (!(error instanceof ModelProviderUnavailableError)) throw error
         return blockedPair(common, error.message)
       }
     },
+  }
+}
+
+function unsupportedPair(
+  common: { spec: GenerationSpec; evidence: RagEvidencePack; input_refs: string[] },
+  message: string,
+  targetSourceIds: string[],
+): CodeLabArtifactPair {
+  return {
+    public_artifact: unsupportedTargetEnvelope({
+      ...common,
+      agent: "code-lab",
+      artifact_type: "code_lab_public",
+      message,
+      target_source_ids: targetSourceIds,
+    }),
+    secure_artifact: unsupportedTargetEnvelope({
+      ...common,
+      agent: "code-lab",
+      artifact_type: "code_lab_secure",
+      message,
+      target_source_ids: targetSourceIds,
+    }),
   }
 }
 
@@ -95,7 +138,7 @@ function invalidPair(
       agent: "code-lab",
       artifact_type: "code_lab_public",
       message,
-      details,
+      details: ["code-lab Draft 未通过可信门禁"],
     }),
     secure_artifact: invalidOutputEnvelope({
       ...common,

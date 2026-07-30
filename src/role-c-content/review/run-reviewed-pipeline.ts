@@ -49,6 +49,17 @@ export async function runReviewedCPipeline(
       basePipelineOptions(options),
     )
     if (candidate.status !== "ready") {
+      if (candidate.blocked_reason?.code === "UNSUPPORTED_TARGET") {
+        return unsupportedTargetCandidate(
+          candidate,
+          frozenInput,
+          options.review_port.policy_version,
+          maxExternalRevisions,
+          pipelineInputHash,
+          generationSpecHash,
+          evidenceHash,
+        )
+      }
       return attachReviewMetadata(
         candidate,
         options.review_port.policy_version,
@@ -147,6 +158,96 @@ export async function runReviewedCPipeline(
   throw new Error("ROLE_C_REVIEW_UNREACHABLE")
 }
 
+function unsupportedTargetCandidate(
+  candidate: CPipelineResult,
+  input: CPipelineInput,
+  policyVersion: string,
+  maxRevisionRounds: 0 | 1 | 2,
+  pipelineInputHash: string,
+  generationSpecHash: string,
+  evidenceHash: string,
+): ReviewedCPipelineResult {
+  const message = candidate.blocked_reason?.message
+    ?? "当前 Provider 不支持该学习目标"
+  const artifacts = [
+    candidate.public_artifacts.concept_lesson
+      ? {
+          kind: "concept" as const,
+          artifact: candidate.public_artifacts.concept_lesson,
+        }
+      : undefined,
+    candidate.public_artifacts.code_lab
+      ? {
+          kind: "code_lab" as const,
+          artifact: candidate.public_artifacts.code_lab,
+        }
+      : undefined,
+    candidate.public_artifacts.assessment
+      ? {
+          kind: "assessment" as const,
+          artifact: candidate.public_artifacts.assessment,
+        }
+      : undefined,
+  ].filter((entry): entry is NonNullable<typeof entry> => Boolean(entry))
+  const artifactResults = artifacts.map(({ kind, artifact }) => {
+    const finding: ContentReviewFinding = {
+      source: "review_adapter",
+      code: "UNSUPPORTED_TARGET",
+      artifact_kind: kind,
+      artifact_id: artifact.artifact_id,
+      message,
+      proposed_action: "改用支持该目标的模型 Provider，或由 B 重新规划学习目标",
+      fix_scope: "new_spec",
+      evidence_refs: [artifact.artifact_id],
+    }
+    return {
+      artifact_kind: kind,
+      artifact_id: artifact.artifact_id,
+      artifact_hash: contentHash(artifact),
+      fact_status: artifact.status === "ready"
+        ? "pass" as const
+        : "reject" as const,
+      teaching_status: "reject" as const,
+      decision: "reject" as const,
+      can_revise: false,
+      findings: [finding],
+      revision_instructions: [],
+    }
+  })
+  const report: ContentReviewResult = {
+    run_id: input.generation_spec.run_id,
+    pipeline_input_hash: pipelineInputHash,
+    generation_spec_hash: generationSpecHash,
+    policy_version: policyVersion,
+    revision_round: 0,
+    max_revision_rounds: maxRevisionRounds,
+    evidence_hash: evidenceHash,
+    decision: "reject",
+    artifact_results: artifactResults,
+    revision_instructions: [],
+    failed_dimensions: ["UNSUPPORTED_TARGET"],
+    missing_prerequisite_source_ids: [],
+    unknown_prerequisite_refs: [],
+    required_action: "replan_path",
+    fix_scope: "new_spec",
+    can_recover: false,
+  }
+  return attachReviewMetadata(
+    {
+      ...candidate,
+      blocked_reason: {
+        code: "UNSUPPORTED_TARGET",
+        message: `${message}，当前产物不可发布`,
+        details: candidate.blocked_reason?.details,
+      },
+    },
+    policyVersion,
+    [deepFreeze(report)],
+    pipelineInputHash,
+    generationSpecHash,
+  )
+}
+
 function buildReviewRequest(
   candidate: CPipelineResult,
   input: CPipelineInput,
@@ -242,6 +343,7 @@ function validateReviewResult(
   if (result.max_revision_rounds !== request.max_revision_rounds) {
     throw new Error("ROLE_C_REVIEW_RESULT_MAX_ROUNDS_INVALID")
   }
+  validateStructuredRecoveryFields(result)
 
   const expected = new Map(request.artifacts.map((target) => [
     target.artifact.artifact_id,
@@ -343,6 +445,71 @@ function validateReviewResult(
       || result.artifact_results.some((artifact) => artifact.findings.length > 0))) {
     throw new Error("ROLE_C_REVIEW_RESULT_PASS_WITH_FINDINGS")
   }
+}
+
+function validateStructuredRecoveryFields(result: ContentReviewResult): void {
+  const hasStructuredFields = [
+    result.failed_dimensions,
+    result.missing_prerequisite_source_ids,
+    result.unknown_prerequisite_refs,
+    result.required_action,
+    result.fix_scope,
+    result.recommended_level,
+    result.can_recover,
+  ].some((value) => value !== undefined)
+  if (!hasStructuredFields) return
+
+  if (!Array.isArray(result.failed_dimensions)
+    || result.failed_dimensions.length === 0
+    || result.failed_dimensions.some((dimension) => !nonEmpty(dimension))
+    || new Set(result.failed_dimensions).size !== result.failed_dimensions.length
+    || !Array.isArray(result.missing_prerequisite_source_ids)
+    || result.missing_prerequisite_source_ids.some((sourceId) =>
+      !/^K[0-9]{3}$/.test(sourceId))
+    || new Set(result.missing_prerequisite_source_ids).size
+      !== result.missing_prerequisite_source_ids.length
+    || !Array.isArray(result.unknown_prerequisite_refs)
+    || result.unknown_prerequisite_refs.some((reference) =>
+      !nonEmpty(reference))
+    || new Set(result.unknown_prerequisite_refs).size
+      !== result.unknown_prerequisite_refs.length
+    || !result.required_action
+    || ![
+      "adjust_content",
+      "request_new_evidence",
+      "replan_path",
+      "reprofile_learner",
+    ].includes(result.required_action)
+    || !result.fix_scope
+    || !["artifact", "new_evidence", "new_spec"].includes(result.fix_scope)
+    || !recoveryActionMatchesScope(
+      result.required_action,
+      result.fix_scope,
+    )
+    || typeof result.can_recover !== "boolean"
+    || (result.recommended_level !== undefined
+      && !["beginner", "basic", "intermediate", "integrated"].includes(
+        result.recommended_level,
+      ))) {
+    throw new Error("ROLE_C_REVIEW_RESULT_RECOVERY_FIELDS_INVALID")
+  }
+  if (result.decision === "pass") {
+    throw new Error("ROLE_C_REVIEW_RESULT_PASS_WITH_RECOVERY")
+  }
+  if (result.can_recover
+    && !result.revision_instructions.some((instruction) =>
+      instruction.fix_scope === result.fix_scope)) {
+    throw new Error("ROLE_C_REVIEW_RESULT_RECOVERY_INSTRUCTION_MISSING")
+  }
+}
+
+function recoveryActionMatchesScope(
+  action: NonNullable<ContentReviewResult["required_action"]>,
+  scope: NonNullable<ContentReviewResult["fix_scope"]>,
+): boolean {
+  if (action === "adjust_content") return scope === "artifact"
+  if (action === "request_new_evidence") return scope === "new_evidence"
+  return scope === "new_spec"
 }
 
 function validReviewFinding(finding: ContentReviewFinding): boolean {

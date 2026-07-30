@@ -8,6 +8,7 @@ import type { RagResult } from "../../rag/retriever"
 import { arbitrate } from "../../role-b-profile/teaching-audit/arbitrator"
 import { auditTeaching } from "../../role-b-profile/teaching-audit/auditor"
 import type {
+  RequiredAction,
   TeachingAuditResult,
 } from "../../role-b-profile/teaching-audit/types"
 import { stableId } from "../contracts/common"
@@ -23,6 +24,7 @@ import type {
   ContentRevisionInstruction,
   ReviewContentBlock,
   ReviewEvidencePack,
+  ReviewFixScope,
   ReviewablePublicArtifact,
 } from "./types"
 
@@ -51,9 +53,13 @@ export function createLocalABContentReviewPort(
     async review(request): Promise<ContentReviewResult> {
       assertReviewContext(request, kbVersion)
       const ragResult = ragEvidencePackToRagResult(request.evidence_pack)
-      const artifactResults = request.artifacts.map((target) =>
+      const reviewed = request.artifacts.map((target) =>
         reviewArtifact(target, request, ragResult, knowledgeBase))
+      const artifactResults = reviewed.map((entry) => entry.result)
       const decision = aggregateDecision(artifactResults.map((result) => result.decision))
+      const revisionInstructions = artifactResults.flatMap(
+        (result) => result.revision_instructions,
+      )
       return {
         run_id: request.run_id,
         pipeline_input_hash: request.pipeline_input_hash,
@@ -64,7 +70,13 @@ export function createLocalABContentReviewPort(
         evidence_hash: request.evidence_hash,
         decision,
         artifact_results: artifactResults,
-        revision_instructions: artifactResults.flatMap((result) => result.revision_instructions),
+        revision_instructions: revisionInstructions,
+        ...(decision === "pass"
+          ? {}
+          : structuredRecoveryFields(
+              reviewed.map((entry) => entry.teaching_audit),
+              revisionInstructions,
+            )),
       }
     },
   }
@@ -127,7 +139,10 @@ function reviewArtifact(
   request: ContentReviewRequest,
   ragResult: RagResult,
   knowledgeBase: KnowledgeBase,
-): ArtifactReviewResult {
+): {
+  result: ArtifactReviewResult
+  teaching_audit: TeachingAuditResult
+} {
   const blocks = extractReviewBlocks(target)
   const blocksById = new Map(blocks.map((block) => [block.review_block_id, block]))
   const claimBlocks = blocks.filter((block) => block.fact_audit_mode === "claim")
@@ -188,15 +203,76 @@ function reviewArtifact(
   const instructions = findings.flatMap((finding) =>
     toInstructions(finding, objectiveIds))
   return {
-    artifact_kind: target.kind,
-    artifact_id: target.artifact.artifact_id,
-    artifact_hash: target.artifact_hash,
-    fact_status: factStatus,
-    teaching_status: teachingAudit.status,
-    decision,
-    can_revise: decision === "revise" && arbitration.canRevise,
-    findings,
-    revision_instructions: instructions,
+    result: {
+      artifact_kind: target.kind,
+      artifact_id: target.artifact.artifact_id,
+      artifact_hash: target.artifact_hash,
+      fact_status: factStatus,
+      teaching_status: teachingAudit.status,
+      decision,
+      can_revise: decision === "revise" && arbitration.canRevise,
+      findings,
+      revision_instructions: instructions,
+    },
+    teaching_audit: teachingAudit,
+  }
+}
+
+function structuredRecoveryFields(
+  teachingAudits: TeachingAuditResult[],
+  instructions: ContentRevisionInstruction[],
+): Pick<
+  ContentReviewResult,
+  | "failed_dimensions"
+  | "missing_prerequisite_source_ids"
+  | "unknown_prerequisite_refs"
+  | "required_action"
+  | "fix_scope"
+  | "recommended_level"
+  | "can_recover"
+> {
+  const scopes = new Set(instructions.map((instruction) =>
+    instruction.fix_scope))
+  const fixScope: ReviewFixScope = scopes.has("new_spec")
+    ? "new_spec"
+    : scopes.has("new_evidence")
+      ? "new_evidence"
+      : "artifact"
+  const matchingAudit = teachingAudits.find((audit) =>
+    audit.fixScope === fixScope)
+  const requiredAction: RequiredAction = matchingAudit?.requiredAction
+    ?? (fixScope === "new_spec"
+      ? "replan_path"
+      : fixScope === "new_evidence"
+        ? "request_new_evidence"
+        : "adjust_content")
+  const relevantTeachingAudits = teachingAudits.filter((audit) =>
+    audit.fixScope === fixScope && audit.status !== "pass")
+  const recommendedLevel = relevantTeachingAudits
+    .map((audit) => audit.recommendedLevel)
+    .find((level) => level !== null)
+  return {
+    failed_dimensions: unique([
+      ...teachingAudits.flatMap((audit) => audit.failedDimensions),
+      ...instructions
+        .filter((instruction) => instruction.source !== "teaching_audit")
+        .map((instruction) => instruction.code),
+    ]),
+    missing_prerequisite_source_ids: unique(
+      teachingAudits.flatMap((audit) =>
+        audit.missingPrerequisiteSourceIds),
+    ),
+    unknown_prerequisite_refs: unique(
+      teachingAudits.flatMap((audit) =>
+        audit.unknownPrerequisiteRefs),
+    ),
+    required_action: requiredAction,
+    fix_scope: fixScope,
+    ...(recommendedLevel ? { recommended_level: recommendedLevel } : {}),
+    can_recover: fixScope === "new_spec"
+      ? relevantTeachingAudits.length > 0
+        && relevantTeachingAudits.every((audit) => audit.canRecover)
+      : true,
   }
 }
 
