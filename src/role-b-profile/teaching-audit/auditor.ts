@@ -1,14 +1,18 @@
 // 输入: TeachingAuditInput（学习者画像 + 知识点引用 + 知识库）
-// 输出: TeachingAuditResult（四个维度的教学审核结果 + 通过/修订/驳回）
+// 输出: TeachingAuditResult（四个维度的教学审核结果 + 通过/修订/驳回 + 结构化恢复信息）
 // 作用: B 角色 Week2 教学审核器——审核 C 生成内容的教学规范性
+//       Week3 扩展——输出结构化失败信息（failed_dimensions, missing_prerequisite_source_ids,
+//        required_action, fix_scope, recommended_level, can_recover），供 C 自动恢复
 // 审核维度: 难度匹配、前置知识、薄弱点覆盖、目标对齐
 // 与 A 的事实审核互补：A 审"引用了没"，B 审"教得对不对"
 import type { KnowledgeBase, KnowledgeDifficulty, KnowledgeItem } from "../../knowledge/types"
 import { canonicalizeConcept } from "../concept-canonicalizer"
 import type {
   DifficultyCheck,
+  FixScope,
   GoalCheck,
   PrerequisiteCheck,
+  RequiredAction,
   TeachingAuditDimension,
   TeachingAuditInput,
   TeachingAuditResult,
@@ -37,6 +41,14 @@ export function auditTeaching(input: TeachingAuditInput): TeachingAuditResult {
   const status = deriveTeachingStatus(allChecks)
   const revisionHints = collectRevisionHints(allChecks)
 
+  // ── Week3：结构化失败信息 ──
+  const failedDimensions = collectFailedDimensions(allChecks)
+  const missingPrerequisiteSourceIds = collectMissingPrerequisiteIds(allChecks, input.knowledgeBase)
+  const unknownPrerequisiteRefs = collectUnknownPrerequisiteRefs(prerequisiteCheck, input.knowledgeBase)
+  const { requiredAction, fixScope } = deriveRecoveryAction(allChecks)
+  const recommendedLevel = deriveRecommendedLevel(difficultyCheck, input.learnerProfile.level)
+  const canRecover = status !== "reject" || (difficultyCheck.verdict === "misaligned" && recommendedLevel !== null)
+
   return {
     artifactId: input.artifactId,
     learnerId: input.learnerProfile.learner_id,
@@ -49,6 +61,14 @@ export function auditTeaching(input: TeachingAuditInput): TeachingAuditResult {
     },
     summary: buildSummary(status, allChecks),
     revisionHints,
+    // Week3 扩展
+    failedDimensions,
+    missingPrerequisiteSourceIds,
+    unknownPrerequisiteRefs,
+    requiredAction,
+    fixScope,
+    recommendedLevel,
+    canRecover,
   }
 }
 
@@ -321,4 +341,77 @@ function buildSummary(status: TeachingAuditStatus, checks: CheckLike[]): string 
   const failedChecks = checks.filter((c) => c.verdict !== "aligned")
   if (failedChecks.length === 0) return `教学审核${statusText}：四项检查全部通过。`
   return `教学审核${statusText}：${failedChecks.map((c) => c.dimension).join("、")} 未通过。`
+}
+
+// ── Week3：结构化恢复信息 ──
+
+function collectFailedDimensions(checks: CheckLike[]): TeachingAuditDimension[] {
+  return checks
+    .filter((c) => c.verdict !== "aligned")
+    .map((c) => c.dimension)
+}
+
+function collectMissingPrerequisiteIds(checks: CheckLike[], kb: KnowledgeBase): string[] {
+  const prereqCheck = checks.find((c) => c.dimension === "prerequisite_coverage") as PrerequisiteCheck | undefined
+  if (!prereqCheck || prereqCheck.verdict === "aligned") return []
+  const missing: string[] = []
+  for (const concept of prereqCheck.checkedConcepts) {
+    for (const missingEntry of concept.missingPrerequisites) {
+      // extract source_id from "K007 for 循环" format
+      const sourceId = missingEntry.split(" ")[0]
+      if (sourceId && /^K\d+$/.test(sourceId)) {
+        missing.push(sourceId)
+      }
+    }
+  }
+  return [...new Set(missing)]
+}
+
+/** 收集所有被引用的前置知识 ID 中，在知识库中不存在的（未知引用） */
+function collectUnknownPrerequisiteRefs(prereqCheck: PrerequisiteCheck, kb: KnowledgeBase): string[] {
+  const kbSourceIds = new Set(kb.items.map((item) => item.sourceId))
+  const unknown: string[] = []
+  for (const concept of prereqCheck.checkedConcepts) {
+    for (const prereq of concept.prerequisites) {
+      const sourceId = prereq.split(" ")[0]
+      if (sourceId && !kbSourceIds.has(sourceId) && !unknown.includes(sourceId)) {
+        unknown.push(prereq)
+      }
+    }
+  }
+  return unknown
+}
+
+function deriveRecoveryAction(checks: CheckLike[]): { requiredAction: RequiredAction; fixScope: FixScope } {
+  const hasDifficultyFailure = checks.some((c) => c.dimension === "difficulty_alignment" && c.verdict !== "aligned")
+  const hasPrereqFailure = checks.some((c) => c.dimension === "prerequisite_coverage" && c.verdict !== "aligned")
+
+  // 难度不匹配 → 需要重新规划路径
+  if (hasDifficultyFailure) {
+    return { requiredAction: "replan_path", fixScope: "new_spec" }
+  }
+
+  // 前置知识缺失 → 需要重新规划路径（先补前置）
+  if (hasPrereqFailure) {
+    return { requiredAction: "replan_path", fixScope: "new_spec" }
+  }
+
+  // 薄弱点或目标问题 → artifact 范围内修订即可
+  const hasGoalFailure = checks.some((c) => c.dimension === "goal_alignment" && c.verdict !== "aligned")
+  const hasWeakFailure = checks.some((c) => c.dimension === "weak_concept_coverage" && c.verdict !== "aligned")
+  if (hasGoalFailure || hasWeakFailure) {
+    return { requiredAction: "adjust_content", fixScope: "artifact" }
+  }
+
+  return { requiredAction: "adjust_content", fixScope: "artifact" }
+}
+
+function deriveRecommendedLevel(difficultyCheck: DifficultyCheck, learnerLevel: KnowledgeDifficulty): KnowledgeDifficulty | null {
+  if (difficultyCheck.verdict !== "misaligned" || difficultyCheck.contentMaxDifficulty === null) return null
+  // 推荐比内容最高难度低一档（最近发展区上限）
+  const contentIdx = LEVEL_ORDER.indexOf(difficultyCheck.contentMaxDifficulty)
+  const recommendedIdx = Math.max(0, contentIdx - 1)
+  const recommended = LEVEL_ORDER[recommendedIdx]
+  if (recommended === learnerLevel) return null // 当前水平已是最佳
+  return recommended
 }

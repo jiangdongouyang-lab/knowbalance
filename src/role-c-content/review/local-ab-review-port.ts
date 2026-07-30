@@ -291,23 +291,50 @@ function teachingFindings(
   target: ReviewablePublicArtifact,
   result: TeachingAuditResult,
 ): ContentReviewFinding[] {
-  return Object.values(result.checks).flatMap((check) => {
-    if (check.verdict === "aligned") return []
-    const requiresNewSpec = check.dimension === "difficulty_alignment"
-      || check.dimension === "prerequisite_coverage"
-    return [{
+  if (result.status === "pass") return []
+
+  // 使用 B 输出的 structured action/fix_scope 而非内部推断
+  const fixScope: "artifact" | "new_evidence" | "new_spec" = result.fixScope
+  const actionLabel: Record<string, string> = {
+    adjust_content: "在当前 GenerationSpec 允许的目标内调整内容，使其覆盖学习者薄弱点和学习目标",
+    request_new_evidence: "请求 A 补充缺失的证据后重跑内容生成",
+    replan_path: "调用 B 路径规划接口获取新的 LearningPathNode，然后创建新的 GenerationSpec 重跑",
+    reprofile_learner: "学习者画像已过时，需先更新画像再重新生成",
+  }
+  const proposedAction = actionLabel[result.requiredAction]
+    ?? "保持当前产物不发布，由上游调整学习路径或目标后创建新的 GenerationSpec"
+
+  // 附加恢复信息到 proposed_action，告诉 C 具体该做什么
+  const extras: string[] = []
+  if (result.missingPrerequisiteSourceIds.length > 0) {
+    extras.push(`缺失前置知识: ${result.missingPrerequisiteSourceIds.join(", ")}`)
+  }
+  if (result.unknownPrerequisiteRefs.length > 0) {
+    extras.push(`未知前置引用(知识库中不存在): ${result.unknownPrerequisiteRefs.join(", ")}`)
+  }
+  if (result.recommendedLevel) {
+    extras.push(`建议学习者水平: ${result.recommendedLevel}`)
+  }
+
+  const findings = result.failedDimensions.map((dim) => {
+    const key = dimensionToCheckKey(dim)
+    const check = result.checks[key]
+    const message = check && "reason" in check ? (check as { reason: string }).reason : dim
+    return {
       source: "teaching_audit" as const,
-      code: check.dimension,
+      code: dim,
       artifact_kind: target.kind,
       artifact_id: target.artifact.artifact_id,
-      message: check.reason,
-      proposed_action: requiresNewSpec
-        ? "保持当前产物不发布，由上游调整学习路径或目标后创建新的 GenerationSpec"
-        : "在当前 GenerationSpec 允许的目标内调整内容，使其覆盖学习者薄弱点和学习目标",
-      fix_scope: requiresNewSpec ? "new_spec" as const : "artifact" as const,
+      message,
+      proposed_action: extras.length > 0
+        ? `${proposedAction}。${extras.join("；")}`
+        : proposedAction,
+      fix_scope: fixScope,
       evidence_refs: [target.artifact.artifact_id],
-    }]
+    }
   })
+
+  return findings
 }
 
 function emptyExtractionFinding(
@@ -373,4 +400,15 @@ function assertReviewContext(request: ContentReviewRequest, kbVersion: string): 
 
 function unique(values: string[]): string[] {
   return [...new Set(values)]
+}
+
+/** Mapping from TeachingAuditDimension to TeachingAuditResult.checks keys */
+function dimensionToCheckKey(dim: string): "difficulty" | "prerequisite" | "weakConcept" | "goal" {
+  const map: Record<string, "difficulty" | "prerequisite" | "weakConcept" | "goal"> = {
+    difficulty_alignment: "difficulty",
+    prerequisite_coverage: "prerequisite",
+    weak_concept_coverage: "weakConcept",
+    goal_alignment: "goal",
+  }
+  return map[dim] ?? "difficulty"
 }
