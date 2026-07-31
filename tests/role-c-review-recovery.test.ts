@@ -4,7 +4,12 @@ import type { KnowledgeBase } from "../src/knowledge/types"
 import {
   buildGenerationSpec,
   contentHash,
+  createLocalABContentReviewPort,
   createLocalBPathPlanningPort,
+  createRoleCAgents,
+  DeterministicCodeLabContentProvider,
+  InMemorySecureArtifactStore,
+  ROLE_C_PROMPT_MANIFEST_VERSION,
   runRecoverableReviewedCPipeline,
   runReviewedCPipeline,
   toReviewRecoveryPublicResult,
@@ -13,6 +18,7 @@ import {
   type ContentRevisionInstruction,
   type CPipelineInput,
   type EvidenceGapRequest,
+  type GeneratedContentVerifiers,
   type LearnerProfileSnapshot,
   type LearningPathNode,
   type RagEvidencePack,
@@ -348,6 +354,301 @@ describe("Role C review recovery orchestration", () => {
       ].sort()
       expect(target.required_fact_ids).toEqual(expectedFactIds)
     }
+  })
+
+  test("runs the real deterministic C pipeline after B replans and A binds all recovered facts", async () => {
+    const knowledgeBase = await loadKnowledgeBase()
+    const profile: LearnerProfileSnapshot = {
+      schema_version: "1.0",
+      profile_id: "PROFILE-RECOVERY-GOLD",
+      profile_version: "PROFILE-RECOVERY-GOLD-V1",
+      learner_id: "LEARNER-RECOVERY-GOLD",
+      level: "basic",
+      known_concepts: ["变量", "基本数据类型", "算术运算符"],
+      weak_concepts: ["循环", "列表", "条件判断"],
+      goal: "用循环、列表和条件判断统计达标人数",
+      preferred_contexts: ["成绩统计"],
+      accommodations: [],
+    }
+    const initialPath: LearningPathNode = {
+      schema_version: "1.0",
+      node_id: "PATH-RECOVERY-GOLD-INITIAL",
+      target_source_ids: ["K007", "K009", "K018"],
+      prerequisite_source_ids: ["K013"],
+      goal: profile.goal,
+      objectives: [
+        {
+          objective_id: "O1",
+          source_id: "K007",
+          required_fact_ids: ["F001"],
+          observable_behavior: "recognize",
+          importance: "core",
+        },
+        {
+          objective_id: "O2",
+          source_id: "K009",
+          required_fact_ids: ["F001"],
+          observable_behavior: "apply",
+          importance: "core",
+        },
+        {
+          objective_id: "O3",
+          source_id: "K018",
+          required_fact_ids: ["F001"],
+          observable_behavior: "create",
+          importance: "core",
+        },
+      ],
+      assessment_blueprint: {
+        tier_1_count: 2,
+        tier_2_count: 2,
+        tier_3_count: 1,
+        required_modalities: ["mcq", "trace", "code"],
+      },
+    }
+    const initialEvidence = evidenceFromKnowledgeBase(
+      "RAG-RECOVERY-GOLD-INITIAL",
+      ["K007", "K009", "K018", "K013"],
+      profile.level,
+      knowledgeBase,
+    )
+    const built = buildGenerationSpec({
+      run_id: "RUN-RECOVERY-GOLD-INITIAL",
+      profile_snapshot: profile,
+      path_node: initialPath,
+      evidence_pack: initialEvidence,
+      versions: {
+        prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+        model_config_hash: "deterministic-recovery-gold-v1",
+      },
+      seed: 42,
+    })
+    if (!built.ok) throw new Error(built.errors.join("；"))
+
+    const reviewPort = createLocalABContentReviewPort({
+      knowledge_base: knowledgeBase,
+    })
+    const observedReviews: ContentReviewResult[] = []
+    const agents = createRoleCAgents(
+      new DeterministicCodeLabContentProvider(),
+      deterministicRecoveryVerifiers,
+    )
+    const result = await runRecoverableReviewedCPipeline(
+      {
+        generation_spec: built.spec,
+        evidence_pack: initialEvidence,
+      },
+      agents,
+      new InMemorySecureArtifactStore(),
+      {
+        profile_snapshot: profile,
+        review_port: {
+          policy_version: reviewPort.policy_version,
+          async review(request) {
+            const report = await reviewPort.review(request)
+            observedReviews.push(structuredClone(report))
+            return report
+          },
+        },
+        path_planning_port: {
+          async replanLearningPath(request) {
+            return {
+              status: "ready",
+              request_id: request.request_id,
+              path_draft: {
+                schema_version: "1.0",
+                node_id: "PATH-B-RECOVERY-GOLD-DRAFT",
+                target_source_ids: ["K007", "K009", "K006"],
+                prerequisite_source_ids: ["K002", "K003", "K005"],
+                goal: profile.goal,
+                objectives: [
+                  {
+                    objective_id: "RO1",
+                    source_id: "K007",
+                    required_fact_ids: [],
+                    observable_behavior: "recognize",
+                    importance: "core",
+                  },
+                  {
+                    objective_id: "RO2",
+                    source_id: "K009",
+                    required_fact_ids: [],
+                    observable_behavior: "apply",
+                    importance: "core",
+                  },
+                  {
+                    objective_id: "RO3",
+                    source_id: "K006",
+                    required_fact_ids: [],
+                    observable_behavior: "create",
+                    importance: "core",
+                  },
+                ],
+                assessment_blueprint: {
+                  tier_1_count: 2,
+                  tier_2_count: 2,
+                  tier_3_count: 1,
+                  required_modalities: ["mcq", "trace", "code"],
+                },
+              },
+            }
+          },
+        },
+        evidence_refresh_port: {
+          async refreshEvidence(request) {
+            return evidenceFromKnowledgeBase(
+              "RAG-RECOVERY-GOLD-REFRESHED",
+              request.target_source_ids,
+              request.learner_level,
+              knowledgeBase,
+            )
+          },
+        },
+      },
+    )
+
+    expect(observedReviews[0]).toMatchObject({
+      decision: "reject",
+      required_action: "replan_path",
+      fix_scope: "new_spec",
+    })
+    expect(observedReviews.at(-1)?.decision).toBe("pass")
+    expect(result.status).toBe("ready")
+    expect(result.state).toBe("READY")
+    expect(result.recovery).toMatchObject({
+      code: "READY",
+      recovery_attempts: 1,
+    })
+    expect(result.recovery_history).toHaveLength(1)
+    expect(result.recovery_history[0]).toMatchObject({
+      action: "new_spec",
+    })
+    expect(result.recovery_history[0]?.path_request_id).toBeTruthy()
+    expect(result.recovery_history[0]?.evidence_request_id).toBeTruthy()
+    expect(result.recovery_history[0]?.output_spec_id).toBe(
+      result.generation_spec.spec_id,
+    )
+    expect(result.generation_spec.targets.map((target) => target.source_id))
+      .toEqual(["K007", "K009", "K006"])
+    expect(result.generation_spec.targets.every(
+      (target) =>
+        target.required_fact_ids.join(",") === "F001,F002,F003",
+    )).toBe(true)
+    expect(result.public_artifacts.concept_lesson?.status).toBe("ready")
+    expect(result.public_artifacts.code_lab?.status).toBe("ready")
+    expect(result.public_artifacts.assessment?.status).toBe("ready")
+    expect(result.secure_refs).toHaveLength(2)
+    expect(result.review_reports.at(-1)?.artifact_results.every(
+      (artifact) =>
+        artifact.fact_status === "pass"
+        && artifact.teaching_status === "pass"
+        && artifact.decision === "pass",
+    )).toBe(true)
+
+    const concept = result.public_artifacts.concept_lesson
+    if (!concept?.payload) throw new Error("恢复后的讲义缺失")
+    const citedFacts = new Set(
+      concept.payload.explanation_blocks.flatMap((block) =>
+        "claims" in block
+          ? block.claims.flatMap((claim) =>
+              claim.citations.map((citation) =>
+                `${citation.source_id}:${citation.fact_id}`))
+          : []),
+    )
+    for (const target of result.generation_spec.targets) {
+      for (const factId of target.required_fact_ids) {
+        expect(citedFacts.has(`${target.source_id}:${factId}`)).toBe(true)
+      }
+    }
+  })
+
+  test("returns explicit UNSUPPORTED_TARGET when a recovered path exceeds offline lab templates", async () => {
+    const fixture = recoveryFixture()
+    const knowledgeBase = await loadKnowledgeBase()
+    let reviewedRuns = 0
+    const result = await runRecoverableReviewedCPipeline(
+      fixture.input,
+      createRoleCAgents(
+        new DeterministicCodeLabContentProvider(),
+        deterministicRecoveryVerifiers,
+      ),
+      new InMemorySecureArtifactStore(),
+      {
+        profile_snapshot: fixture.profile,
+        review_port: unusedReviewPort,
+        reviewed_pipeline_runner: async (
+          input,
+          agents,
+          secureStore,
+          options,
+        ) => {
+          reviewedRuns += 1
+          if (reviewedRuns === 1) {
+            return blockedResult(input, recoveryReport(
+              input,
+              "new_spec",
+              "replan_path",
+            ))
+          }
+          return runReviewedCPipeline(input, agents, secureStore, options)
+        },
+        path_planning_port: {
+          async replanLearningPath(request) {
+            return {
+              status: "ready",
+              request_id: request.request_id,
+              path_draft: {
+                schema_version: "1.0",
+                node_id: "PATH-B-UNSUPPORTED-DRAFT",
+                target_source_ids: ["K010", "K011", "K012"],
+                prerequisite_source_ids: ["K002", "K003", "K009"],
+                goal: fixture.profile.goal,
+                objectives: ["K010", "K011", "K012"].map(
+                  (sourceId, index) => ({
+                    objective_id: `RO${index + 1}`,
+                    source_id: sourceId,
+                    required_fact_ids: [],
+                    observable_behavior: (["recognize", "apply", "create"] as const)[index]!,
+                    importance: "core" as const,
+                  }),
+                ),
+                assessment_blueprint: {
+                  tier_1_count: 2,
+                  tier_2_count: 2,
+                  tier_3_count: 1,
+                  required_modalities: ["mcq", "trace", "code"],
+                },
+              },
+            }
+          },
+        },
+        evidence_refresh_port: {
+          async refreshEvidence(request) {
+            return evidenceFromKnowledgeBase(
+              "RAG-RECOVERY-UNSUPPORTED",
+              request.target_source_ids,
+              request.learner_level,
+              knowledgeBase,
+            )
+          },
+        },
+      },
+    )
+
+    expect(reviewedRuns).toBe(2)
+    expect(result.status).toBe("blocked")
+    expect(result.state).toBe("BLOCKED")
+    expect(result.blocked_reason?.code).toBe("UNSUPPORTED_TARGET")
+    expect(result.recovery).toMatchObject({
+      code: "UNSUPPORTED_TARGET",
+      can_recover: false,
+      recovery_attempts: 1,
+    })
+    expect(result.blocked_reason?.message).toContain("离线 code-lab")
+    expect(result.public_artifacts.concept_lesson?.status).toBe("ready")
+    expect(result.public_artifacts.code_lab?.status).toBe("blocked")
+    expect(result.public_artifacts.assessment?.status).toBe("blocked")
+    expect(result.secure_refs).toEqual([])
   })
 
   test("local B path adapter blocks empty targets and planner exceptions", async () => {
@@ -1339,6 +1640,31 @@ function recordingSecureStore(): {
       return batchWrites
     },
   }
+}
+
+const deterministicRecoveryVerifiers: GeneratedContentVerifiers = {
+  code_lab: {
+    async verifyCodeLab() {
+      return {
+        execution_verified: true,
+        mutation_kill_rate: 1,
+        verified_test_count: 5,
+        objective_coverage: 1,
+        issues: [],
+      }
+    },
+  },
+  assessment: {
+    async verifyAssessment() {
+      return {
+        answer_key_verified: true,
+        verified_item_count: 5,
+        verified_test_count: 4,
+        objective_coverage: 1,
+        issues: [],
+      }
+    },
+  },
 }
 
 const unusedAgents: RoleCAgents = {

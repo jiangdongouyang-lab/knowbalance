@@ -34,21 +34,40 @@ export class DeterministicConceptContentProvider implements RoleCContentProvider
 
     for (const target of request.generation_spec.targets) {
       const source = evidenceBySource.get(target.source_id)
-      const fact = source?.facts.find((candidate) => target.required_fact_ids.includes(candidate.fact_id))
-      if (!source || !fact) throw new ModelProviderUnavailableError(`缺少目标事实 ${target.source_id}`)
-      const support = citation(fact.source_id, fact.fact_id, "supports")
-      const derived = citation(fact.source_id, fact.fact_id, "derived_from")
-      citations.push(support, derived)
-      const claim = createClaim(`${target.objective_id}-CLAIM`, fact.content, support)
+      if (!source) {
+        throw new ModelProviderUnavailableError(`缺少目标证据 ${target.source_id}`)
+      }
+      const factsById = new Map(source.facts.map((fact) => [fact.fact_id, fact]))
+      const facts = target.required_fact_ids.map((factId) => {
+        const fact = factsById.get(factId)
+        if (!fact || fact.source_id !== target.source_id) {
+          throw new ModelProviderUnavailableError(
+            `缺少目标事实 ${target.source_id}:${factId}`,
+          )
+        }
+        return fact
+      })
+      const supportCitations = facts.map((fact) =>
+        citation(fact.source_id, fact.fact_id, "supports"))
+      const derivedCitations = facts.map((fact) =>
+        citation(fact.source_id, fact.fact_id, "derived_from"))
+      citations.push(...supportCitations, ...derivedCitations)
+      const claims = facts.map((fact, index) =>
+        createClaim(
+          `${target.objective_id}-CLAIM-${fact.fact_id}`,
+          fact.content,
+          supportCitations[index]!,
+        ))
       const explanationId = `${target.objective_id}-EXPLANATION`
       const exampleId = `${target.objective_id}-EXAMPLE`
       const checkId = `${target.objective_id}-CHECK`
+      const factSummary = facts.map((fact) => fact.content).join("；")
 
       explanationBlocks.push({
         block_id: explanationId,
         block_type: "paragraph",
-        text: adaptiveExplanation(request, source.title, fact.content),
-        claims: [claim],
+        text: adaptiveExplanation(request, source.title, factSummary),
+        claims,
       })
       const example = source.examples[0]
       workedExamples.push(example
@@ -58,40 +77,55 @@ export class DeterministicConceptContentProvider implements RoleCContentProvider
             language: "python",
             code: example.code,
             caption: `${source.title}：${example.title}`,
-            claims: [createClaim(`${target.objective_id}-EXAMPLE-CLAIM`, fact.content, support)],
+            claims: facts.map((fact, index) =>
+              createClaim(
+                `${target.objective_id}-EXAMPLE-CLAIM-${fact.fact_id}`,
+                fact.content,
+                supportCitations[index]!,
+              )),
           }
         : {
             block_id: exampleId,
             block_type: "paragraph",
-            text: `围绕“${request.generation_spec.path_node.goal}”应用该核心事实：${fact.content}`,
-            claims: [createClaim(`${target.objective_id}-EXAMPLE-CLAIM`, fact.content, support)],
+            text: `围绕“${request.generation_spec.path_node.goal}”应用这些核心事实：${factSummary}`,
+            claims: facts.map((fact, index) =>
+              createClaim(
+                `${target.objective_id}-EXAMPLE-CLAIM-${fact.fact_id}`,
+                fact.content,
+                supportCitations[index]!,
+              )),
           })
       microChecks.push({
         block_id: checkId,
         block_type: "quiz",
         item_id: `${target.objective_id}-MICRO-01`,
-        prompt: `请结合当前学习目标，用自己的话说明这条核心事实：${fact.content}`,
-        citations: [derived],
+        prompt: `请结合当前学习目标，说明这些核心事实之间的联系：${factSummary}`,
+        citations: derivedCitations,
       })
       misconceptions.push({
-        misconception_tag: `overlooks_${target.source_id.toLocaleLowerCase()}_${fact.fact_id.toLocaleLowerCase()}`,
-        explanation: `学习时需要避免只记形式而忽略核心事实：${fact.content}`,
+        misconception_tag: `overlooks_${target.source_id.toLocaleLowerCase()}_required_facts`,
+        explanation: `学习时需要避免只记形式而忽略这些核心事实：${factSummary}`,
         objective_id: target.objective_id,
-        citations: [support],
+        citations: supportCitations,
       })
       hintLadders.push({
         objective_id: target.objective_id,
         hints: [
-          { hint_level: 1, text: `先回忆核心事实：${fact.content}`, citations: [support] },
-          { hint_level: 2, text: `把这条事实与“${request.generation_spec.path_node.goal}”联系起来。`, citations: [derived] },
-          { hint_level: 3, text: `从示例中定位直接体现“${fact.content}”的部分。`, citations: [support] },
+          { hint_level: 1, text: `先逐条回忆核心事实：${factSummary}`, citations: supportCitations },
+          { hint_level: 2, text: `把这些事实（${factSummary}）与“${request.generation_spec.path_node.goal}”联系起来。`, citations: derivedCitations },
+          { hint_level: 3, text: `从示例中分别定位这些核心事实的体现：${factSummary}`, citations: supportCitations },
         ],
       })
       summary.push({
         block_id: `${target.objective_id}-SUMMARY`,
         block_type: "paragraph",
-        text: `本目标需要保留的核心结论：${fact.content}`,
-        claims: [createClaim(`${target.objective_id}-SUMMARY-CLAIM`, fact.content, support)],
+        text: `本目标需要保留的核心结论：${factSummary}`,
+        claims: facts.map((fact, index) =>
+          createClaim(
+            `${target.objective_id}-SUMMARY-CLAIM-${fact.fact_id}`,
+            fact.content,
+            supportCitations[index]!,
+          )),
       })
       objectiveCoverage.push({
         objective_id: target.objective_id,
