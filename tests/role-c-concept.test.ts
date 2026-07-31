@@ -14,6 +14,7 @@ import {
   ModelBackedRoleCContentProvider,
   OpenCodeConceptContentProvider,
   ROLE_C_PROMPT_MANIFEST_VERSION,
+  validateConceptLesson,
   validateRoleCSchema,
   type GenerationSpec,
   type ModelGateway,
@@ -86,6 +87,46 @@ describe("role C phase-one trusted concept generation", () => {
     expect(Object.isFrozen(spec.targets)).toBe(true)
   })
 
+  test("covers every required fact when recovery binds multiple facts to one objective", async () => {
+    const { pack, spec } = await buildContext()
+    const recoveredSpec = structuredClone(spec)
+    recoveredSpec.targets = recoveredSpec.targets.map((target) => {
+      const evidence = pack.results.find(
+        (item) => item.source_id === target.source_id,
+      )
+      return {
+        ...target,
+        required_fact_ids: evidence?.facts.map((fact) => fact.fact_id) ?? [],
+      }
+    })
+    const draft = await new DeterministicConceptContentProvider()
+      .generateConceptLesson({
+        generation_spec: recoveredSpec,
+        evidence_pack: pack,
+      })
+    const validation = validateConceptLesson({
+      payload: draft.payload,
+      spec: recoveredSpec,
+      evidence: pack,
+    })
+
+    expect(validation.ok).toBe(true)
+    expect(validation.issues).toEqual([])
+    const citedFacts = new Set(
+      draft.payload.explanation_blocks.flatMap((block) =>
+        "claims" in block
+          ? block.claims.flatMap((claim) =>
+              claim.citations.map((entry) =>
+                `${entry.source_id}:${entry.fact_id}`))
+          : []),
+    )
+    for (const target of recoveredSpec.targets) {
+      for (const factId of target.required_fact_ids) {
+        expect(citedFacts.has(`${target.source_id}:${factId}`)).toBe(true)
+      }
+    }
+  })
+
   test("publishes a snapshot instead of retaining the provider's mutable payload", async () => {
     const { pack, spec } = await buildContext()
     const provider = new DeterministicConceptContentProvider()
@@ -141,6 +182,8 @@ describe("role C phase-one trusted concept generation", () => {
     )
     expect(artifact.status).toBe("blocked")
     expect(artifact.blocked_reason?.code).toBe("BLOCKED_INVALID_OUTPUT")
+    expect(artifact.blocked_reason?.message).toContain("claim_not_grounded@")
+    expect(artifact.blocked_reason?.details?.join(" ")).toContain("claim_not_grounded @")
     expect(artifact.blocked_reason?.details?.join(" ")).toContain("未保留任何所引事实")
   })
 

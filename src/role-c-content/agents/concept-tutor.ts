@@ -18,14 +18,21 @@ export function createConceptTutorAgent(provider: RoleCContentProvider): Concept
           evidence: request.evidence_pack,
         })
         if (!validation.ok) {
+          const details = validation.issues.map(
+            (issue) => `${issue.code} @ ${issue.path}: ${issue.message}`,
+          )
+          const issueLocations = validation.issues
+            .slice(0, 3)
+            .map((issue) => `${issue.code}@${issue.path}`)
+            .join("；")
           return invalidOutputEnvelope({
             spec: request.generation_spec,
             evidence: request.evidence_pack,
             agent: "concept-tutor",
             artifact_type: "concept_lesson",
             input_refs: [request.generation_spec.spec_id, request.evidence_pack.retrieval_id],
-            message: "concept-tutor Draft 未通过结构、引用或目标覆盖门禁",
-            details: validation.issues.map((issue) => `${issue.path}: ${issue.message}`),
+            message: `concept-tutor Draft 未通过结构、引用或目标覆盖门禁：${issueLocations}`,
+            details,
           })
         }
         return finalizeDraft({
