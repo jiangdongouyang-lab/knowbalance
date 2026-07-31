@@ -72,6 +72,19 @@ export interface RoleDContentAuditSummary {
   arbitration: RoleDArbitrationSummary
 }
 
+export interface RoleDReviewRecoverySummary {
+  code: "READY" | "BLOCKED" | "UNSUPPORTED_TARGET"
+  failedDimensions: string[]
+  missingPrerequisiteSourceIds: string[]
+  unknownPrerequisiteRefs: string[]
+  requiredAction: "adjust_content" | "request_new_evidence" | "replan_path" | "reprofile_learner" | "none"
+  fixScope: "artifact" | "new_evidence" | "new_spec" | "none"
+  recommendedLevel?: LearnerProfile["level"]
+  canRecover: boolean
+  attempts: number
+  message: string
+}
+
 export type RoleCForRoleDResult =
   | {
       status: "ready"
@@ -84,6 +97,7 @@ export type RoleCForRoleDResult =
         attemptNo: number
       }
       audit?: RoleDContentAuditSummary
+      recovery?: RoleDReviewRecoverySummary
     }
   | {
       status: "blocked" | "failed"
@@ -92,6 +106,7 @@ export type RoleCForRoleDResult =
       runId: string
       reason: string
       audit?: RoleDContentAuditSummary
+      recovery?: RoleDReviewRecoverySummary
     }
 
 export interface GenerateRoleCForRoleDInput {

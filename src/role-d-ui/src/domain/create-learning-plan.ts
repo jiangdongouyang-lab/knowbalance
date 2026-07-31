@@ -324,10 +324,7 @@ function buildSession(
   roleC: RoleCForRoleDResult,
   sessionId = `session-${input.learnerId}-${Date.now()}`,
 ): RoleDSession {
-  const knownSourceIds = new Set(synthesis.provenance.concepts
-    .filter((concept) => concept.bucket === "known")
-    .flatMap((concept) => concept.matched_source_ids))
-  const path = buildPath(ragResult, knownSourceIds)
+  const path = buildPath(ragResult, synthesis.provenance.concepts)
   const artifacts = roleC.artifacts
   const roleCWorkflow = roleC.workflow.length > 0
     ? roleC.workflow
@@ -425,10 +422,16 @@ function auditStatusToWorkflow(status: "pass" | "revise" | "reject"): RoleDSessi
   return "blocked"
 }
 
-function buildPath(ragResult: RagResult, knownSourceIds: Set<string>) {
+function buildPath(
+  ragResult: RagResult,
+  concepts: ReturnType<typeof synthesizeProfile>["provenance"]["concepts"],
+) {
   let currentAssigned = false
   const nodes = ragResult.results.slice(0, 5).map((item): RoleDSession["path"][number] => {
-    const completed = knownSourceIds.has(item.sourceId)
+    const conceptEvidence = concepts.find((concept) =>
+      concept.matched_source_ids.includes(item.sourceId)
+      && normalize(concept.concept) === normalize(item.title))
+    const completed = conceptEvidence?.bucket === "known"
     const status = completed ? "completed" : currentAssigned ? "upcoming" : "current"
     if (status === "current") currentAssigned = true
     return {
@@ -436,7 +439,13 @@ function buildPath(ragResult: RagResult, knownSourceIds: Set<string>) {
       title: item.title,
       difficulty: item.difficulty,
       status,
-      reason: completed ? "B 画像将其标记为已掌握。" : item.reason,
+      reason: completed
+        ? "B 画像将其标记为已掌握。"
+        : conceptEvidence?.bucket === "weak"
+          ? conceptEvidence.source === "objective"
+            ? "客观诊断答错，B 画像将其标记为待补强。"
+            : "B 画像将其标记为待补强。"
+          : item.reason,
     }
   })
   const order: Record<RoleDSession["path"][number]["status"], number> = { completed: 0, current: 1, upcoming: 2 }

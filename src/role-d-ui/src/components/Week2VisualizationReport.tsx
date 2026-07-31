@@ -1,5 +1,6 @@
 import { buildDifficultyMatchSeries } from "../domain/difficulty-match"
 import type { AuditStatusView, RoleDSession, WorkflowStatus } from "../domain/types"
+import { arrangeWorkflowForDisplay } from "../domain/workflow-display"
 
 interface Week2VisualizationReportProps {
   session: RoleDSession
@@ -30,7 +31,8 @@ export function Week2VisualizationReport({ session }: Week2VisualizationReportPr
   const matchSeries = buildDifficultyMatchSeries(session.profile.level, session.retrieval.items)
   const radarAxes = buildRadarAxes(session)
   const radarPoints = radarAxes.map((axis, index) => radarPoint(index, radarAxes.length, axis.score))
-  const workflowCounts = summarizeWorkflow(session.workflow)
+  const displayWorkflow = arrangeWorkflowForDisplay(session.workflow)
+  const workflowCounts = summarizeWorkflow(displayWorkflow)
   const audit = session.audit
 
   return (
@@ -112,11 +114,12 @@ export function Week2VisualizationReport({ session }: Week2VisualizationReportPr
             <strong>{workflowCounts.finished}/{workflowCounts.total} 已流转</strong>
           </div>
           <div className="week2-agent-flow">
-            {session.workflow.map((event) => (
+            {displayWorkflow.map((event) => (
               <div className={`week2-agent-step status-${event.status}`} key={event.id}>
                 <span>{statusLabel[event.status]}</span>
                 <strong>{event.stage}</strong>
                 <small>{event.agent}</small>
+                {event.status === "blocked" && <p>{event.summary}</p>}
               </div>
             ))}
           </div>

@@ -8,16 +8,18 @@ import type {
   RoleDWorkflowEvent,
 } from "./contracts"
 import { loadKnowledgeBase } from "../knowledge/loader"
-import type { RagResultItem } from "../rag/retriever"
+import { retrieveKnowledge, type RagResultItem } from "../rag/retriever"
 import {
   adaptLearnerProfile,
   adaptRagResult,
   buildGenerationSpec,
   contentHash,
   createLocalABContentReviewPort,
+  createLocalBPathPlanningPort,
   createRoleCAgents,
   defineLearningPathNode,
   DeterministicCodeLabContentProvider,
+  createDockerPythonCodeRunnerFromEnv,
   InMemoryLearningCycleStore,
   InMemoryMasteryStateStore,
   InMemorySecureArtifactStore,
@@ -25,7 +27,7 @@ import {
   ModelBackedRoleCContentProvider,
   createRoleCModelGatewayFromEnv,
   ROLE_C_PROMPT_MANIFEST_VERSION,
-  runReviewedCPipeline,
+  runRecoverableReviewedCPipeline,
   TrustedAssessmentVerifier,
   TrustedCodeLabVerifier,
   type AgentTraceEvent,
@@ -40,6 +42,8 @@ import {
   type CodeRunner,
   type LearningCyclePublicOutcome,
   type ObservableBehavior,
+  type ReviewRecoveryAttempt,
+  type ReviewRecoverySummary,
   type SubmissionEnvelope,
 } from "../role-c-content"
 
@@ -61,13 +65,23 @@ export interface RoleCForRoleDRuntimeOptions {
   env?: Record<string, string | undefined>
   cwd?: string
   runner?: CodeRunner
+  dockerRunnerFactory?: (env?: Record<string, string | undefined>) => Promise<CodeRunner>
+}
+
+export async function resolveRoleCCodeRunner(runtime: Pick<RoleCForRoleDRuntimeOptions, "providerMode" | "runner" | "env" | "dockerRunnerFactory">): Promise<CodeRunner> {
+  if (runtime.runner) return runtime.runner
+  if (runtime.providerMode === "model") {
+    return (runtime.dockerRunnerFactory ?? createDockerPythonCodeRunnerFromEnv)(runtime.env ?? process.env)
+  }
+  return new RoleDConformanceRunner()
 }
 
 export async function generateRoleCForRoleDWithRuntime(
   input: GenerateRoleCForRoleDInput,
   runtime: RoleCForRoleDRuntimeOptions,
 ): Promise<RoleCForRoleDResult> {
-  const targets = selectTargets(input.ragResult.results)
+  const knowledgeBase = await loadKnowledgeBase()
+  const targets = selectTargets(input.ragResult.results, knowledgeBase)
   if (targets.length === 0) {
     return {
       status: "blocked",
@@ -129,7 +143,26 @@ export async function generateRoleCForRoleDWithRuntime(
     }
   }
 
-  const runner = runtime.runner ?? new RoleDConformanceRunner()
+  let runner: CodeRunner
+  try {
+    runner = await resolveRoleCCodeRunner(runtime)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "C 的 Docker CodeRunner 不可用"
+    return {
+      status: "blocked",
+      artifacts: [],
+      workflow: [{
+        id: `${input.runId}-docker-runner-blocked`,
+        agent: "docker-python-runner",
+        stage: "可信代码执行",
+        status: "blocked",
+        summary: reason,
+        timestamp: new Date().toISOString(),
+      }],
+      runId: input.runId,
+      reason,
+    }
+  }
   const provider = runtime.providerMode === "model"
     ? new ModelBackedRoleCContentProvider(createRoleCModelGatewayFromEnv(runtime.env ?? process.env), {
         generation_strategy: "staged",
@@ -142,17 +175,40 @@ export async function generateRoleCForRoleDWithRuntime(
   })
   const secureStore = new InMemorySecureArtifactStore()
   const pipelineInput = { generation_spec: built.spec, evidence_pack: evidencePack }
-  const knowledgeBase = await loadKnowledgeBase()
-  const pipeline = await runReviewedCPipeline(
+  const pipeline = await runRecoverableReviewedCPipeline(
     pipelineInput,
     agents,
     secureStore,
     {
       review_port: createLocalABContentReviewPort({ knowledge_base: knowledgeBase }),
+      profile_snapshot: profileSnapshot,
+      path_planning_port: createLocalBPathPlanningPort(knowledgeBase),
+      evidence_refresh_port: {
+        async refreshEvidence(request) {
+          const refreshed = await retrieveKnowledge({
+            query: recoveryQuery(
+              input.profile.goal,
+              request.target_source_ids,
+              request.reason,
+              knowledgeBase,
+            ),
+            learnerLevel: request.learner_level,
+            topK: Math.max(5, request.target_source_ids.length + 2),
+          })
+          return adaptRagResult(refreshed, {
+            kb_version: input.kbVersion,
+            rag_version: "rule-rag-0.1-recovery",
+          })
+        },
+      },
       max_external_revisions: 2,
+      max_recovery_attempts: 2,
     },
   )
-  const workflow = pipeline.trace_events.map(toWorkflowEvent)
+  const workflow = [
+    ...pipeline.trace_events.map(toWorkflowEvent),
+    ...recoveryWorkflowEvents(input.runId, pipeline.recovery, pipeline.recovery_history),
+  ]
   const audit = reviewAuditSummary(pipeline.review_reports, toRoleDArtifacts(pipeline.public_artifacts))
   const finalReview = pipeline.review_reports.at(-1)
   if (pipeline.status !== "ready" || finalReview?.decision !== "pass") {
@@ -164,8 +220,9 @@ export async function generateRoleCForRoleDWithRuntime(
       artifacts: [],
       workflow,
       runId: input.runId,
-      reason: pipeline.blocked_reason?.message ?? pipeline.failure_reason?.message ?? (reviewReason || "A/B 审核未通过，内容未发布给 D。"),
+      reason: pipeline.recovery.message || pipeline.blocked_reason?.message || pipeline.failure_reason?.message || reviewReason || "A/B 审核未通过，内容未发布给 D。",
       ...(audit ? { audit } : {}),
+      recovery: toRoleDRecovery(pipeline.recovery),
     }
   }
   const artifacts = toRoleDArtifacts(pipeline.public_artifacts)
@@ -207,7 +264,52 @@ export async function generateRoleCForRoleDWithRuntime(
       attemptNo: 1,
     },
     ...(audit ? { audit } : {}),
+    recovery: toRoleDRecovery(pipeline.recovery),
   }
+}
+
+function recoveryQuery(
+  goal: string,
+  sourceIds: string[],
+  reason: string,
+  knowledgeBase: Awaited<ReturnType<typeof loadKnowledgeBase>>,
+): string {
+  const groundedTerms = sourceIds.flatMap((sourceId) => {
+    const item = knowledgeBase.items.find((candidate) => candidate.sourceId === sourceId)
+    return item ? [item.title, ...item.keywords] : []
+  })
+  return `恢复目标：${groundedTerms.join("、")}；学习目标：${goal}；补证据原因：${reason}`
+}
+
+function toRoleDRecovery(recovery: ReviewRecoverySummary) {
+  return {
+    code: recovery.code,
+    failedDimensions: [...recovery.failed_dimensions],
+    missingPrerequisiteSourceIds: [...recovery.missing_prerequisite_source_ids],
+    unknownPrerequisiteRefs: [...recovery.unknown_prerequisite_refs],
+    requiredAction: recovery.required_action,
+    fixScope: recovery.fix_scope,
+    ...(recovery.recommended_level ? { recommendedLevel: recovery.recommended_level } : {}),
+    canRecover: recovery.can_recover,
+    attempts: recovery.recovery_attempts,
+    message: recovery.message,
+  }
+}
+
+function recoveryWorkflowEvents(
+  runId: string,
+  recovery: ReviewRecoverySummary,
+  history: ReviewRecoveryAttempt[],
+): RoleDWorkflowEvent[] {
+  if (history.length === 0 && recovery.required_action === "none") return []
+  return [{
+    id: `${runId}-review-recovery-${history.length}`,
+    agent: recovery.fix_scope === "new_spec" ? "B/C recovery-loop" : "A/C recovery-loop",
+    stage: "审核恢复",
+    status: recovery.code === "READY" ? "completed" : "blocked",
+    summary: recovery.message,
+    timestamp: "刚刚",
+  }]
 }
 
 export interface SubmitRoleCAssessmentInput {
@@ -247,7 +349,10 @@ export async function submitRoleCAssessment(
   })
 }
 
-function selectTargets(results: RagResultItem[]): RagResultItem[] {
+function selectTargets(
+  results: RagResultItem[],
+  knowledgeBase: Awaited<ReturnType<typeof loadKnowledgeBase>>,
+): RagResultItem[] {
   const direct = results.filter(hasDirectEvidenceMatch)
   const candidates = direct.length > 0 ? direct : results.filter((item) => item.score > 0)
   if (candidates.length === 0) return []
@@ -255,7 +360,45 @@ function selectTargets(results: RagResultItem[]): RagResultItem[] {
   const maxScore = Math.max(...candidates.map((item) => item.score))
   const threshold = Math.max(10, maxScore * 0.7)
   const selected = candidates.filter((item) => item.score >= threshold)
-  return selected.length >= 3 ? selected.slice(0, 3) : candidates.slice(0, Math.min(3, candidates.length))
+  const targets = selected.length >= 3
+    ? selected.slice(0, 3)
+    : candidates.slice(0, Math.min(3, candidates.length))
+  return orderTargetsByPrerequisites(targets, knowledgeBase)
+}
+
+function orderTargetsByPrerequisites(
+  targets: RagResultItem[],
+  knowledgeBase: Awaited<ReturnType<typeof loadKnowledgeBase>>,
+): RagResultItem[] {
+  const selectedIds = new Set(targets.map(sourceIdOf))
+  const prerequisites = new Map(knowledgeBase.items.map((item) => [
+    item.sourceId,
+    (item.prerequisites ?? []).filter((sourceId) => selectedIds.has(sourceId)),
+  ]))
+  const dependencyPriority = new Map<string, number>()
+  for (const target of targets) {
+    const targetItem = knowledgeBase.items.find((item) => item.sourceId === sourceIdOf(target))
+    targetItem?.prerequisites.forEach((sourceId, index) => {
+      if (selectedIds.has(sourceId)) {
+        dependencyPriority.set(sourceId, Math.min(dependencyPriority.get(sourceId) ?? Number.MAX_SAFE_INTEGER, index))
+      }
+    })
+  }
+  const remaining = [...targets]
+  const ordered: RagResultItem[] = []
+  while (remaining.length > 0) {
+    const available = remaining
+      .map((target, index) => ({ target, index }))
+      .filter(({ target }) => (prerequisites.get(sourceIdOf(target)) ?? []).every((sourceId) =>
+        ordered.some((item) => sourceIdOf(item) === sourceId)))
+      .sort((left, right) =>
+        (dependencyPriority.get(sourceIdOf(left.target)) ?? Number.MAX_SAFE_INTEGER)
+        - (dependencyPriority.get(sourceIdOf(right.target)) ?? Number.MAX_SAFE_INTEGER)
+        || left.index - right.index)
+    const nextIndex = available[0]?.index ?? 0
+    ordered.push(...remaining.splice(nextIndex, 1))
+  }
+  return ordered
 }
 
 function hasDirectEvidenceMatch(item: RagResultItem): boolean {
@@ -445,7 +588,12 @@ function toWorkflowEvent(event: AgentTraceEvent): RoleDWorkflowEvent {
 }
 
 function stageLabel(event: AgentTraceEvent): string {
-  if (event.agent === "concept-tutor") return "定制讲义"
+  if (event.agent === "concept-tutor") {
+    if (event.event_type === "c.agent.started") return "定制讲义生成"
+    if (event.event_type === "c.agent.ready") return "定制讲义准备"
+    if (event.status === "blocked" || event.status === "failed") return "定制讲义受阻"
+    return "定制讲义"
+  }
   if (event.agent === "code-lab") return "代码实验"
   if (event.agent === "tiered-evaluator") return "分阶测评"
   return event.event_type === "c.pipeline.ready" ? "C 内容发布" : "C 入口校验"

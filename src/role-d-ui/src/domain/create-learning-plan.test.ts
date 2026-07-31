@@ -58,7 +58,7 @@ describe("createLearningPlan", () => {
     const plan = await createLearningPlan(input)
 
     expect(plan.session.path.find((node) => node.id === "K009")?.status).toBe("completed")
-    expect(plan.session.path.find((node) => node.id === "K002")?.status).toBe("completed")
+    expect(plan.session.path.find((node) => node.id === "K002")?.status).not.toBe("completed")
     expect(plan.session.path.find((node) => node.id === "K007")?.status).not.toBe("completed")
     expect(plan.session.path.map((node) => node.status)).toEqual([...plan.session.path.map((node) => node.status)].sort((left, right) => ({ completed: 0, current: 1, upcoming: 2 })[left] - ({ completed: 0, current: 1, upcoming: 2 })[right]))
   })
@@ -72,6 +72,35 @@ describe("createLearningPlan", () => {
     expect(updated.session.profile.knownConcepts).toContain(plan.diagnosis.items[0]?.concept)
     expect(updated.session.profile.weakConcepts).toEqual(expect.arrayContaining(plan.diagnosis.items.slice(1).map((item) => item.concept)))
     expect(updated.session.retrieval.items.length).toBeGreaterThan(0)
+  })
+
+  test("keeps an objectively incorrect concept out of completed path nodes", async () => {
+    const learnerInput = {
+      ...input,
+      selfRating: "integrated" as const,
+      knownConcepts: ["变量", "基本数据类型", "条件判断", "for循环", "列表", "函数定义与调用"],
+      weakConcepts: ["循环", "列表", "函数"],
+      goal: "完成成绩统计程序，使用循环遍历列表，并用函数计算平均成绩",
+    }
+    const blockedC = async ({ runId }: { runId: string }) => ({
+      status: "blocked" as const,
+      artifacts: [],
+      workflow: [],
+      runId,
+      reason: "测试中不执行 C",
+    })
+    const plan = await createLearningPlan(learnerInput, blockedC)
+    const answers = Object.fromEntries(plan.diagnosis.items.map((item) => [
+      item.id,
+      item.sourceId === "K002" ? "错误答案" : item.answer,
+    ]))
+
+    const updated = await evaluatePlanDiagnosis(plan, answers, blockedC)
+    const variableNode = updated.session.path.find((node) => node.id === "K002")
+
+    expect(updated.session.profile.weakConcepts).toContain("变量与赋值")
+    expect(variableNode?.status).not.toBe("completed")
+    expect(variableNode?.reason).toContain("客观诊断答错")
   })
 
   test("rejects an exact target with no authored choice instead of borrowing unrelated questions", async () => {

@@ -1,11 +1,19 @@
 import { defineConfig } from "vitest/config"
 import react from "@vitejs/plugin-react"
-import { resolve } from "node:path"
+import { resolve, join } from "node:path"
+import { readFileSync } from "node:fs"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { Plugin } from "vite"
 import { generateRoleCForRoleDWithRuntime, submitRoleCAssessment } from "../role-d-integration/role-c-service"
 import type { GenerateRoleCForRoleDInput } from "../role-d-integration/contracts"
 import type { SubmitRoleCAssessmentInput } from "../role-d-integration/role-c-service"
+import { resolveRoleCProviderMode, resolveRoleCRuntimeEnvironment } from "../role-d-integration/role-c-runtime-env"
+import {
+  createDockerPythonCodeRunnerFromEnv,
+  NodeDockerCommandExecutor,
+  type CodeRunner,
+  type DockerCommandExecutor,
+} from "../role-c-content"
 
 export default defineConfig({
   root: __dirname,
@@ -58,14 +66,26 @@ function roleCApiPlugin(): Plugin {
 }
 
 function roleCRuntimeOptions() {
-  const providerMode = process.env.ROLE_C_MODEL_ENDPOINT && process.env.ROLE_C_MODEL_ID
-    ? "model" as const
-    : "deterministic" as const
+  const envFile = join(resolve(__dirname, "../.."), ".env.role-c.local")
+  let privateEnv = ""
+  try { privateEnv = readFileSync(envFile, "utf8") } catch { /* optional local env */ }
+  const env = resolveRoleCRuntimeEnvironment(process.env, privateEnv)
+  const providerMode = resolveRoleCProviderMode(env)
   return {
     providerMode,
-    env: process.env,
+    env,
     cwd: resolve(__dirname, "../.."),
+    dockerRunnerFactory: createRoleDNodeDockerRunner,
   }
+}
+
+export async function createRoleDNodeDockerRunner(
+  env: Record<string, string | undefined> = process.env,
+  executor?: DockerCommandExecutor,
+): Promise<CodeRunner> {
+  return createDockerPythonCodeRunnerFromEnv(env, {
+    executor: executor ?? new NodeDockerCommandExecutor(),
+  })
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {

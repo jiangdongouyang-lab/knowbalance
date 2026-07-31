@@ -110,6 +110,21 @@ bun run role-d:test
 bun run role-d:build
 ```
 
+### Share the Role D frontend with teammates
+
+The repository includes the full Role D frontend and its local Vite API middleware. A/B/C teammates can run the same page from a fresh clone without copying any local secrets:
+
+```bash
+git clone https://github.com/jiangdongouyang-lab/knowbalance.git
+cd knowbalance
+bun install --frozen-lockfile
+bun run role-d:dev -- --host 127.0.0.1 --port 5174
+```
+
+Open `http://127.0.0.1:5174/` in a browser. The page itself opens without Docker or a model key. With no `.env.role-c.local`, generation uses the deterministic local reference path. To reproduce the model-backed path, copy `.env.role-c.example` to `.env.role-c.local`, fill the model endpoint/model/key, build the Role C Docker image, and restart the same command. `.env.role-c.local` is ignored and must never be committed.
+
+The local Vite middleware exposes `/api/role-c/generate` and `/api/role-c/submit` for this demo. It is a development/integration harness, not a production backend; do not expose it publicly or use it as a substitute for C's persistent service.
+
 Repository tests use `bun test --isolate ./tests` so Role C's schema and frozen-fixture tests run in separate globals on Windows/Bun.
 
 ## Current milestone boundary

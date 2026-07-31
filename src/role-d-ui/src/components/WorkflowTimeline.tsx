@@ -1,5 +1,6 @@
 import { Bot, Check, Clock3, LoaderCircle, ShieldAlert } from "lucide-react"
 import type { WorkflowEventView } from "../domain/types"
+import { arrangeWorkflowForDisplay } from "../domain/workflow-display"
 
 interface WorkflowTimelineProps {
   events: WorkflowEventView[]
@@ -17,6 +18,7 @@ const statusIcon = {
 
 export function WorkflowTimeline({ events, localExecution = false, includesRoleC = false }: WorkflowTimelineProps) {
   const finished = events.filter((event) => event.status === "completed" || event.status === "review").length
+  const displayEvents = arrangeWorkflowForDisplay(events)
   return (
     <section className="panel workflow-panel" aria-labelledby="workflow-title">
       <div className="panel-heading">
@@ -24,13 +26,13 @@ export function WorkflowTimeline({ events, localExecution = false, includesRoleC
         <span className="status-summary"><i /> {finished}/{events.length} 已流转</span>
       </div>
       <div className="workflow-list">
-        {events.map((event, index) => {
+        {displayEvents.map((event, index) => {
           const Icon = statusIcon[event.status]
           return (
             <article className={`workflow-item status-${event.status}`} key={event.id}>
               <div className="workflow-rail">
                 <span className="workflow-node"><Icon size={14} /></span>
-                {index < events.length - 1 && <span className="workflow-line" />}
+                {index < displayEvents.length - 1 && <span className="workflow-line" />}
               </div>
               <div className="workflow-copy">
                 <div><strong>{event.stage}</strong><span className="agent-name"><Bot size={12} />{event.agent}</span></div>

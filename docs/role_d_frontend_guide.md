@@ -139,6 +139,29 @@ bun run role-d:build
 bun audit
 ```
 
+## 给 B/C 的共享运行步骤
+
+从 GitHub 新克隆后，直接运行：
+
+```bash
+git clone https://github.com/jiangdongouyang-lab/knowbalance.git
+cd knowbalance
+bun install --frozen-lockfile
+bun run role-d:dev -- --host 127.0.0.1 --port 5174
+```
+
+然后打开 `http://127.0.0.1:5174/`。网页壳本身不依赖 API Key 或 Docker；没有 `.env.role-c.local` 时，生成接口使用确定性本地参考路径。B/C 可以先调试页面、输入、诊断、画像、路径和状态展示；创建计划仍会同步调用本地生成接口，非金标目标可能被如实 blocked。
+
+如果要复现模型 Provider + Docker Runner，再执行：
+
+```bash
+copy .env.role-c.example .env.role-c.local
+```
+
+填写 `.env.role-c.local` 中的 `ROLE_C_MODEL_ENDPOINT`、`ROLE_C_MODEL_ID` 和本机 API Key；安装并启动 Docker 后运行 `bun run docker:role-c:build`、`bun run docker:role-c:doctor`，再重启 Vite。不要提交 `.env.role-c.local`。
+
+请把运行环境、Provider 模式、runId 和页面显示的终局 reason 一并发给 D/C；“本地确定性参考路径”与“模型 Provider + Docker”不是同一条验收证据。
+
 生产构建位于 `dist/role-d-ui/`。当前 Vite 开发/预览服务提供 `/api/role-c/generate` 与 `/api/role-c/submit`；部署纯静态 `dist` 时需要由 C/后端部署等价 API、可信 runner 和持久化存储，不能把 C 的安全逻辑打包进浏览器。
 
 ## 主要目录
