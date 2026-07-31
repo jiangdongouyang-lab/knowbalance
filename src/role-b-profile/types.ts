@@ -70,10 +70,11 @@ export interface ConceptProvenance {
 }
 
 // 自评与客观证据的冲突记录：不静默消化，交给 D 展示
+// 字段名对齐统一 IO 契约（src/contracts/unified/）的 ProfileConflictView
 export interface ProfileConflict {
   concept: string
-  self_claim: "known" | "weak"
-  objective_verdict: DiagnosisVerdict
+  selfClaim: "known" | "weak"
+  objectiveVerdict: DiagnosisVerdict
   resolution: "known" | "weak"
   rule: string
 }

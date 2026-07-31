@@ -171,7 +171,7 @@ ${ENVELOPE_RULES(
     },
     "provenance": {
       "level": { "value": "beginner", "source": "objective_cap | objective_promotion | self_rating | default", "rule": "string" },
-      "conflicts": [{ "concept": "string", "self_claim": "known | weak", "objective_verdict": "correct | incorrect", "resolution": "known | weak", "rule": "string" }],
+      "conflicts": [{ "concept": "string", "selfClaim": "known | weak", "objectiveVerdict": "correct | incorrect", "resolution": "known | weak", "rule": "string" }],
       "unmapped_concepts": ["string"]
     },
     "rag_request": {
