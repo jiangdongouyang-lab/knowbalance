@@ -111,8 +111,8 @@ describe("profile synthesizer", () => {
     expect(synthesis.provenance.conflicts).toHaveLength(1)
     expect(synthesis.provenance.conflicts[0]).toMatchObject({
       concept: "循环",
-      self_claim: "known",
-      objective_verdict: "incorrect",
+      selfClaim: "known",
+      objectiveVerdict: "incorrect",
       resolution: "weak",
     })
   })
@@ -157,8 +157,8 @@ describe("profile synthesizer", () => {
     expect(synthesis.profile.weak_concepts).not.toContain("循环")
     expect(synthesis.provenance.conflicts).toContainEqual(expect.objectContaining({
       concept: "for 循环",
-      self_claim: "weak",
-      objective_verdict: "correct",
+      selfClaim: "weak",
+      objectiveVerdict: "correct",
       resolution: "known",
     }))
   })
@@ -374,8 +374,34 @@ describe("role-B worker prompt contract", () => {
 })
 
 describe("role-B profile demo", () => {
-  test("demo script runs end-to-end and emits the B→A handoff JSON", async () => {
+  test("demo script runs end-to-end and emits unified IO contract handoff JSON", async () => {
     const proc = Bun.spawn(["bun", "src/role-b-profile/profile-demo.ts"], { stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+      proc.exited,
+    ])
+
+    expect(stderr).toBe("")
+    expect(exitCode).toBe(0)
+
+    const output = JSON.parse(stdout)
+
+    // 统一契约格式验证
+    expect(output.boundary).toBe("A_B_C_D_FULL_HANDOFF")
+    expect(output.schemaVersion).toBe("1.0")
+    expect(output.handoff.profile.learnerId).toBe("demo_loop_weak_001")
+    expect(output.handoff.conflicts.length).toBeGreaterThan(0)
+    expect(output.handoff.retrieval.items.length).toBeGreaterThanOrEqual(3)
+
+    // 验证冲突字段已对齐 camelCase（统一契约规范）
+    const conflict = output.handoff.conflicts[0]
+    expect(conflict).toHaveProperty("selfClaim")
+    expect(conflict).toHaveProperty("objectiveVerdict")
+  })
+
+  test("demo script --raw emits legacy B→A handoff JSON for backward compatibility", async () => {
+    const proc = Bun.spawn(["bun", "src/role-b-profile/profile-demo.ts", "--raw"], { stdout: "pipe", stderr: "pipe" })
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(proc.stdout).text(),
       new Response(proc.stderr).text(),

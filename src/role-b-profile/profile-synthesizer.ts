@@ -119,8 +119,8 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
     if (selfSaysKnown && item.verdict === "incorrect") {
       conflicts.push({
         concept: canonical,
-        self_claim: "known",
-        objective_verdict: "incorrect",
+        selfClaim: "known",
+        objectiveVerdict: "incorrect",
         resolution: "weak",
         rule: "客观测试答错覆盖自评掌握（objective > self）",
       })
@@ -128,8 +128,8 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
     if (selfSaysWeak && item.verdict === "correct") {
       conflicts.push({
         concept: canonical,
-        self_claim: "weak",
-        objective_verdict: "correct",
+        selfClaim: "weak",
+        objectiveVerdict: "correct",
         resolution: "known",
         rule: "客观测试答对覆盖自评薄弱（objective > self）",
       })
