@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { loadKnowledgeBase } from "../src/knowledge/loader"
@@ -20,6 +20,7 @@ import {
   generateCodeLab,
   generateConceptLesson,
   ModelBackedRoleCContentProvider,
+  NodeDockerCommandExecutor,
   OpenCodeConceptContentProvider,
   PLATFORM_PYTHON_IMPORT_ALLOWLIST,
   ROLE_C_PROMPT_MANIFEST_VERSION,
@@ -49,7 +50,10 @@ const profile: LearnerProfile = {
   goal: "完成成绩统计实验",
 }
 
-async function buildContext(modelConfigHash = "deterministic-code-lab-reference-v1"): Promise<{
+async function buildContext(
+  modelConfigHash = "deterministic-code-lab-reference-v1",
+  targetTemplate: "average" | "passing-count" = "average",
+): Promise<{
   pack: RagEvidencePack
   spec: GenerationSpec
   request: CodeLabRequest
@@ -60,6 +64,11 @@ async function buildContext(modelConfigHash = "deterministic-code-lab-reference-
   const kb = await loadKnowledgeBase()
   const pack = adaptRagResult(rag, { kb_version: kb.version, rag_version: "rule-rag-0.1" })
   const rawPath = await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()
+  if (targetTemplate === "passing-count") {
+    rawPath.target_source_ids = ["K007", "K009", "K006"]
+    rawPath.prerequisite_source_ids = ["K002", "K003"]
+    rawPath.objectives[2].source_id = "K006"
+  }
   const path = defineLearningPathNode({
     node_id: rawPath.node_id,
     target_source_ids: rawPath.target_source_ids,
@@ -96,6 +105,26 @@ async function buildContext(modelConfigHash = "deterministic-code-lab-reference-
 }
 
 describe("role C phase-two trusted code-lab", () => {
+  test("builds the passing-count lab for the K007/K009/K006 target set", async () => {
+    const { request, provider } = await buildContext(
+      "deterministic-passing-count-reference-v1",
+      "passing-count",
+    )
+    const draft = await provider.generateCodeLab(request)
+
+    expect(validateCodeLabDraftStructure(request, draft).ok).toBe(true)
+    expect(draft.public_draft.payload).toMatchObject({
+      title: "成绩达标人数统计实验",
+      execution_contract: {
+        entry_point: "count_passing_scores",
+      },
+    })
+    expect(draft.secure_draft.payload.hidden_tests).toHaveLength(5)
+    expect(draft.secure_draft.payload.reference_solution).toContain(
+      "if score >= pass_mark:",
+    )
+  })
+
   test("publishes aligned public/secure artifacts only after independent execution", async () => {
     const { request, provider } = await buildContext()
     const pair = await generateCodeLab(request, provider, new TrustedCodeLabVerifier(new FixtureIsolatedRunner()))
@@ -114,6 +143,28 @@ describe("role C phase-two trusted code-lab", () => {
     expect(JSON.stringify(pair.public_artifact)).not.toContain("hidden_tests")
     expect(pair.secure_artifact.payload?.hidden_tests).toHaveLength(5)
     expect(pair.secure_artifact.payload?.mutation_variants).toHaveLength(4)
+  })
+
+  test("returns structured UNSUPPORTED_TARGET for a non-gold offline target set", async () => {
+    const { request, provider } = await buildContext()
+    const unsupported = structuredClone(request)
+    unsupported.generation_spec.targets[0]!.source_id = "K001"
+    unsupported.generation_spec.targets[1]!.source_id = "K002"
+    unsupported.generation_spec.targets[2]!.source_id = "K003"
+
+    const pair = await generateCodeLab(
+      unsupported,
+      provider,
+      new TrustedCodeLabVerifier(new FixtureIsolatedRunner()),
+    )
+
+    expect(pair.public_artifact.status).toBe("blocked")
+    expect(pair.public_artifact.blocked_reason).toMatchObject({
+      code: "UNSUPPORTED_TARGET",
+      details: ["target_source_ids=K001,K002,K003"],
+    })
+    expect(pair.public_artifact.payload).toBeNull()
+    expect(pair.secure_artifact.payload).toBeNull()
   })
 
   test("the mixed hidden case distinguishes a skipped final element", async () => {
@@ -165,6 +216,32 @@ describe("role C phase-two trusted code-lab", () => {
     expect(pair.public_artifact.blocked_reason?.code).toBe("BLOCKED_INVALID_OUTPUT")
   })
 
+  test("snapshots provider output before an asynchronous verifier can mutate it", async () => {
+    const { request, provider } = await buildContext()
+    const providerDraft = await provider.generateCodeLab(request)
+    const originalReference =
+      providerDraft.secure_draft.payload.reference_solution
+    provider.generateCodeLab = async () => providerDraft
+
+    const pair = await generateCodeLab(request, provider, {
+      async verifyCodeLab(_request, verifierDraft) {
+        verifierDraft.secure_draft.payload.reference_solution =
+          "MUTATED_BY_VERIFIER"
+        return {
+          execution_verified: true,
+          runner_image_digest: RUNNER_DIGEST,
+          issues: [],
+        }
+      },
+    })
+    providerDraft.secure_draft.payload.reference_solution =
+      "MUTATED_BY_PROVIDER_AFTER_RETURN"
+
+    expect(pair.secure_artifact.status).toBe("ready")
+    expect(pair.secure_artifact.payload?.reference_solution)
+      .toBe(originalReference)
+  })
+
   test("blocks ungrounded claims and value-level reference leaks before runner execution", async () => {
     const { request, provider } = await buildContext()
     const draft = await provider.generateCodeLab(request)
@@ -193,6 +270,54 @@ describe("role C phase-two trusted code-lab", () => {
     if ("text" in instruction) instruction.text = escapedMultilineLeak.secure_draft.payload.reference_solution
     const multilineReport = validateCodeLabDraftStructure(request, escapedMultilineLeak)
     expect(multilineReport.issues.some((entry) => entry.code === "reference_solution_leak")).toBe(true)
+
+    const hiddenInputLeak = structuredClone(draft)
+    hiddenInputLeak.public_draft.payload.public_tests[0]!.input =
+      structuredClone(hiddenInputLeak.secure_draft.payload.hidden_tests[0]!.input)
+    const hiddenInputReport =
+      validateCodeLabDraftStructure(request, hiddenInputLeak)
+    expect(hiddenInputReport.issues.some(
+      (entry) => entry.code === "hidden_test_input_leak",
+    )).toBe(true)
+
+    const splitReferenceLeak = structuredClone(draft)
+    const reference =
+      splitReferenceLeak.secure_draft.payload.reference_solution
+    const midpoint = Math.floor(reference.length / 2)
+    splitReferenceLeak.public_draft.payload.reflection_questions = [
+      reference.slice(0, midpoint),
+      reference.slice(midpoint),
+    ]
+    const splitReferenceReport =
+      validateCodeLabDraftStructure(request, splitReferenceLeak)
+    expect(splitReferenceReport.issues.some(
+      (entry) => entry.code === "reference_solution_leak",
+    )).toBe(true)
+
+    const reversedReferenceLeak = structuredClone(draft)
+    reversedReferenceLeak.public_draft.payload.reflection_questions = [
+      `第 2 段：${reference.slice(midpoint)}`,
+      `第 1 段：${reference.slice(0, midpoint)}`,
+    ]
+    const reversedReferenceReport =
+      validateCodeLabDraftStructure(request, reversedReferenceLeak)
+    expect(reversedReferenceReport.issues.some(
+      (entry) => entry.code === "reference_solution_leak",
+    )).toBe(true)
+
+    const semanticHiddenInputLeak = structuredClone(draft)
+    semanticHiddenInputLeak.secure_draft.payload.hidden_tests[0]!.input =
+      [10, 20, 30, 40]
+    semanticHiddenInputLeak.secure_draft.payload.hidden_tests[0]!.expected =
+      25
+    semanticHiddenInputLeak.public_draft.payload.reflection_questions = [
+      "隐藏用例会依次使用 10、20、30、40，输出应为 25。",
+    ]
+    const semanticHiddenInputReport =
+      validateCodeLabDraftStructure(request, semanticHiddenInputLeak)
+    expect(semanticHiddenInputReport.issues.some(
+      (entry) => entry.code === "hidden_test_input_leak",
+    )).toBe(true)
   })
 
   test("blocks a reference failure, a solved starter, or weak mutation tests", async () => {
@@ -202,6 +327,7 @@ describe("role C phase-two trusted code-lab", () => {
       const pair = await generateCodeLab(request, provider, new TrustedCodeLabVerifier(new FixtureIsolatedRunner(mode)))
       expect(pair.public_artifact.status).toBe("blocked")
       expect(pair.public_artifact.blocked_reason?.code).toBe("BLOCKED_EXECUTION_UNVERIFIED")
+      expect(JSON.stringify(pair.public_artifact)).not.toContain("HT-")
     }
   })
 
@@ -371,6 +497,61 @@ describe("role C Docker runner boundary", () => {
     })
     expect(result.output_truncated).toBe(true)
     expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(512)
+  })
+
+  test("provides the same bounded command boundary to Node-hosted backends", async () => {
+    const executor = new NodeDockerCommandExecutor()
+    const result = await executor.run({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write('x'.repeat(10000))"],
+      stdin: "",
+      timeout_ms: 2_000,
+      max_output_bytes: 512,
+    })
+    expect(result.output_truncated).toBe(true)
+    expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr))
+      .toBeLessThanOrEqual(512)
+
+    const timedOut = await executor.run({
+      command: process.execPath,
+      args: ["-e", "setInterval(() => {}, 1000)"],
+      stdin: "",
+      timeout_ms: 100,
+      max_output_bytes: 512,
+    })
+    expect(timedOut.timed_out).toBe(true)
+  })
+
+  test("retries forced Docker cleanup when container registration races command termination", async () => {
+    const temporary = await mkdtemp(join(tmpdir(), "role-c-cleanup-"))
+    const counter = join(temporary, "attempts")
+    const cleanupScript = [
+      "const fs = require('node:fs')",
+      `const path = ${JSON.stringify(counter)}`,
+      "let count = 0",
+      "try { count = Number(fs.readFileSync(path, 'utf8')) || 0 } catch {}",
+      "count += 1",
+      "fs.writeFileSync(path, String(count), 'utf8')",
+      "process.exit(count >= 3 ? 0 : 1)",
+    ].join(";")
+    try {
+      const result = await new NodeDockerCommandExecutor().run({
+        command: process.execPath,
+        args: ["-e", "setInterval(() => {}, 1000)"],
+        stdin: "",
+        timeout_ms: 100,
+        max_output_bytes: 512,
+        cleanup: {
+          command: process.execPath,
+          args: ["-e", cleanupScript],
+        },
+      })
+
+      expect(result.timed_out).toBe(true)
+      expect(await readFile(counter, "utf8")).toBe("3")
+    } finally {
+      await rm(temporary, { recursive: true, force: true })
+    }
   })
 
   test("keeps the known test count when Docker reports an infrastructure error", async () => {

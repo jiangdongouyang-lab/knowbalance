@@ -15,7 +15,9 @@
       "enum": [
         "learning_progress",
         "reviewed_release",
-        "dynamic_feedback"
+        "dynamic_feedback",
+        "review_recovery_status",
+        "learning_session"
       ]
     },
     "delivery_id": {

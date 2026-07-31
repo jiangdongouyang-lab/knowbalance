@@ -211,6 +211,20 @@ export class ModelProviderUnavailableError extends Error {
   }
 }
 
+/** The selected provider has a declared, deterministic target capability boundary. */
+export class UnsupportedTargetError extends ModelProviderUnavailableError {
+  readonly code = "UNSUPPORTED_TARGET" as const
+
+  constructor(
+    readonly agent: "concept-tutor" | "code-lab" | "tiered-evaluator",
+    readonly target_source_ids: string[],
+    message: string,
+  ) {
+    super(message)
+    this.name = "UnsupportedTargetError"
+  }
+}
+
 /** A model stage exhausted its bounded repair budget without satisfying its internal contract. */
 export class ModelOutputValidationError extends Error {
   constructor(

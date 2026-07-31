@@ -47,7 +47,7 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 
 要求：
 1. lab_id、test_suite_id 与 execution_contract 必须原样返回。
-2. reference_solution 必须实现公开合同；hidden_tests 至少覆盖常规与边界输入。
+2. reference_solution 必须实现公开合同；hidden_tests 至少覆盖常规与边界输入。每个 hidden_tests.input 必须与 public_payload.public_tests 中的全部 input 结构化不同，使用公开材料中未出现的新值并同步计算 expected。
 3. 每个 core objective 都要有 hidden test、scoring group 和可被指定测试杀死的 mutation。
 4. hidden test 与 scoring group 权重分别合计为 1；每个隐藏测试只属于一个评分组并有 misconception 映射。
 5. reference 与 mutation 不得出现双下划线标识符、动态执行/内省/文件或进程能力；import 只能来自 execution_contract.allowed_imports。
@@ -79,7 +79,7 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 1. form_id、option_order_seed 和每个 secure item 的 item_id/objective_id/tier/modality/max_score 必须与冻结合同一致。
 2. 选择/判断题用稳定 option_id 指定 correct_option_id；answer_spec 只能接受该 ID，每个错误选项必须有具体 misconception。
 3. trace/short_answer 使用可确定验证的 exact、numeric 或 concept_rubric；rubric 权重合计为 1。
-4. code 题必须有且只有一个对应 code_test_suite，reference 与隐藏测试遵守公开 starter 所定义的任务合同。
+4. code 题必须有且只有一个对应 code_test_suite，reference 与隐藏测试遵守公开 starter 所定义的任务合同；每个隐藏输入必须与公开题干、示例和 starter 中出现的输入值不同，并同步计算 expected。
 5. code suite 的 reference 不得出现双下划线标识符、动态执行/内省/文件或进程能力；import 只能来自 execution_contract.allowed_imports。
 6. 不得把私有答案或测试材料复制到任何公开字段，不得声称已经验证。
 7. ${JSON_ONLY}`
@@ -88,5 +88,7 @@ export function stagedRepairPrompt(basePrompt: string, issues: string[]): string
   return `${basePrompt}
 
 上一次本阶段输出未通过校验。保持冻结合同不变，只修复以下失败项：
-${issues.map((issue, index) => `${index + 1}. ${issue}`).join("\n")}`
+${issues.map((issue, index) => `${index + 1}. ${issue}`).join("\n")}
+
+若失败项包含隐藏测试输入泄漏：重新设计所有重复的 hidden_tests.input，逐一与冻结 public payload 核对，改用公开内容中从未出现的新输入，并同步重算对应 expected；不得删除或改写 public payload。`
 }

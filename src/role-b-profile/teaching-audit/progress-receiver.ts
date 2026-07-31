@@ -9,7 +9,12 @@
 //   5. 递增 profile_version
 import type { KnowledgeDifficulty } from "../../knowledge/types"
 import type { LearnerProfile } from "../types"
-import type { ReceiveProgressInput, ReceiveProgressResult } from "./types"
+import type {
+  ApplyProgressObservationInput,
+  ProgressObservation,
+  ReceiveProgressInput,
+  ReceiveProgressResult,
+} from "./types"
 import type { LearnerProfileSnapshot } from "../../role-c-content/contracts/profile-adapter"
 
 const LEVEL_ORDER: KnowledgeDifficulty[] = ["beginner", "basic", "intermediate", "integrated"]
@@ -19,7 +24,30 @@ const LEVEL_UP_MASTERY = 0.8      // 全部 mastery ≥ 0.8 → 升级
 
 export function receiveLearningProgress(input: ReceiveProgressInput): ReceiveProgressResult {
   const { feedback, currentProfile, profileVersion } = input
+  return applyProgressObservation({
+    currentProfile,
+    profileVersion,
+    observation: {
+      observationId: feedback.feedback_id,
+      action: feedback.final_decision.action,
+      overallAccuracy: feedback.round_score.accuracy,
+      mastery: feedback.mastery_snapshot.map((snapshot) => ({
+        objectiveId: snapshot.objective_id,
+        mastery: snapshot.mastery,
+        evidenceBatches: snapshot.evidence_batches,
+      })),
+      // DynamicFeedbackResult 没有 objective_id 到 source_id 的映射，不能据此改写概念列表。
+      conceptEvidence: [],
+    },
+  })
+}
 
+/** 将不同来源的进展统一应用到 B 持有的画像。 */
+export function applyProgressObservation(
+  input: ApplyProgressObservationInput,
+): ReceiveProgressResult {
+  const { observation, currentProfile, profileVersion } = input
+  assertObservation(observation, profileVersion)
   const newProfile: LearnerProfile = {
     ...currentProfile,
     learner_id: currentProfile.learner_id,
@@ -32,42 +60,49 @@ export function receiveLearningProgress(input: ReceiveProgressInput): ReceivePro
   const weakAdded: string[] = []
   const weakCleared: string[] = []
 
-  // 1. 从 mastery_snapshot 中提取每个 objective 的掌握情况
-  //    注意：mastery_snapshot 的 objective_id 不一定直接对应概念名
-  //    我们通过 objective_results 中的 objective_id 来和 profile 关联
-  for (const snapshot of feedback.mastery_snapshot) {
-    // 如果有 objective_results 可以映射到具体概念
-    const objResult = feedback.objective_results.find((r) => r.objective_id === snapshot.objective_id)
-    if (!objResult) continue
+  for (const evidence of observation.conceptEvidence) {
+    const matches = (profileConcept: string) =>
+      input.conceptMatches?.(profileConcept, evidence)
+        ?? profileConcept.trim().toLowerCase() === evidence.concept.trim().toLowerCase()
 
-    // 达到 mastery 阈值 → 加入 known
-    if (snapshot.mastery >= MASTERY_THRESHOLD) {
-      // 尝试从客观结果中找到对应的概念名
-      // 但 feedback 中没有直接的概念名映射，我们只能标记 "mastered"
-      // 实际概念映射需要 knowledgeBase，这里我们只做结构标记
+    if (evidence.evidenceScore >= MASTERY_THRESHOLD) {
+      const wasKnown = newProfile.known_concepts.some(matches)
+      const clearedWeak = newProfile.weak_concepts.filter(matches)
+      newProfile.weak_concepts = newProfile.weak_concepts.filter((concept) => !matches(concept))
+      weakCleared.push(...clearedWeak)
+      if (!wasKnown) {
+        newProfile.known_concepts.push(evidence.concept)
+        if (clearedWeak.length > 0) {
+          knownPromotedFromWeak.push(evidence.concept)
+        } else {
+          knownAdded.push(evidence.concept)
+        }
+      }
+      continue
     }
 
-    // 持续薄弱 → 在 weak 列表中标记
-    if (snapshot.mastery <= WEAK_THRESHOLD && snapshot.evidence_batches >= 1) {
-      // 薄弱但未标记
+    if (evidence.evidenceScore <= WEAK_THRESHOLD && evidence.evidenceBatches >= 1) {
+      newProfile.known_concepts = newProfile.known_concepts.filter((concept) => !matches(concept))
+      if (!newProfile.weak_concepts.some(matches)) {
+        newProfile.weak_concepts.push(evidence.concept)
+        weakAdded.push(evidence.concept)
+      }
     }
   }
 
-  // 2. 从 final_decision 中提取动作
-  //    "reprofile" → 需要重新画像
-  //    "remediate" → 薄弱环节需要强化
-  //    "reinforce" → 巩固
-  //    "advance" → 可以进阶
-  const action = feedback.final_decision.action
-
-  // 3. 根据 round_score 调整 level
-  const overallAccuracy = feedback.round_score.accuracy
+  const overallAccuracy = observation.overallAccuracy
   const oldLevel = currentProfile.level
   let newLevel = oldLevel
 
-  // 如果全部掌握度高且决策是 advance，考虑升级
-  const allMastered = feedback.mastery_snapshot.every((s) => s.mastery >= MASTERY_THRESHOLD)
-  if (action === "advance" && allMastered && overallAccuracy >= LEVEL_UP_MASTERY) {
+  // 事件批次没有轮次总分分母，不据此调整 level；完整动态反馈仍按原规则处理。
+  const allMastered = observation.mastery.length > 0
+    && observation.mastery.every((snapshot) => snapshot.mastery >= MASTERY_THRESHOLD)
+  if (
+    observation.action === "advance"
+    && allMastered
+    && overallAccuracy !== null
+    && overallAccuracy >= LEVEL_UP_MASTERY
+  ) {
     const currentIdx = LEVEL_ORDER.indexOf(oldLevel)
     if (currentIdx < LEVEL_ORDER.length - 1) {
       newLevel = LEVEL_ORDER[currentIdx + 1]
@@ -75,7 +110,11 @@ export function receiveLearningProgress(input: ReceiveProgressInput): ReceivePro
   }
 
   // 如果 decision 是 remediate 且 accuracy 很低，考虑降级
-  if (action === "remediate" && overallAccuracy < WEAK_THRESHOLD) {
+  if (
+    observation.action === "remediate"
+    && overallAccuracy !== null
+    && overallAccuracy < WEAK_THRESHOLD
+  ) {
     const currentIdx = LEVEL_ORDER.indexOf(oldLevel)
     if (currentIdx > 0) {
       newLevel = LEVEL_ORDER[currentIdx - 1]
@@ -84,23 +123,6 @@ export function receiveLearningProgress(input: ReceiveProgressInput): ReceivePro
 
   newProfile.level = newLevel
 
-  // 4. 从 objective_results 中提取薄弱点信息
-  for (const result of feedback.objective_results) {
-    if (result.accuracy >= MASTERY_THRESHOLD && result.evidence_score >= 0.6) {
-      // 该 objective 已掌握——标记为可以加入 known
-      // 注意：objective_id 不一定直接映射到概念名，这是 C→B 协议的已知限制
-      // 短期内我们通过概念规范化解决（见 canonicalizeConcept）
-    }
-  }
-
-  // 5. 通过 profile_drift_suggestion 更新画像
-  if (feedback.profile_drift_suggestion) {
-    const drift = feedback.profile_drift_suggestion
-    // 如果 C 检测到画像漂移（实际表现与画像不符），应用建议
-    // 当前协议支持标记 conflicting_objective_ids，但具体概念更新仍需 knowledgeBase
-  }
-
-  // 6. 构建快照
   const snapshot: LearnerProfileSnapshot = {
     schema_version: "1.0",
     profile_id: `PROFILE-${currentProfile.learner_id}-${profileVersion}`,
@@ -112,7 +134,7 @@ export function receiveLearningProgress(input: ReceiveProgressInput): ReceivePro
     goal: newProfile.goal,
     preferred_contexts: [],
     accommodations: [],
-    provenance_ref: `role-b:receive-progress:${feedback.feedback_id}`,
+    provenance_ref: `role-b:receive-progress:${observation.observationId}`,
   }
 
   return {
@@ -127,5 +149,41 @@ export function receiveLearningProgress(input: ReceiveProgressInput): ReceivePro
       weakAdded,
       weakCleared,
     },
+  }
+}
+
+function assertObservation(observation: ProgressObservation, profileVersion: string): void {
+  if (observation.observationId.trim() === "" || profileVersion.trim() === "") {
+    throw new Error("ROLE_B_PROGRESS_OBSERVATION_IDENTITY_EMPTY")
+  }
+  if (
+    observation.overallAccuracy !== null
+    && (
+      !Number.isFinite(observation.overallAccuracy)
+      || observation.overallAccuracy < 0
+      || observation.overallAccuracy > 1
+    )
+  ) {
+    throw new Error("ROLE_B_PROGRESS_OBSERVATION_ACCURACY_INVALID")
+  }
+  if (observation.mastery.some((entry) =>
+    !Number.isFinite(entry.mastery)
+      || entry.mastery < 0
+      || entry.mastery > 1
+      || !Number.isInteger(entry.evidenceBatches)
+      || entry.evidenceBatches < 0
+  )) {
+    throw new Error("ROLE_B_PROGRESS_OBSERVATION_MASTERY_INVALID")
+  }
+  if (observation.conceptEvidence.some((entry) =>
+    entry.sourceId.trim() === ""
+      || entry.concept.trim() === ""
+      || !Number.isFinite(entry.evidenceScore)
+      || entry.evidenceScore < 0
+      || entry.evidenceScore > 1
+      || !Number.isInteger(entry.evidenceBatches)
+      || entry.evidenceBatches < 1
+  )) {
+    throw new Error("ROLE_B_PROGRESS_OBSERVATION_CONCEPT_INVALID")
   }
 }

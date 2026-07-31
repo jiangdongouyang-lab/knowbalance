@@ -165,7 +165,8 @@ await cycleService.registerReadyRun({
   profile_snapshot: snapshot,
   learner_id_hash: submission.learner_id_hash,
 })
-const session = await cycleService.openSession({
+const session = await cycleService.openTrustedPreselectedSession({
+  routing_policy: "trusted_preselected_v1",
   session_id: "SESSION-C-FULL-DEMO",
   run_id: built.spec.run_id,
   authenticated_learner_id_hash: submission.learner_id_hash,

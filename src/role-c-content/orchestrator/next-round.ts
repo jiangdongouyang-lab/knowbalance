@@ -54,6 +54,11 @@ export interface PrepareNextRoundInput {
   /** Optional newer upstream profile for the next path node. */
   next_profile_snapshot?: LearnerProfileSnapshot
   /**
+   * Explicit teaching action selected upstream after a reprofile decision.
+   * Required when the updated profile/path/evidence triplet is supplied.
+   */
+  next_generation_action?: Exclude<NextRoundAction, "reprofile">
+  /**
    * Generation runtime selected for this follow-up. When omitted, versions
    * are inherited from the parent spec.
    */
@@ -79,11 +84,15 @@ interface NextRoundIdentity {
   next_path_hash?: string
   next_profile_hash?: string
   next_evidence_hash?: string
+  next_generation_action?: Exclude<NextRoundAction, "reprofile">
 }
 
 export interface GenerationReadyNextRound {
   status: "generation_ready"
-  action: Exclude<NextRoundAction, "reprofile">
+  /** Decision that caused B to prepare this follow-up. */
+  action: NextRoundAction
+  /** Content adaptation applied by C after any B-side reprofile step. */
+  generation_action: Exclude<NextRoundAction, "reprofile">
   request_id: string
   idempotency_key: string
   parent_spec_id: string
@@ -97,6 +106,11 @@ export interface GenerationReadyNextRound {
   trigger_decision: DynamicFeedbackResult["final_decision"]
   /** Cryptographic fingerprint of the complete profile used to build the spec. */
   profile_content_hash: string
+  /**
+   * Backend-only frozen snapshot used to register the generated run.
+   * Do not expose GenerationReadyNextRound through a learner-facing API.
+   */
+  profile_snapshot: LearnerProfileSnapshot
   generation_spec: GenerationSpec
   evidence_pack: RagEvidencePack
 }
@@ -171,6 +185,13 @@ export interface NextRoundExecutionJournalEntry {
   result: ReviewedCPipelineResult
 }
 
+export interface ReviewedPipelineInputExecutionIdentity {
+  /** Stable orchestration namespace, for example next_round_recovery. */
+  execution_scope: string
+  /** Stable identity of the parent orchestration request. */
+  orchestration_idempotency_key: string
+}
+
 /**
  * Successful-result journal. commitSuccessful must atomically create the
  * record or return the record already stored for the same execution key.
@@ -225,9 +246,21 @@ export function prepareNextRound(input: PrepareNextRoundInput): NextRoundPrepara
   }
 
   if (action === "reprofile") {
-    if (input.next_path_node || input.next_evidence_pack || input.next_profile_snapshot) {
+    const hasUpdatedGenerationState = Boolean(
+      input.next_path_node
+        || input.next_evidence_pack
+        || input.next_generation_action,
+    )
+    if (hasUpdatedGenerationState && (!input.next_path_node
+      || !input.next_evidence_pack
+      || !input.next_profile_snapshot)) {
       return blocked(action, baseRequest, "INVALID_ADVANCE_INPUT", [
-        "reprofile 只发送画像刷新建议，不能携带下一节点、下一证据或下一画像",
+        "reprofile 继续生成时必须同时提供 B 的新版画像、路径节点和 A 的对应证据",
+      ])
+    }
+    if (hasUpdatedGenerationState && !input.next_generation_action) {
+      return blocked(action, baseRequest, "INVALID_ADVANCE_INPUT", [
+        "reprofile 继续生成时必须由上游明确提供 next_generation_action",
       ])
     }
     const suggestion = input.feedback.profile_drift_suggestion
@@ -239,6 +272,46 @@ export function prepareNextRound(input: PrepareNextRoundInput): NextRoundPrepara
     const suggestionIssues = validateDriftSuggestion(input, suggestion)
     if (suggestionIssues.length > 0) {
       return blocked(action, baseRequest, "MISSING_PROFILE_DRIFT", suggestionIssues)
+    }
+    if (hasUpdatedGenerationState) {
+      const updatedStateIssues = validateUpdatedState(
+        input,
+        input.next_profile_snapshot!,
+        input.next_evidence_pack!,
+        "reprofile",
+      )
+      if (updatedStateIssues.length > 0) {
+        return blocked(
+          action,
+          baseRequest,
+          "INVALID_ADVANCE_INPUT",
+          updatedStateIssues,
+        )
+      }
+      const readyIdentity: NextRoundIdentity = {
+        ...baseIdentity,
+        next_path_node_id: input.next_path_node!.node_id,
+        next_profile_version: input.next_profile_snapshot!.profile_version,
+        next_evidence_ref: input.next_evidence_pack!.retrieval_id,
+        next_path_hash: contentHash(input.next_path_node),
+        next_profile_hash: contentHash(input.next_profile_snapshot),
+        next_evidence_hash: contentHash(input.next_evidence_pack),
+        next_generation_action: input.next_generation_action!,
+      }
+      return buildReadyNextRound({
+        input,
+        action,
+        generation_action: input.next_generation_action!,
+        identity: readyIdentity,
+        profile: input.next_profile_snapshot!,
+        path: input.next_path_node!,
+        evidence: input.next_evidence_pack!,
+        difficulty: undefined,
+        adaptive_shell: undefined,
+        focus_objective_ids: input.next_path_node!.objectives.map(
+          (objective) => objective.objective_id,
+        ),
+      })
     }
     return {
       status: "reprofile_suggested",
@@ -271,19 +344,15 @@ export function prepareNextRound(input: PrepareNextRoundInput): NextRoundPrepara
       ])
     }
     const nextProfile = input.next_profile_snapshot ?? input.profile_snapshot
-    if (nextProfile.profile_id !== input.parent_spec.profile_ref.profile_id) {
+    const updatedStateIssues = validateUpdatedState(
+      input,
+      nextProfile,
+      input.next_evidence_pack!,
+      "advance",
+    )
+    if (updatedStateIssues.length > 0) {
       return blocked(action, baseRequest, "INVALID_ADVANCE_INPUT", [
-        "advance 的 next_profile_snapshot.profile_id 必须属于当前学习者画像",
-      ])
-    }
-    if (nextProfile.learner_id !== input.profile_snapshot.learner_id) {
-      return blocked(action, baseRequest, "INVALID_ADVANCE_INPUT", [
-        "advance 的 next_profile_snapshot.learner_id 必须与当前画像一致",
-      ])
-    }
-    if (input.next_evidence_pack!.learner_level !== nextProfile.level) {
-      return blocked(action, baseRequest, "INVALID_ADVANCE_INPUT", [
-        "advance 的 next_evidence_pack.learner_level 必须与下一轮画像 level 一致",
+        ...updatedStateIssues,
       ])
     }
     const readyIdentity: NextRoundIdentity = {
@@ -308,12 +377,50 @@ export function prepareNextRound(input: PrepareNextRoundInput): NextRoundPrepara
     })
   }
 
-  if (input.next_path_node || input.next_evidence_pack || input.next_profile_snapshot) {
+  if (input.next_path_node) {
     return blocked(action, baseRequest, "INVALID_ADVANCE_INPUT", [
-      `${action} 必须复用当前节点，不能携带下一节点、下一证据或下一画像`,
+      `${action} 必须复用当前节点，不能携带下一路径节点`,
+    ])
+  }
+  if (input.next_generation_action) {
+    return blocked(action, baseRequest, "INVALID_ADVANCE_INPUT", [
+      `${action} 已由冻结反馈确定，不能另行提供 next_generation_action`,
     ])
   }
 
+  const nextProfile = input.next_profile_snapshot ?? input.profile_snapshot
+  const nextEvidence = input.next_evidence_pack ?? input.current_evidence_pack
+  if (input.next_profile_snapshot || input.next_evidence_pack) {
+    const updatedStateIssues = validateUpdatedState(
+      input,
+      nextProfile,
+      nextEvidence,
+      action,
+    )
+    if (updatedStateIssues.length > 0) {
+      return blocked(
+        action,
+        baseRequest,
+        "INVALID_ADVANCE_INPUT",
+        updatedStateIssues,
+      )
+    }
+  }
+  const currentNodeIdentity: NextRoundIdentity = {
+    ...baseIdentity,
+    ...(input.next_profile_snapshot
+      ? {
+          next_profile_version: nextProfile.profile_version,
+          next_profile_hash: contentHash(nextProfile),
+        }
+      : {}),
+    ...(input.next_evidence_pack
+      ? {
+          next_evidence_ref: nextEvidence.retrieval_id,
+          next_evidence_hash: contentHash(nextEvidence),
+        }
+      : {}),
+  }
   const currentPath = pathFromSpec(input.parent_spec)
   const difficulty = action === "remediate"
     ? remedialDifficulty(input.parent_spec.difficulty)
@@ -330,10 +437,10 @@ export function prepareNextRound(input: PrepareNextRoundInput): NextRoundPrepara
   return buildReadyNextRound({
     input,
     action,
-    identity: baseIdentity,
-    profile: input.profile_snapshot,
+    identity: currentNodeIdentity,
+    profile: nextProfile,
     path: currentPath,
-    evidence: input.current_evidence_pack,
+    evidence: nextEvidence,
     difficulty,
     adaptive_shell: adaptiveShell,
     focus_objective_ids: input.feedback.final_decision.target_objective_ids,
@@ -351,10 +458,6 @@ export async function executePreparedNextRound(
   if (prepared.status !== "generation_ready") {
     throw new Error("NEXT_ROUND_NOT_READY")
   }
-  const executionConfig = normalizeExecutionConfig(dependencies)
-  const flight = dependencies.single_flight ?? defaultNextRoundSingleFlight
-  const journal = dependencies.execution_journal ?? defaultNextRoundExecutionJournal
-  const pipelineRunner = dependencies.reviewed_pipeline_runner ?? runReviewedCPipeline
   const frozenInput = freezePipelineInput({
     generation_spec: prepared.generation_spec,
     evidence_pack: prepared.evidence_pack,
@@ -372,14 +475,42 @@ export async function executePreparedNextRound(
   if (prepared.idempotency_key !== expectedPreparedKey) {
     throw new Error("NEXT_ROUND_PREPARED_IDENTITY_MISMATCH")
   }
+  return executeReviewedPipelineInput(
+    frozenInput,
+    {
+      execution_scope: "next_round",
+      orchestration_idempotency_key: prepared.idempotency_key,
+    },
+    dependencies,
+  )
+}
+
+/**
+ * Durable, single-flight execution for one exact reviewed Role C input.
+ * Recovery orchestration uses this boundary for each immutable candidate spec,
+ * so retries reuse the winning secure pair instead of producing orphan copies.
+ */
+export async function executeReviewedPipelineInput(
+  pipelineInput: CPipelineInput,
+  identity: ReviewedPipelineInputExecutionIdentity,
+  dependencies: NextRoundExecutionDependencies,
+): Promise<ReviewedCPipelineResult> {
+  if (!identity.execution_scope.trim()
+    || !identity.orchestration_idempotency_key.trim()) {
+    throw new Error("REVIEWED_PIPELINE_EXECUTION_IDENTITY_INVALID")
+  }
+  const executionConfig = normalizeExecutionConfig(dependencies)
+  const flight = dependencies.single_flight ?? defaultNextRoundSingleFlight
+  const journal = dependencies.execution_journal
+    ?? defaultNextRoundExecutionJournal
+  const pipelineRunner = dependencies.reviewed_pipeline_runner
+    ?? runReviewedCPipeline
+  const frozenInput = freezePipelineInput(pipelineInput)
   const executionKey = contentHash({
-    contract: "role-c-next-round-reviewed-execution-v3",
-    prepared_idempotency_key: prepared.idempotency_key,
+    contract: "role-c-reviewed-input-execution-v1",
+    execution_scope: identity.execution_scope,
+    orchestration_idempotency_key: identity.orchestration_idempotency_key,
     input: frozenInput,
-    feedback_id: prepared.prior_feedback_ref,
-    decision: frozenDecision,
-    profile_content_hash: prepared.profile_content_hash,
-    evidence_content_hash: contentHash(frozenInput.evidence_pack),
     max_external_revisions: executionConfig.max_external_revisions,
     trace_seq_start: executionConfig.trace_seq_start,
     review_policy_version: executionConfig.review_policy_version,
@@ -661,6 +792,17 @@ async function assertSecurePairResolvable(
   }
 }
 
+/**
+ * Revalidates the private artifact pair before a persisted READY checkpoint is
+ * activated or replayed.
+ */
+export async function assertNextRoundSecureArtifactsResolvable(
+  result: ReviewedCPipelineResult,
+  secureStore: SecureArtifactStore,
+): Promise<void> {
+  await assertSecurePairResolvable(result, secureStore)
+}
+
 async function deleteGeneratedSecureBatch(
   result: ReviewedCPipelineResult,
   secureStore: SecureArtifactStore,
@@ -755,6 +897,7 @@ implements NextRoundExecutionJournal {
 function buildReadyNextRound(input: {
   input: PrepareNextRoundInput
   action: GenerationReadyNextRound["action"]
+  generation_action?: GenerationReadyNextRound["generation_action"]
   identity: NextRoundIdentity
   profile: LearnerProfileSnapshot
   path: LearningPathNode
@@ -782,6 +925,11 @@ function buildReadyNextRound(input: {
   }
   const triggerDecision = deepFreeze(structuredClone(input.input.feedback.final_decision))
   const profileContentHash = contentHash(input.profile)
+  const generationAction = input.generation_action
+    ?? (input.action === "reprofile" ? undefined : input.action)
+  if (!generationAction) {
+    throw new Error("NEXT_ROUND_REPROFILE_GENERATION_ACTION_REQUIRED")
+  }
   const frozenInput = freezePipelineInput({
     generation_spec: built.spec,
     evidence_pack: input.evidence,
@@ -790,7 +938,7 @@ function buildReadyNextRound(input: {
       parent_spec_id: input.input.parent_spec.spec_id,
       prior_feedback_ref: input.input.feedback.feedback_id,
       trigger_grade_artifact_id: input.input.feedback.grade_result.artifact_id,
-      action: input.action,
+      action: generationAction,
       focus_objective_ids: [...input.focus_objective_ids],
       reason_codes: [...input.input.feedback.final_decision.reason_codes],
     },
@@ -806,6 +954,7 @@ function buildReadyNextRound(input: {
   return {
     status: "generation_ready",
     action: input.action,
+    generation_action: generationAction,
     request_id: identity.request_id,
     idempotency_key: idempotencyKey,
     parent_spec_id: input.input.parent_spec.spec_id,
@@ -815,6 +964,7 @@ function buildReadyNextRound(input: {
     focus_objective_ids: [...input.focus_objective_ids],
     trigger_decision: triggerDecision,
     profile_content_hash: profileContentHash,
+    profile_snapshot: deepFreeze(structuredClone(input.profile)),
     generation_spec: frozenInput.generation_spec,
     evidence_pack: frozenInput.evidence_pack,
   }
@@ -828,7 +978,7 @@ function nextRoundContext(
     parent_spec_id: prepared.parent_spec_id,
     prior_feedback_ref: prepared.prior_feedback_ref,
     trigger_grade_artifact_id: prepared.trigger_grade_artifact_id,
-    action: prepared.action,
+    action: prepared.generation_action,
     focus_objective_ids: [...prepared.focus_objective_ids],
     reason_codes: [...prepared.trigger_decision.reason_codes],
   }
@@ -1047,6 +1197,38 @@ function validateCurrentInputs(input: PrepareNextRoundInput): string[] {
   }
   if (evidence.kb_version !== spec.versions.kb_version) issues.push("current_evidence_pack.kb_version 与 parent_spec 不一致")
   if (evidence.rag_version !== spec.versions.rag_version) issues.push("current_evidence_pack.rag_version 与 parent_spec 不一致")
+  return issues
+}
+
+function validateUpdatedState(
+  input: PrepareNextRoundInput,
+  profile: LearnerProfileSnapshot,
+  evidence: RagEvidencePack,
+  action: NextRoundAction,
+): string[] {
+  const issues: string[] = []
+  if (profile.learner_id !== input.profile_snapshot.learner_id) {
+    issues.push(
+      `${action} 的 next_profile_snapshot.learner_id 必须与当前画像一致`,
+    )
+  }
+  if (input.next_profile_snapshot
+    && profile.profile_version === input.profile_snapshot.profile_version) {
+    issues.push(
+      `${action} 的 next_profile_snapshot.profile_version 必须是 B 返回的新版画像`,
+    )
+  }
+  if (evidence.learner_level !== profile.level) {
+    issues.push(
+      `${action} 的 next_evidence_pack.learner_level 必须与下一轮画像 level 一致`,
+    )
+  }
+  if (input.next_evidence_pack
+    && evidence.retrieval_id === input.current_evidence_pack.retrieval_id) {
+    issues.push(
+      `${action} 的 next_evidence_pack.retrieval_id 必须标识本次新检索结果`,
+    )
+  }
   return issues
 }
 

@@ -2,9 +2,9 @@
 
 | 项目 | 内容 |
 |---|---|
-| 设计版本 | 3.1 |
+| 设计版本 | 3.5 |
 | Schema 版本 | 1.0 |
-| Prompt manifest | `c-prompts-1.8.1` |
+| Prompt manifest | `c-prompts-1.8.2` |
 | 实现目录 | `src/role-c-content/` |
 | Schema 目录 | `schemas/role-c-content/` |
 | 自动检查 | `bun run check` |
@@ -17,13 +17,13 @@ Role C 将版本化画像、学习路径和 RAG 证据转换为相互对齐的�
 | 方向 | 正式合同 |
 |---|---|
 | A → C | `RagEvidencePack` |
-| B → C | `LearnerProfileSnapshot`、`LearningPathNode` |
+| B → C | `LearnerProfileSnapshot`、`LearningPathNode`、`RoleBPathPlanningResult` |
 | D → C | `SubmissionEnvelope` |
 | C → A | `EvidenceGapRequest`、`FactAuditPacket` |
-| C → B | `RoleCLearningProgressDelivery` |
-| C → D | `RoleCReviewedReleaseDelivery`、`RoleCDynamicFeedbackDelivery` |
+| C → B | `RoleBPathPlanningRequest`、`RoleCLearningProgressDelivery` |
+| C → D | `RoleCReviewedReleaseDelivery`、`RoleCReviewRecoveryStatusDelivery`、`RoleCLearningSessionDelivery`、`RoleCDynamicFeedbackDelivery` |
 
-学习会话由认证后端通过 `LearningCycleService.openSession` 创建。题目答案、参考实现、隐藏测试、评分比较值、Beta 参数、幂等账本和 `secure://role-c/...` 引用均保存在后端。
+学习会话由认证后端创建。题目答案、参考实现、隐藏测试、评分比较值、Beta 参数、幂等账本和 `secure://role-c/...` 引用均保存在后端。
 
 ## 2. 总体流程
 
@@ -40,8 +40,14 @@ flowchart TD
     AB -->|通过| SEC["安全产物批次提交"]
     AB -->|通过| PUB["公开内容原子投递"]
     AB -->|修订| REV["定向修订，最多 2 轮"]
+    AB -->|补证据| EA["向 A 请求新证据并创建新 Spec"]
+    AB -->|换路径| PB2["向 B 请求路径草案"]
+    PB2 --> EA
+    EA --> S
     REV --> V
-    PUB --> SUB["学习者作答"]
+    PUB --> AN["仅开放锚点题"]
+    AN --> RT["后端评分并冻结测评路线"]
+    RT --> SUB["学习者完成正式作答"]
     SUB --> LC["LearningCycleService"]
     SEC --> LC
     LC --> FD["动态反馈投递给 D"]
@@ -109,20 +115,32 @@ C 内部门禁依次检查：
 
 内部 Alignment Critic 对 critical objection 最多执行一次定向修订。随后，A 检查事实和引用，B 检查目标、先修、难度和教学适配。外部审核最多修订两轮，并始终使用同一份冻结输入。
 
-审核请求和结果绑定 `pipeline_input_hash`、`generation_spec_hash`、`GenerationSpec.evidence_content_hash`、三份公开产物哈希、审核策略版本和修订序号。最终 `pass` 不得携带 finding 或修订指令；`READY` trace 只记录公开产物 ID。
+审核请求和结果绑定 `pipeline_input_hash`、`generation_spec_hash`、`GenerationSpec.evidence_content_hash`、三份公开产物哈希、审核策略版本和修订序号。B 的结构化结果包含失败维度、缺失先修、未知先修引用、恢复动作、修复范围、建议难度和可恢复状态。
+
+恢复动作如下：
+
+| 修复范围 | C 的处理 |
+|---|---|
+| `artifact` | 在当前 Spec 内定向修订，最多两轮 |
+| `new_evidence` | 向 A 请求指定知识点的新证据，验证覆盖后创建新 Spec 并重新生成、审核 |
+| `new_spec` | 调用 B 路径规划，校验路径草案，向 A 取证并绑定事实后创建新 Spec |
+
+每轮跨 Spec 恢复均记录输入、输出和 A/B 请求标识，最多两次。未知先修引用、无效 B 响应和不可支持目标返回结构化阻塞结果。
 
 ## 6. 发布与回执
 
-审核通过后执行两项发布：
+审核通过后执行以下提交与发布：
 
 1. `code_lab_secure` 与 `assessment_secure` 通过 `putBatch` 提交为一个安全存储批次；
-2. 三份公开产物与 trace 组成一个 `RoleCReviewedReleaseDelivery`，通过一次 `publishReviewedRelease` 投递。
+2. 三份公开产物与 trace 组成 `RoleCReviewedReleaseDelivery`；
+3. 初始锚点会话和路线冻结后的会话分别组成独立的 `RoleCLearningSessionDelivery`；
+4. `BLOCKED`、`FAILED` 和 `UNSUPPORTED_TARGET` 组成 `RoleCReviewRecoveryStatusDelivery`。
 
 学习完成后，动态反馈通过 `RoleCDynamicFeedbackDelivery` 投递给 D；学习证据和可选画像漂移建议通过 `RoleCLearningProgressDelivery` 投递给 B。
 
-每个 envelope 包含稳定 `delivery_id`。审核发布身份绑定 Spec、审核结果、三份产物和 trace 语义，排除 trace 序号、时间和耗时等遥测字段；相同业务结果重新执行仍保持同一投递身份。接收方以该 ID 原子提交，并返回同 ID、同类型的 `accepted` 或 `duplicate` 回执。相同学习证据按 `event_id` 排序，因此输入顺序不影响投递身份。
+每个 envelope 包含稳定 `delivery_id`。审核发布身份绑定 Spec、审核结果、三份产物和 trace 语义，排除 trace 序号、时间和耗时等遥测字段；相同业务结果重新执行仍保持同一投递身份。接收方以该 ID 原子提交，并返回同 ID、同类型的 `accepted` 或 `duplicate` 回执。相同学习证据按 `event_id` 排序，因此输入顺序不影响投递身份。Reviewed release、恢复状态和学习会话使用独立投递身份，任一失败均可按原 ID 重试。
 
-`BLOCKED`、`FAILED`、审核未通过和回执不匹配的结果不能进入公开发布。
+审核未通过的内容不能进入 reviewed release；其结构化状态通过恢复状态合同交给 D。
 
 ## 7. 代码执行与评分
 
@@ -141,14 +159,18 @@ Python 代码统一使用 `DockerPythonCodeRunner`：
 `LearningCycleService` 的正式流程：
 
 1. 注册通过中央审核门禁的 `READY` 运行，并复核 public/secure 配对；
-2. 由认证后端创建绑定 learner、run、form、attempt 和题目集合的会话；
-3. 独立校验认证 learner 与 `SubmissionEnvelope.learner_id_hash`；
-4. 从 secure store 读取答案和代码测试，冻结 `GradeResult`；
-5. 生成 `LearningEvidenceEvent`，原子更新 Beta 掌握度；
-6. 组装唯一公开结果 `DynamicFeedbackResult`；
-7. 持久化完成状态并支持安全重放。
+2. `openAnchorFirstSession` 创建仅包含锚点题的 `ANCHOR_PENDING` 会话；
+3. `routeAssessmentAnchors` 从 secure store 读取答案并评分，以真实锚点得分选择路线，通过 revision CAS 冻结为 `ROUTE_LOCKED`；
+4. 路线冻结后更新正式必答题集合；最终提交中的锚点答案必须与选路时一致；
+5. 独立校验认证 learner 与 `SubmissionEnvelope.learner_id_hash`；
+6. 从 secure store 读取答案和代码测试，冻结 `GradeResult`；
+7. 生成 `LearningEvidenceEvent`，原子更新 Beta 掌握度；
+8. 组装唯一公开结果 `DynamicFeedbackResult`；
+9. 持久化完成状态，并按配置向 B 投递学习进展。
 
 浏览器可调用的 `processSubmission` 只返回公开反馈或精简错误。学习证据、内部评分和 Beta 状态由后端入口 `processSubmissionInternal` 处理。
+
+锚点阶段不生成学习证据、不更新掌握度。相同答案重放返回同一路线锁；不同答案并发时只有一个 revision CAS 可以冻结路线。D 保存锚点题集合并冻结对应输入，正式提交继续使用选路时的答案。
 
 本轮动作规则：
 
@@ -185,12 +207,15 @@ Python 代码统一使用 `DockerPythonCodeRunner`：
 
 相同执行身份由 single-flight 合并并发调用。审核通过的 `READY` 结果写入 `NextRoundExecutionJournal`，后续调用先校验中央审核门禁和两条 secure 引用，再顺序重放。失效的 secure 引用通过结果哈希 CAS 清除后重新生成；journal 提交结果不确定时清理本次安全批次并撤销同一记录。注入式 journal 的原子提交保留 winner，并清理 loser 的安全存储批次。
 
-默认 journal 位于当前进程内；需要跨重启重放时注入持久实现。
+`continueCompletedLearningCycle` 将 B 的新版画像、路径和 A 的对应证据送入可恢复审核流水线。最终通过后按顺序注册 run、创建稳定的锚点会话，再发布 reviewed release 与学习会话。锚点得分产生后由 `routeAssessmentAnchors` 冻结正式测评路线。
+
+外层 `AdaptiveLearningLoopJournal` 记录恢复调用、生成结果、run/session 激活和对外投递阶段。`AtomicFileAdaptiveLearningLoopJournal` 使用完整性哈希、revision CAS、文件锁和私有文件权限支持跨进程、跨重启续跑。A/B 请求使用稳定请求标识；已成功响应、已发布结果和终态均可直接重放。
 
 ## 10. 持久化与部署
 
 - 生成缓存键覆盖完整 Spec、证据、Prompt、模型配置和 seed；
 - 基础 `runCPipeline` 可注入 cache、checkpoint 和 append-only trace store，相同执行身份的并发请求由 single-flight 合并；
+- 自适应学习闭环部署时注入 `AtomicFileAdaptiveLearningLoopJournal`；执行身份绑定准备请求、恢复策略、审核配置、安全存储和 D 接收目标；
 - JSONL trace store 使用文件锁串行读写，并在读取时复核 Schema、敏感信息和各 run 的严格递增序号；
 - 学习周期记录使用内容哈希、revision CAS、租约和原子状态转换；
 - 安全读取、Docker/模型评分和反馈生成期间按租期续约；失去 owner 后停止后续状态提交；
@@ -205,13 +230,21 @@ Python 代码统一使用 `DockerPythonCodeRunner`：
 | 入口 | 用途 |
 |---|---|
 | `runReviewedCPipeline` | 生成、C 内部门禁、A/B 审核和安全产物提交 |
+| `runRecoverableReviewedCPipeline` | 按结构化审核动作执行修订、补证据或换路径 |
+| `createLocalBPathPlanningPort` | 将 B 本地路径规划器适配为 C 恢复接口 |
 | `deliverRoleCToD` | 原子投递审核通过的公开内容与 trace |
+| `deliverReviewRecoveryStatusToD` | 原子投递阻塞、失败或不支持目标状态 |
+| `deliverLearningSessionToD` | 原子投递锚点待答或路线已冻结的会话 |
 | `LearningCycleService` | 会话、提交、评分、证据、掌握度和动态反馈 |
+| `LearningCycleService.openAnchorFirstSession` | 创建仅含锚点题的可信会话 |
+| `LearningCycleService.routeAssessmentAnchors` | 可信评分锚点题并冻结正式路线 |
 | `LearningCycleService.prepareNextRoundFromCompletedSubmission` | 从冻结的已完成提交准备可信下一轮 |
 | `deliverDynamicFeedbackToD` | 原子投递统一动态反馈 |
 | `deliverRoleCToB` | 原子投递学习进展和画像漂移建议 |
 | `prepareNextRound` | 对可信冻结输入执行确定性下一轮规划 |
 | `executePreparedNextRound` | 审核执行、并发合并和成功结果重放 |
+| `continueCompletedLearningCycle` | 完成下一轮恢复审核、run/session 注册和 D 发布 |
+| `RoleBLearningProgressAdapter` | B 接收学习证据信封、幂等更新画像并生成新版本 |
 
 ## 12. 验证命令
 
@@ -233,7 +266,10 @@ bun run test:role-c:docker
 
 - 三个 Agent 的分阶段生成、确定性组合和完整门禁：已完成；
 - public/secure 分离、Docker 执行和后端评分：已完成；
-- A 事实审核、B 教学审核和定向修订：已完成；
+- A 事实审核、B 教学审核、定向修订及跨 Spec 恢复：已完成；
 - 会话、提交、动态反馈、学习证据和掌握度更新：已完成；
-- 四类下一轮准备、审核执行、并发合并和成功结果重放：已完成；
-- B/D 原子幂等投递、Schema、测试和完整演示：已完成。
+- 四类下一轮准备、恢复审核、run/session 注册、持久化 journal 和终态重放：已完成；
+- 锚点优先测评、得分选路、路线冻结和答案一致性校验：已完成；
+- C 侧向 B/D 的原子幂等投递与下一轮会话登记：已完成；
+- 画像版本、路径节点、目标包和完整评分合同校验：已完成；
+- Schema、全量测试和 Docker 演示：已完成。

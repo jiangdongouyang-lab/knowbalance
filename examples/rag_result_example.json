@@ -31,11 +31,33 @@
       "quizItems": [
         {
           "level": 1,
+          "type": "choice",
           "question": "for score in scores 中，score 表示什么？",
-          "answer": "score 表示当前循环取到的一个元素。"
+          "options": [
+            "当前循环取到的一个元素",
+            "整个 scores 列表",
+            "列表元素的数量",
+            "循环执行的总次数"
+          ],
+          "answer": "当前循环取到的一个元素",
+          "sourceId": "K007",
+          "factId": "F001"
         }
       ],
       "file": "knowledge_base/python_basic/K007_for_loop.md",
+      "retrievalTrace": {
+        "matchedKeywords": ["循环"],
+        "matchedFields": ["keywords", "difficulty", "taskIntent"],
+        "difficultyMatch": true,
+        "scoreBreakdown": {
+          "keyword": 10,
+          "title": 0,
+          "facts": 0,
+          "practiceTasks": 0,
+          "difficulty": 3,
+          "bonus": 22
+        }
+      },
       "retrieval_trace": {
         "matched_keywords": ["循环"],
         "matched_fields": ["keywords", "difficulty", "taskIntent"],

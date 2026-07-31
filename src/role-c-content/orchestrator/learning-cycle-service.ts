@@ -7,7 +7,7 @@ import type {
   SessionState,
   SubmissionEnvelope,
 } from "../contracts/artifacts"
-import { contentHash } from "../contracts/common"
+import { contentHash, stableId } from "../contracts/common"
 import {
   aggregateObjectiveResults,
   buildDynamicFeedbackResult,
@@ -19,11 +19,18 @@ import type {
   ProfileDriftSuggestion,
 } from "../contracts/learning-evidence-event"
 import {
+  deliverRoleCToB,
+  type RoleBLearningProgressPort,
+  type RoleCDeliveryAck,
+  type RoleCLearningSessionHandoff,
+} from "../contracts/external-api"
+import {
   EvidencePhraseRubricJudge,
   gradeSubmission,
   type BlindRubricJudge,
   type SubmissionGrade,
 } from "../grading/grade-submission"
+import { routeAssessmentFromAnchors } from "../grading/assessment-routing"
 import {
   finalizeGradeResult,
   finalizeGradeResultWithFeedback,
@@ -40,6 +47,7 @@ import { emitLearningEvidence } from "../mastery/emit-learning-evidence"
 import {
   LearningCycleStoreError,
   learningSubmissionInputHash,
+  type AssessmentRoutingState,
   type LearningCycleStore,
   type LearningRunRecord,
   type LearningSessionRecord,
@@ -73,8 +81,9 @@ export interface RegisterReadyRunInput {
   learner_id_hash: string
 }
 
-export interface OpenLearningSessionInput {
+export interface OpenTrustedPreselectedSessionInput {
   /** All fields in this request are assembled by the authenticated backend. */
+  routing_policy: "trusted_preselected_v1"
   session_id: string
   run_id: string
   authenticated_learner_id_hash: string
@@ -87,6 +96,64 @@ export interface OpenLearningSessionInput {
   /** Derived from backend submission history. */
   repeat_exposure_by_item?: Record<string, number>
 }
+
+export type OpenLearningSessionInput = Omit<
+  OpenTrustedPreselectedSessionInput,
+  "routing_policy"
+>
+
+export interface OpenAnchorFirstSessionInput {
+  routing_request_id: string
+  session_id: string
+  run_id: string
+  authenticated_learner_id_hash: string
+  attempt_no: number
+  profile_expectations_by_objective?: Record<string, "known" | "weak">
+  repeat_exposure_by_item?: Record<string, number>
+}
+
+/**
+ * Trusted pre-session routing input. D sends only the learner's anchor answers;
+ * C reads the answer key from secure storage, freezes the score-derived route,
+ * and then opens the formal session.
+ */
+export interface RouteAssessmentAnchorsInput {
+  routing_request_id: string
+  session_id: string
+  run_id: string
+  authenticated_learner_id_hash: string
+  attempt_no: number
+  anchor_submission: SubmissionEnvelope
+  /** Backend-owned hint state for the anchor items. */
+  revealed_anchor_hint_levels: Record<string, 0 | 1 | 2 | 3>
+  profile_expectations_by_objective?: Record<string, "known" | "weak">
+  repeat_exposure_by_item?: Record<string, number>
+}
+
+export type AssessmentAnchorRoutingOutcome =
+  | {
+      status: "routed"
+      routing_request_id: string
+      anchor_score_ratio: number
+      route_id: string
+      action: "remediate" | "reinforce" | "advance"
+      required_item_ids: string[]
+      /** Safe D-facing projection; backend SessionState and secure refs stay private. */
+      learning_session: Extract<
+        RoleCLearningSessionHandoff,
+        { phase: "route_locked" }
+      >
+    }
+  | {
+      status: "needs_review"
+      routing_request_id: string
+      unresolved_anchor_item_ids: string[]
+    }
+  | {
+      status: "blocked"
+      routing_request_id: string
+      issues: string[]
+    }
 
 export interface ProcessSubmissionInput {
   session_id: string
@@ -114,9 +181,35 @@ export interface LearningCycleCompletion {
     evidence_events: LearningEvidenceEvent[]
     profile_drift_suggestion?: ProfileDriftSuggestion
   }
+  /** Explicit outcome; a missing B adapter can no longer be mistaken for delivery. */
+  delivery_to_b: LearningProgressDeliveryOutcome
   /** Backend-only state; public callers use feedback.mastery_snapshot. */
   mastery_states: ObjectiveMasteryState[]
 }
+
+export type LearningProgressDeliveryPolicy =
+  | {
+      mode: "required"
+      port: RoleBLearningProgressPort
+    }
+  | {
+      mode: "offline"
+      reason: "test" | "local_development"
+    }
+
+export type LearningProgressDeliveryOutcome =
+  | {
+      mode: "required"
+      ack: RoleCDeliveryAck
+    }
+  | {
+      mode: "offline"
+      reason: "test" | "local_development"
+    }
+  | {
+      mode: "deferred"
+      reason: "port_not_configured"
+    }
 
 export type LearningCycleOutcome =
   | { status: "completed"; completion: LearningCycleCompletion }
@@ -156,6 +249,8 @@ export type LearningCycleBlockCode =
   | "SESSION_REVISION_CONFLICT"
   | "SESSION_BUSY"
   | "SESSION_ALREADY_COMPLETED"
+  | "ANCHOR_ROUTING_REQUIRED"
+  | "ANCHOR_ANSWERS_CHANGED"
   | "SUBMISSION_BUSY"
   | "LEARNER_IDENTITY_MISMATCH"
   | "SUBMISSION_ID_CONFLICT"
@@ -184,6 +279,12 @@ export interface LearningCycleServiceDependencies {
   cycle_store: LearningCycleStore
   secure_store: SecureArtifactStore
   mastery_store: MasteryStateStore
+  /**
+   * Production B adapter. When configured, every completed formal submission
+   * is delivered before the backend completion is returned. Replays reuse the
+   * deterministic delivery_id and are safe with B's duplicate acknowledgement.
+   */
+  learning_progress_delivery?: LearningProgressDeliveryPolicy
   code_runner?: CodeRunner
   rubric_judge?: BlindRubricJudge
   feedback_generator?: GradeFeedbackGenerator
@@ -282,7 +383,15 @@ export class LearningCycleService {
     }
   }
 
-  async openSession(input: OpenLearningSessionInput): Promise<LearningSessionRecord> {
+  /**
+   * Opens a session whose route was selected by a trusted backend policy.
+   *
+   * Learner-facing flows use openAnchorFirstSession and routeAssessmentAnchors.
+   * This explicit entry is retained for backend imports and deterministic demos.
+   */
+  async openTrustedPreselectedSession(
+    input: OpenTrustedPreselectedSessionInput,
+  ): Promise<LearningSessionRecord> {
     const run = await this.dependencies.cycle_store.loadRun(input.run_id)
     if (!run) throw new LearningCycleServiceError("INVALID_SESSION", "run 不存在")
     if (run.learner_id_hash !== input.authenticated_learner_id_hash) {
@@ -343,6 +452,403 @@ export class LearningCycleService {
         throw new LearningCycleServiceError("SESSION_ID_CONFLICT", "并发创建了冲突会话")
       }
       throw persistenceError(error)
+    }
+  }
+
+  async openSession(
+    input: OpenLearningSessionInput,
+  ): Promise<LearningSessionRecord> {
+    return this.openTrustedPreselectedSession({
+      ...structuredClone(input),
+      routing_policy: "trusted_preselected_v1",
+    })
+  }
+
+  /**
+   * Opens a durable anchor-only phase. No route is selected until C has graded
+   * the anchor submission against the registered secure assessment.
+   */
+  async openAnchorFirstSession(
+    input: OpenAnchorFirstSessionInput,
+  ): Promise<LearningSessionRecord> {
+    if (!input.routing_request_id.trim() || !input.session_id.trim()
+      || !input.authenticated_learner_id_hash.trim()
+      || !Number.isSafeInteger(input.attempt_no) || input.attempt_no < 1) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        "锚点会话身份或 attempt_no 无效",
+      )
+    }
+    const run = await this.dependencies.cycle_store.loadRun(input.run_id)
+    if (!run) {
+      throw new LearningCycleServiceError("INVALID_SESSION", "run 不存在")
+    }
+    if (run.learner_id_hash !== input.authenticated_learner_id_hash) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        "学习者身份与 run 不一致",
+      )
+    }
+    const assessment = readyAssessment(run)
+    const payload = assessment.payload!
+    const anchorItemIds = [...payload.routing.anchor_item_ids]
+    if (anchorItemIds.length === 0) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        "assessment 未提供锚点题",
+      )
+    }
+    const objectives = new Set(
+      run.pipeline_input.generation_spec.targets.map((target) =>
+        target.objective_id),
+    )
+    if (Object.keys(input.profile_expectations_by_objective ?? {})
+      .some((objectiveId) => !objectives.has(objectiveId))) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        "画像预期包含当前 Spec 之外的 objective",
+      )
+    }
+    const itemIds = new Set(payload.items.map((item) => item.item_id))
+    if (Object.keys(input.repeat_exposure_by_item ?? {})
+      .some((itemId) => !itemIds.has(itemId))) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        "repeat exposure 包含未知题目",
+      )
+    }
+    const sessionState: SessionState = {
+      schema_version: "1.0",
+      session_id: input.session_id,
+      run_id: input.run_id,
+      learner_id_hash: input.authenticated_learner_id_hash,
+      current_path_node_id:
+        run.pipeline_input.generation_spec.path_node.node_id,
+      current_form_id: payload.form_id,
+      attempt_no: input.attempt_no,
+      required_item_ids: anchorItemIds,
+      revealed_hint_levels: Object.fromEntries(
+        anchorItemIds.map((itemId) => [itemId, 0 as const]),
+      ),
+      public_artifact_refs: Object.values(run.pipeline_result.public_artifacts)
+        .filter((artifact): artifact is NonNullable<typeof artifact> =>
+          Boolean(artifact))
+        .map((artifact) => artifact.artifact_id),
+      secure_artifact_refs: [
+        run.secure_artifact_refs.code_lab,
+        run.secure_artifact_refs.assessment,
+      ],
+    }
+    const sessionReport = validateRoleCSchema(
+      "session_state.schema.json",
+      sessionState,
+    )
+    if (!sessionReport.ok) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        sessionReport.issues.map((issue) =>
+          `${issue.path}:${issue.message}`).join("；"),
+      )
+    }
+    const record: LearningSessionRecord = {
+      schema_version: "1.0",
+      session_id: input.session_id,
+      run_id: input.run_id,
+      session_state: sessionState,
+      profile_expectations_by_objective: structuredClone(
+        input.profile_expectations_by_objective ?? {},
+      ),
+      repeat_exposure_by_item: structuredClone(
+        input.repeat_exposure_by_item ?? {},
+      ),
+      assessment_routing_state: {
+        mode: "anchor_first",
+        phase: "ANCHOR_PENDING",
+        routing_request_id: input.routing_request_id,
+        assessment_policy_hash: assessmentRoutingPolicyHash(assessment),
+        anchor_item_ids: anchorItemIds,
+      },
+      revision: 0,
+    }
+    const existing = await this.dependencies.cycle_store.loadSession(
+      input.session_id,
+    )
+    if (existing) {
+      if (!sameAnchorFirstSessionIdentity(existing, record)) {
+        throw new LearningCycleServiceError(
+          "SESSION_ID_CONFLICT",
+          "同一 session_id 已绑定不同锚点会话",
+        )
+      }
+      return existing
+    }
+    try {
+      await this.dependencies.cycle_store.createSession(record)
+      return structuredClone(record)
+    } catch (error) {
+      if (error instanceof LearningCycleStoreError
+        && error.code === "ALREADY_EXISTS") {
+        const raced = await this.dependencies.cycle_store.loadSession(
+          input.session_id,
+        )
+        if (raced && sameAnchorFirstSessionIdentity(raced, record)) {
+          return raced
+        }
+        throw new LearningCycleServiceError(
+          "SESSION_ID_CONFLICT",
+          "并发创建了冲突锚点会话",
+        )
+      }
+      throw persistenceError(error)
+    }
+  }
+
+  /**
+   * Grades only the declared anchor items against backend-owned answers. The
+   * resulting route, not a prior learning action, determines the formal
+   * session's required item set.
+   */
+  async routeAssessmentAnchors(
+    input: RouteAssessmentAnchorsInput,
+  ): Promise<AssessmentAnchorRoutingOutcome> {
+    if (!input.routing_request_id.trim() || !input.session_id.trim()
+      || !input.run_id.trim() || !input.authenticated_learner_id_hash.trim()
+      || !Number.isSafeInteger(input.attempt_no) || input.attempt_no < 1) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        "锚点路由身份或 attempt_no 无效",
+      )
+    }
+    const session = await this.dependencies.cycle_store.loadSession(
+      input.session_id,
+    )
+    if (!session || session.run_id !== input.run_id) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["锚点路由会话不存在或 run 不一致"],
+      }
+    }
+    const state = session.assessment_routing_state
+    if (!state || state.mode !== "anchor_first"
+      || state.routing_request_id !== input.routing_request_id) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["会话不是当前锚点路由请求创建的"],
+      }
+    }
+    if (session.session_state.learner_id_hash
+      !== input.authenticated_learner_id_hash) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["认证学习者与锚点路由会话不一致"],
+      }
+    }
+    if (session.session_state.attempt_no !== input.attempt_no) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["锚点路由 attempt_no 与会话不一致"],
+      }
+    }
+    const inputHash = anchorRoutingInputHash(input.anchor_submission)
+    const answersHash = anchorAnswersHash(
+      input.anchor_submission,
+      state.anchor_item_ids,
+    )
+    if (state.phase === "ROUTE_LOCKED") {
+      return state.anchor_input_hash === inputHash
+        && state.anchor_answers_hash === answersHash
+        ? routedOutcome(session, state)
+        : {
+            status: "blocked",
+            routing_request_id: input.routing_request_id,
+            issues: ["锚点路由已由另一份答案冻结"],
+          }
+    }
+    const run = await this.dependencies.cycle_store.loadRun(input.run_id)
+    if (!run) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["锚点路由对应的 run 不存在"],
+      }
+    }
+    if (run.learner_id_hash !== input.authenticated_learner_id_hash) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["认证学习者与锚点路由 run 不一致"],
+      }
+    }
+    const assessment = readyAssessment(run)
+    const payload = assessment.payload!
+    const anchorItemIds = [...state.anchor_item_ids]
+    if (state.assessment_policy_hash
+      !== assessmentRoutingPolicyHash(assessment)
+      || !sameSet(anchorItemIds, payload.routing.anchor_item_ids)) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["assessment 路由策略已改变"],
+      }
+    }
+    const anchorSet = new Set(anchorItemIds)
+    const hintKeys = Object.keys(input.revealed_anchor_hint_levels)
+    if (hintKeys.some((itemId) => !anchorSet.has(itemId))) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["锚点提示状态包含非锚点题"],
+      }
+    }
+    if (anchorItemIds.some((itemId) =>
+      (input.revealed_anchor_hint_levels[itemId] ?? 0)
+        !== (session.session_state.revealed_hint_levels[itemId] ?? 0))) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["锚点提示状态与可信会话记录不一致"],
+      }
+    }
+    const secure = await this.loadAssessmentSecure(
+      run,
+      input.anchor_submission.submission_id,
+    )
+    if (!secure.ok) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: secure.retryable
+          ? ["assessment_secure 暂时无法读取"]
+          : secure.outcome.status === "blocked"
+            ? [...secure.outcome.issues]
+            : ["assessment_secure 无法读取"],
+      }
+    }
+    const routingState: SessionState = {
+      ...structuredClone(session.session_state),
+    }
+    const grade = await gradeSubmission(
+      input.anchor_submission,
+      secure.artifact,
+      {
+        code_runner: this.dependencies.code_runner,
+        rubric_judge: this.rubricJudge,
+        public_artifact: assessment,
+        session_state: routingState,
+        repeat_exposure_by_item: input.repeat_exposure_by_item,
+        expected_path_node_id:
+          run.pipeline_input.generation_spec.path_node.node_id,
+        assessment_secure_ref: run.secure_artifact_refs.assessment,
+        max_tool_retries:
+          run.pipeline_input.generation_spec.policies.max_tool_retry,
+        allow_anchor_only: true,
+      },
+    )
+    if (grade.status === "blocked") {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: grade.validation_issues
+          ?? [grade.blocked_reason ?? "锚点成绩无法可信冻结"],
+      }
+    }
+    if (grade.status === "needs_review") {
+      return {
+        status: "needs_review",
+        routing_request_id: input.routing_request_id,
+        unresolved_anchor_item_ids: [...grade.unresolved_item_ids],
+      }
+    }
+    const routing = routeAssessmentFromAnchors(
+      assessment,
+      grade.item_results.map((item) => ({
+        item_id: item.item_id,
+        raw_score: item.raw_score,
+      })),
+    )
+    if (!routing.ok) {
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: [...routing.issues],
+      }
+    }
+    const revealedHintLevels: Record<string, 0 | 1 | 2 | 3> =
+      Object.fromEntries(
+        routing.required_item_ids.map((itemId) => [
+        itemId,
+        session.session_state.revealed_hint_levels[itemId] ?? 0,
+      ]),
+      )
+    const anchorGradeHash = contentHash({
+      contract: "role-c-anchor-grade-v1",
+      status: grade.status,
+      item_results: grade.item_results,
+      raw_score: grade.raw_score,
+      max_score: grade.max_score,
+    })
+    const routeLockId = stableId("ROUTE-LOCK", {
+      session_id: session.session_id,
+      run_id: session.run_id,
+      form_id: payload.form_id,
+      attempt_no: input.attempt_no,
+      assessment_policy_hash: state.assessment_policy_hash,
+      anchor_input_hash: inputHash,
+      anchor_grade_hash: anchorGradeHash,
+      route_id: routing.route_id,
+    })
+    const locked: LearningSessionRecord = {
+      ...structuredClone(session),
+      session_state: {
+        ...structuredClone(session.session_state),
+        required_item_ids: [...routing.required_item_ids],
+        revealed_hint_levels: revealedHintLevels,
+      },
+      assessment_routing_state: {
+        mode: "anchor_first",
+        phase: "ROUTE_LOCKED",
+        routing_request_id: input.routing_request_id,
+        assessment_policy_hash: state.assessment_policy_hash,
+        anchor_item_ids: anchorItemIds,
+        anchor_submission_id: input.anchor_submission.submission_id,
+        anchor_input_hash: inputHash,
+        anchor_answers_hash: answersHash,
+        anchor_grade_hash: anchorGradeHash,
+        route_lock_id: routeLockId,
+        anchor_score_ratio: routing.anchor_score_ratio,
+        route_id: routing.route_id,
+        action: routing.action,
+        reveal_tiers: [...routing.reveal_tiers],
+        required_item_ids: [...routing.required_item_ids],
+      },
+      revision: session.revision + 1,
+    }
+    try {
+      await this.dependencies.cycle_store.saveSession(
+        locked,
+        session.revision,
+      )
+      return routedOutcome(locked, locked.assessment_routing_state!)
+    } catch (error) {
+      if (!isCycleRevisionConflict(error)) throw persistenceError(error)
+      const winner = await this.dependencies.cycle_store.loadSession(
+        session.session_id,
+      )
+      const winnerState = winner?.assessment_routing_state
+      if (winner && winnerState?.phase === "ROUTE_LOCKED"
+        && winnerState.anchor_input_hash === inputHash
+        && winnerState.anchor_answers_hash === answersHash) {
+        return routedOutcome(winner, winnerState)
+      }
+      return {
+        status: "blocked",
+        routing_request_id: input.routing_request_id,
+        issues: ["锚点路由已由另一份答案并发冻结"],
+      }
     }
   }
 
@@ -506,6 +1012,9 @@ export class LearningCycleService {
       ...(input.next_profile_snapshot
         ? { next_profile_snapshot: structuredClone(input.next_profile_snapshot) }
         : {}),
+      ...(input.next_generation_action
+        ? { next_generation_action: input.next_generation_action }
+        : {}),
       ...(input.current_generation_versions
         ? {
             current_generation_versions: structuredClone(
@@ -535,6 +1044,25 @@ export class LearningCycleService {
       return blocked(input.submission.submission_id, "LEARNER_IDENTITY_MISMATCH", [
         "认证学习者、run、会话与提交的身份不一致",
       ])
+    }
+    const routingState = session.assessment_routing_state
+    if (routingState?.phase === "ANCHOR_PENDING") {
+      return blocked(
+        input.submission.submission_id,
+        "ANCHOR_ROUTING_REQUIRED",
+        ["必须先完成锚点题并冻结测评路由"],
+      )
+    }
+    if (routingState?.phase === "ROUTE_LOCKED"
+      && anchorAnswersHash(
+        input.submission,
+        routingState.anchor_item_ids,
+      ) !== routingState.anchor_answers_hash) {
+      return blocked(
+        input.submission.submission_id,
+        "ANCHOR_ANSWERS_CHANGED",
+        ["最终提交中的锚点答案与冻结路由时不一致"],
+      )
     }
 
     let record = await this.dependencies.cycle_store.loadSubmission(
@@ -859,6 +1387,7 @@ export class LearningCycleService {
       spec,
       evidence,
       assessment_secure: secure,
+      assessment_public_artifact_id: readyAssessment(run).artifact_id,
       formative: readyAssessment(run).payload!.submission_policy.formative,
       recommendation: roundDecision,
       cycle_identity: cycleIdentity(session, record),
@@ -898,6 +1427,7 @@ export class LearningCycleService {
           spec,
           evidence,
           assessment_secure: secure,
+          assessment_public_artifact_id: readyAssessment(run).artifact_id,
           formative: readyAssessment(run).payload!.submission_policy.formative,
           recommendation: finalDecision,
           cycle_identity: cycleIdentity(session, record),
@@ -907,6 +1437,7 @@ export class LearningCycleService {
           spec,
           evidence,
           assessment_secure: secure,
+          assessment_public_artifact_id: readyAssessment(run).artifact_id,
           formative: readyAssessment(run).payload!.submission_policy.formative,
           recommendation: finalDecision,
           cycle_identity: cycleIdentity(session, record),
@@ -961,6 +1492,39 @@ export class LearningCycleService {
         "已完成提交缺少冻结的学习证据或掌握度状态",
       )
     }
+    const configuredDelivery = this.dependencies.learning_progress_delivery
+    const requiredPort = configuredDelivery?.mode === "required"
+      ? configuredDelivery.port
+      : undefined
+    let deliveryToB: LearningProgressDeliveryOutcome
+    if (requiredPort) {
+      try {
+        const ack = await deliverRoleCToB(
+          requiredPort,
+          record.evidence_events,
+          record.feedback.profile_drift_suggestion,
+        )
+        deliveryToB = {
+          mode: "required",
+          ack,
+        }
+      } catch (error) {
+        throw new LearningCycleServiceError(
+          "PERSISTENCE_ERROR",
+          `学习进展尚未被 B 确认：${error instanceof Error ? error.message : "未知投递错误"}`,
+        )
+      }
+    } else if (configuredDelivery?.mode === "offline") {
+      deliveryToB = {
+        mode: "offline",
+        reason: configuredDelivery.reason,
+      }
+    } else {
+      deliveryToB = {
+        mode: "deferred",
+        reason: "port_not_configured",
+      }
+    }
     return {
       feedback: structuredClone(record.feedback),
       outbound_to_b: {
@@ -969,6 +1533,7 @@ export class LearningCycleService {
           ? structuredClone(record.feedback.profile_drift_suggestion)
           : undefined,
       },
+      delivery_to_b: structuredClone(deliveryToB),
       mastery_states: structuredClone(record.mastery_states),
     }
   }
@@ -1377,10 +1942,16 @@ function assertReadyPipeline(input: RegisterReadyRunInput): void {
 }
 
 function validateSessionInput(
-  input: OpenLearningSessionInput,
+  input: OpenTrustedPreselectedSessionInput,
   run: LearningRunRecord,
   assessment: AssessmentPublicArtifact,
 ): void {
+  if (input.routing_policy !== "trusted_preselected_v1") {
+    throw new LearningCycleServiceError(
+      "INVALID_SESSION",
+      "预选会话缺少可信路由策略",
+    )
+  }
   if (!input.session_id.trim() || !input.authenticated_learner_id_hash.trim()
     || !Number.isSafeInteger(input.attempt_no) || input.attempt_no < 1) {
     throw new LearningCycleServiceError("INVALID_SESSION", "session 身份或 attempt_no 无效")
@@ -1517,6 +2088,107 @@ function cycleIdentity(
   }
 }
 
+function assessmentRoutingPolicyHash(
+  assessment: AssessmentPublicArtifact,
+): string {
+  return contentHash({
+    contract: "role-c-assessment-routing-policy-v1",
+    artifact_id: assessment.artifact_id,
+    artifact_hash: contentHash(assessment),
+    routing: assessment.payload?.routing,
+  })
+}
+
+function anchorAnswersHash(
+  submission: SubmissionEnvelope,
+  anchorItemIds: string[],
+): string {
+  const anchors = new Set(anchorItemIds)
+  const answers = submission.answers
+    .filter((answer) => anchors.has(answer.item_id))
+    .map((answer) => structuredClone(answer))
+    .sort((left, right) => left.item_id.localeCompare(right.item_id))
+  return contentHash({
+    contract: "role-c-anchor-answers-v1",
+    run_id: submission.run_id,
+    learner_id_hash: submission.learner_id_hash,
+    form_id: submission.form_id,
+    attempt_no: submission.attempt_no,
+    answers,
+  })
+}
+
+function anchorRoutingInputHash(submission: SubmissionEnvelope): string {
+  const normalized = structuredClone(submission)
+  normalized.answers.sort((left, right) =>
+    left.item_id.localeCompare(right.item_id))
+  return contentHash({
+    contract: "role-c-anchor-routing-input-v1",
+    submission: normalized,
+  })
+}
+
+function routedOutcome(
+  session: LearningSessionRecord,
+  state: AssessmentRoutingState,
+): AssessmentAnchorRoutingOutcome {
+  if (state.phase !== "ROUTE_LOCKED") {
+    throw new LearningCycleServiceError(
+      "PERSISTENCE_ERROR",
+      "锚点路由尚未冻结",
+    )
+  }
+  return {
+    status: "routed",
+    routing_request_id: state.routing_request_id,
+    anchor_score_ratio: state.anchor_score_ratio,
+    route_id: state.route_id,
+    action: state.action,
+    required_item_ids: [...state.required_item_ids],
+    learning_session: {
+      phase: "route_locked",
+      routing_request_id: state.routing_request_id,
+      session_id: session.session_id,
+      run_id: session.run_id,
+      form_id: session.session_state.current_form_id,
+      attempt_no: session.session_state.attempt_no,
+      route_lock_id: state.route_lock_id,
+      route_id: state.route_id,
+      action: state.action,
+      anchor_score_ratio: state.anchor_score_ratio,
+      required_item_ids: [...state.required_item_ids],
+    },
+  }
+}
+
+function sameAnchorFirstSessionIdentity(
+  existing: LearningSessionRecord,
+  pending: LearningSessionRecord,
+): boolean {
+  const existingState = existing.assessment_routing_state
+  const pendingState = pending.assessment_routing_state
+  return Boolean(
+    existingState?.mode === "anchor_first"
+      && pendingState?.phase === "ANCHOR_PENDING"
+      && existing.session_id === pending.session_id
+      && existing.run_id === pending.run_id
+      && existing.session_state.learner_id_hash
+        === pending.session_state.learner_id_hash
+      && existing.session_state.current_form_id
+        === pending.session_state.current_form_id
+      && existing.session_state.attempt_no
+        === pending.session_state.attempt_no
+      && existingState.routing_request_id
+        === pendingState.routing_request_id
+      && existingState.assessment_policy_hash
+        === pendingState.assessment_policy_hash
+      && sameSet(
+        existingState.anchor_item_ids,
+        pendingState.anchor_item_ids,
+      ),
+  )
+}
+
 function recordIdentity(record: { revision: number }): string {
   const clone = structuredClone(record) as Record<string, unknown>
   delete clone.revision
@@ -1554,6 +2226,8 @@ function publicBlockMessage(code: LearningCycleBlockCode): string {
   if (code === "SESSION_NOT_FOUND" || code === "RUN_NOT_FOUND") return "学习会话不存在或已失效"
   if (code === "SESSION_BUSY" || code === "SUBMISSION_BUSY") return "当前提交正在处理中"
   if (code === "SESSION_ALREADY_COMPLETED") return "本次学习会话已经完成"
+  if (code === "ANCHOR_ROUTING_REQUIRED") return "请先完成锚点题以确定测评路线"
+  if (code === "ANCHOR_ANSWERS_CHANGED") return "锚点答案与已确定的测评路线不一致"
   if (code === "LEARNER_IDENTITY_MISMATCH") return "学习者身份校验失败"
   if (code === "SUBMISSION_ID_CONFLICT") return "提交标识与已有记录冲突"
   return "本次提交暂时无法完成"

@@ -168,6 +168,36 @@ export interface ReceiveProgressResult {
   }
 }
 
+/** B 内部统一使用的学习进展观察；可由完整反馈或 C 的进展信封转换得到。 */
+export interface ProgressObservation {
+  observationId: string
+  action: DynamicFeedbackResult["final_decision"]["action"]
+  /** 仅完整轮次反馈提供；事件批次缺少总分分母时为 null。 */
+  overallAccuracy: number | null
+  mastery: Array<{
+    objectiveId: string
+    mastery: number
+    evidenceBatches: number
+  }>
+  /** 具有明确 source_id 的事件可用于更新画像中的知识点。 */
+  conceptEvidence: Array<{
+    sourceId: string
+    concept: string
+    evidenceScore: number
+    evidenceBatches: number
+  }>
+}
+
+export interface ApplyProgressObservationInput {
+  observation: ProgressObservation
+  currentProfile: LearnerProfile
+  profileVersion: string
+  conceptMatches?: (
+    profileConcept: string,
+    observation: ProgressObservation["conceptEvidence"][number],
+  ) => boolean
+}
+
 // ── 仲裁机制 ──
 
 export interface ArbitrationInput {

@@ -20,7 +20,7 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 5. 选择/判断题的每个错误选项必须映射到具体 misconception；正确答案使用稳定 option_id，不使用 A/B/C/D 字母。
 6. 选项根据 seed 确定性重排，整份表单的正确位置尽量均衡；换 seed 不得改变答案语义。
 7. exact/numeric/rubric/code AnswerSpec 必须可由独立 verifier 检查。rubric 权重之和为 1，并列出 required_evidence 和 contradictions。
-8. code AnswerSpec 必须指向 secure code_test_suites；reference 必须实现同一执行合同并设计为通过全部隐藏测试。
+8. code AnswerSpec 必须指向 secure code_test_suites；reference 必须实现同一执行合同并设计为通过全部隐藏测试；隐藏输入必须与公开题干、示例和 starter 中出现的输入值不同。
 9. 每个 core objective 至少由一道题覆盖；objective_coverage 和 used_evidence 必须与实际内容闭合。
 10. routing 使用锚点题把低、中、高表现分别映射为 remediate/reinforce/advance，区间连续且覆盖 [0,1]。
 11. 学习者画像只影响题目语境、脚手架和难度表达，不得改变答案或评分标准。
@@ -30,5 +30,7 @@ export function evaluatorAuthorRepairPrompt(issues: string[]): string {
   return `${EVALUATOR_AUTHOR_SYSTEM_PROMPT}
 
 上一次 Draft 未通过确定性结构/语义预检。只修复下列失败项，不改变已冻结的事实、答案语义和安全边界：
-${issues.map((issue, index) => `${index + 1}. ${issue}`).join("\n")}`
+${issues.map((issue, index) => `${index + 1}. ${issue}`).join("\n")}
+
+如涉及隐藏测试输入泄漏，必须更换重复的 hidden input，并同步重算 expected；不得改写 public_draft。`
 }

@@ -62,10 +62,41 @@ export interface LearningSessionRecord {
   session_state: SessionState
   profile_expectations_by_objective: Record<string, "known" | "weak">
   repeat_exposure_by_item: Record<string, number>
+  /**
+   * Present only for score-routed assessments. Legacy sessions omit it and
+   * keep their pre-routed required item set.
+   */
+  assessment_routing_state?: AssessmentRoutingState
   active_submission_id?: string
   latest_feedback_id?: string
   revision: number
 }
+
+export type AssessmentRoutingState =
+  | {
+      mode: "anchor_first"
+      phase: "ANCHOR_PENDING"
+      routing_request_id: string
+      assessment_policy_hash: string
+      anchor_item_ids: string[]
+    }
+  | {
+      mode: "anchor_first"
+      phase: "ROUTE_LOCKED"
+      routing_request_id: string
+      assessment_policy_hash: string
+      anchor_item_ids: string[]
+      anchor_submission_id: string
+      anchor_input_hash: string
+      anchor_answers_hash: string
+      anchor_grade_hash: string
+      route_lock_id: string
+      anchor_score_ratio: number
+      route_id: string
+      action: "remediate" | "reinforce" | "advance"
+      reveal_tiers: Array<1 | 2 | 3>
+      required_item_ids: string[]
+    }
 
 export interface LearningSubmissionRecord {
   schema_version: "1.0"
@@ -131,9 +162,12 @@ export class LearningCycleStoreError extends Error {
 }
 
 export function learningSubmissionInputHash(submission: SubmissionEnvelope): string {
+  const normalized = jsonClone(submission)
+  normalized.answers.sort((left, right) =>
+    left.item_id.localeCompare(right.item_id))
   return contentHash({
     contract: "role-c-learning-submission-v1",
-    submission: jsonClone(submission),
+    submission: normalized,
   })
 }
 
@@ -558,6 +592,9 @@ function normalizeSession(
       throw new LearningCycleStoreError("INVALID_RECORD", "repeat exposure 必须为非负整数")
     }
   }
+  if (normalized.assessment_routing_state) {
+    assertAssessmentRoutingState(normalized)
+  }
   if (normalized.active_submission_id !== undefined) {
     assertIdentifier(normalized.active_submission_id, "active_submission_id")
   }
@@ -565,6 +602,68 @@ function normalizeSession(
     assertIdentifier(normalized.latest_feedback_id, "latest_feedback_id")
   }
   return normalized
+}
+
+function assertAssessmentRoutingState(record: LearningSessionRecord): void {
+  const state = record.assessment_routing_state!
+  if (state.mode !== "anchor_first"
+    || !["ANCHOR_PENDING", "ROUTE_LOCKED"].includes(state.phase)) {
+    throw new LearningCycleStoreError(
+      "INVALID_RECORD",
+      "assessment routing state 无效",
+    )
+  }
+  assertIdentifier(state.routing_request_id, "routing_request_id")
+  if (!/^sha256:[a-f0-9]{64}$/.test(state.assessment_policy_hash)
+    || state.anchor_item_ids.length === 0
+    || new Set(state.anchor_item_ids).size !== state.anchor_item_ids.length) {
+    throw new LearningCycleStoreError(
+      "INVALID_RECORD",
+      "assessment routing policy 或 anchor 集合无效",
+    )
+  }
+  const required = record.session_state.required_item_ids
+  if (state.phase === "ANCHOR_PENDING") {
+    if (!sameStringSet(required, state.anchor_item_ids)
+      || record.active_submission_id
+      || record.latest_feedback_id) {
+      throw new LearningCycleStoreError(
+        "INVALID_RECORD",
+        "ANCHOR_PENDING 会话状态不一致",
+      )
+    }
+    return
+  }
+  for (const hash of [
+    state.anchor_input_hash,
+    state.anchor_answers_hash,
+    state.anchor_grade_hash,
+  ]) {
+    if (!/^sha256:[a-f0-9]{64}$/.test(hash)) {
+      throw new LearningCycleStoreError(
+        "INVALID_RECORD",
+        "route lock hash 无效",
+      )
+    }
+  }
+  if (!state.anchor_submission_id.trim() || !state.route_lock_id.trim()
+    || !state.route_id.trim()
+    || !["remediate", "reinforce", "advance"].includes(state.action)
+    || !Number.isFinite(state.anchor_score_ratio)
+    || state.anchor_score_ratio < 0 || state.anchor_score_ratio > 1
+    || state.required_item_ids.length === 0
+    || new Set(state.required_item_ids).size
+      !== state.required_item_ids.length
+    || state.anchor_item_ids.some((itemId) =>
+      !state.required_item_ids.includes(itemId))
+    || new Set(state.reveal_tiers).size !== state.reveal_tiers.length
+    || state.reveal_tiers.some((tier) => ![1, 2, 3].includes(tier))
+    || !sameStringSet(required, state.required_item_ids)) {
+    throw new LearningCycleStoreError(
+      "INVALID_RECORD",
+      "ROUTE_LOCKED 会话状态不一致",
+    )
+  }
 }
 
 function normalizeSubmission(
@@ -827,6 +926,15 @@ function assertIdentifier(value: string, label: string): string {
     throw new LearningCycleStoreError("INVALID_RECORD", `${label} 不能为空`)
   }
   return value
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+  const leftSet = new Set(left)
+  const rightSet = new Set(right)
+  return leftSet.size === left.length
+    && rightSet.size === right.length
+    && leftSet.size === rightSet.size
+    && [...leftSet].every((value) => rightSet.has(value))
 }
 
 function assertSecureRef(value: string, label: string): void {

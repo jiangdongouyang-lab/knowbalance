@@ -43,11 +43,16 @@ export function auditTeaching(input: TeachingAuditInput): TeachingAuditResult {
 
   // ── Week3：结构化失败信息 ──
   const failedDimensions = collectFailedDimensions(allChecks)
-  const missingPrerequisiteSourceIds = collectMissingPrerequisiteIds(allChecks, input.knowledgeBase)
+  const missingPrerequisiteSourceIds = collectMissingPrerequisiteIds(allChecks)
   const unknownPrerequisiteRefs = collectUnknownPrerequisiteRefs(prerequisiteCheck, input.knowledgeBase)
   const { requiredAction, fixScope } = deriveRecoveryAction(allChecks)
   const recommendedLevel = deriveRecommendedLevel(difficultyCheck, input.learnerProfile.level)
-  const canRecover = status !== "reject" || (difficultyCheck.verdict === "misaligned" && recommendedLevel !== null)
+  const canRecover = status !== "reject"
+    || (
+      fixScope === "new_spec"
+      && unknownPrerequisiteRefs.length === 0
+      && (recommendedLevel !== null || missingPrerequisiteSourceIds.length > 0)
+    )
 
   return {
     artifactId: input.artifactId,
@@ -124,6 +129,18 @@ function checkPrerequisites(
 ): PrerequisiteCheck {
   const checkedConcepts: PrerequisiteCheck["checkedConcepts"] = []
   let hasBlocking = false
+  const prereqItemsBySourceId = new Map(
+    knowledgeBase.items.map((kbItem) => [kbItem.sourceId, kbItem] as const),
+  )
+  const taughtSourceIds = new Set(targetItems.map((item) => item.sourceId))
+  const knownCanonicals = new Set(
+    learnerProfile.known_concepts.flatMap((raw) =>
+      canonicalizeConcept(raw, knowledgeBase).sourceIds),
+  )
+  const weakCanonicals = new Set(
+    learnerProfile.weak_concepts.flatMap((raw) =>
+      canonicalizeConcept(raw, knowledgeBase).sourceIds),
+  )
 
   for (const item of targetItems) {
     const prereqIds = item.prerequisites ?? []
@@ -137,25 +154,22 @@ function checkPrerequisites(
       continue
     }
 
-    // 前置知识是否存在知识库中
-    const prereqItems = prereqIds
-      .map((pid) => knowledgeBase.items.find((kbItem) => kbItem.sourceId === pid))
-      .filter((p): p is KnowledgeItem => p != null)
-
-    // 学习者是否已掌握（known_concepts 匹配）或正在学（本轮目标之一）
-    const taughtSourceIds = new Set(targetItems.map((ti) => ti.sourceId))
-    const knownCanonicals = new Set(
-      learnerProfile.known_concepts.flatMap((raw) => {
-        const mapped = canonicalizeConcept(raw, knowledgeBase)
-        return mapped.sourceIds
-      }),
+    const unknownPrerequisiteRefs = prereqIds.filter(
+      (sourceId) => !prereqItemsBySourceId.has(sourceId),
     )
 
+    // 已明确掌握且不在薄弱点中的目标，不再要求重复验证其前置知识。
+    // 无效的前置知识引用仍按知识库完整性问题处理。
+    const targetIsExplicitlyMastered =
+      knownCanonicals.has(item.sourceId) && !weakCanonicals.has(item.sourceId)
+
     const missingPrerequisites: string[] = []
-    for (const prereq of prereqItems) {
+    for (const prereqId of prereqIds) {
+      const prereq = prereqItemsBySourceId.get(prereqId)
+      if (!prereq) continue
       const isKnown = knownCanonicals.has(prereq.sourceId)
       const isBeingTaught = taughtSourceIds.has(prereq.sourceId)
-      if (!isKnown && !isBeingTaught) {
+      if (!targetIsExplicitlyMastered && !isKnown && !isBeingTaught) {
         missingPrerequisites.push(`${prereq.sourceId} ${prereq.title}`)
       }
     }
@@ -163,14 +177,28 @@ function checkPrerequisites(
     checkedConcepts.push({
       sourceId: item.sourceId,
       title: item.title,
-      prerequisites: prereqItems.map((p) => `${p.sourceId} ${p.title}`),
+      prerequisites: prereqIds.map((sourceId) => {
+        const prerequisite = prereqItemsBySourceId.get(sourceId)
+        return prerequisite ? `${sourceId} ${prerequisite.title}` : sourceId
+      }),
       missingPrerequisites,
     })
 
-    if (missingPrerequisites.length > 0) hasBlocking = true
+    if (missingPrerequisites.length > 0 || unknownPrerequisiteRefs.length > 0) {
+      hasBlocking = true
+    }
   }
 
   const totalMissing = checkedConcepts.reduce((sum, c) => sum + c.missingPrerequisites.length, 0)
+  const unknownPrerequisiteRefs = collectUnknownPrerequisiteRefs(
+    {
+      dimension: "prerequisite_coverage",
+      verdict: hasBlocking ? "misaligned" : "aligned",
+      checkedConcepts,
+      reason: "",
+    },
+    knowledgeBase,
+  )
 
   if (!hasBlocking) {
     return {
@@ -185,10 +213,17 @@ function checkPrerequisites(
     dimension: "prerequisite_coverage",
     verdict: "misaligned",
     checkedConcepts,
-    reason: `存在 ${totalMissing} 项前置知识未被学习者掌握：${checkedConcepts
-      .filter((c) => c.missingPrerequisites.length > 0)
-      .map((c) => `${c.title} 缺少 ${c.missingPrerequisites.join(", ")}`)
-      .join("；")}`,
+    reason: [
+      totalMissing > 0
+        ? `存在 ${totalMissing} 项前置知识未被学习者掌握：${checkedConcepts
+          .filter((c) => c.missingPrerequisites.length > 0)
+          .map((c) => `${c.title} 缺少 ${c.missingPrerequisites.join(", ")}`)
+          .join("；")}`
+        : null,
+      unknownPrerequisiteRefs.length > 0
+        ? `知识库中不存在前置引用：${unknownPrerequisiteRefs.join("、")}`
+        : null,
+    ].filter((part): part is string => part !== null).join("；"),
   }
 }
 
@@ -216,16 +251,30 @@ function checkWeakConcepts(
   // 教学内容的 source_id 集合
   const taughtSourceIds = new Set(targetItems.map((item) => item.sourceId))
 
-  // 薄弱点概念映射到 source_id
+  // 只审核能映射到当前知识库的薄弱点。未映射的自由文本会继续保留在
+  // B 画像中，但不能要求 C 在没有知识证据的情况下强行覆盖。
   const weakMapped = learnerWeak.map((raw) => {
     const mapped = canonicalizeConcept(raw, knowledgeBase)
-    return { raw, sourceIds: mapped.sourceIds }
+    return { raw, matched: mapped.matched, sourceIds: mapped.sourceIds }
   })
+  const auditableWeak = weakMapped.filter((item) =>
+    item.matched && item.sourceIds.length > 0)
+
+  if (auditableWeak.length === 0) {
+    return {
+      dimension: "weak_concept_coverage",
+      verdict: "aligned",
+      learnerWeakConcepts: learnerWeak,
+      coveredWeakConcepts: [],
+      uncoveredWeakConcepts: [],
+      reason: `画像中的薄弱点尚未映射到当前知识库：${learnerWeak.join("、")}；本维度不要求 C 生成无证据内容。`,
+    }
+  }
 
   const covered: string[] = []
   const uncovered: string[] = []
 
-  for (const wm of weakMapped) {
+  for (const wm of auditableWeak) {
     const isCovered = wm.sourceIds.some((sid) => taughtSourceIds.has(sid))
     if (isCovered) {
       covered.push(wm.raw)
@@ -241,7 +290,7 @@ function checkWeakConcepts(
       learnerWeakConcepts: learnerWeak,
       coveredWeakConcepts: covered,
       uncoveredWeakConcepts: uncovered,
-      reason: `教学内容覆盖了 ${covered.length}/${learnerWeak.length} 个薄弱点：${covered.join("、")}。`,
+      reason: `教学内容覆盖了 ${covered.length}/${auditableWeak.length} 个可核验薄弱点：${covered.join("、")}。`,
     }
   }
 
@@ -251,7 +300,7 @@ function checkWeakConcepts(
     learnerWeakConcepts: learnerWeak,
     coveredWeakConcepts: [],
     uncoveredWeakConcepts: uncovered,
-    reason: `教学内容未覆盖任何薄弱点。学习者的薄弱点 ${learnerWeak.join("、")} 均未被涉及，建议调整教学内容。`,
+    reason: `教学内容未覆盖任何可核验薄弱点。${uncovered.join("、")} 均未被涉及，建议调整教学内容。`,
   }
 }
 
@@ -351,7 +400,7 @@ function collectFailedDimensions(checks: CheckLike[]): TeachingAuditDimension[] 
     .map((c) => c.dimension)
 }
 
-function collectMissingPrerequisiteIds(checks: CheckLike[], kb: KnowledgeBase): string[] {
+function collectMissingPrerequisiteIds(checks: CheckLike[]): string[] {
   const prereqCheck = checks.find((c) => c.dimension === "prerequisite_coverage") as PrerequisiteCheck | undefined
   if (!prereqCheck || prereqCheck.verdict === "aligned") return []
   const missing: string[] = []
@@ -373,9 +422,9 @@ function collectUnknownPrerequisiteRefs(prereqCheck: PrerequisiteCheck, kb: Know
   const unknown: string[] = []
   for (const concept of prereqCheck.checkedConcepts) {
     for (const prereq of concept.prerequisites) {
-      const sourceId = prereq.split(" ")[0]
+      const sourceId = prereq.trim().split(/\s+/)[0]
       if (sourceId && !kbSourceIds.has(sourceId) && !unknown.includes(sourceId)) {
-        unknown.push(prereq)
+        unknown.push(sourceId)
       }
     }
   }

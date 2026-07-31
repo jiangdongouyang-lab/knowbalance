@@ -91,10 +91,93 @@ describe("role C deterministic grading boundary", () => {
     expect(grade.status).toBe("graded")
     expect(grade.item_results[0]).toMatchObject({
       raw_score: 0,
-      misconception_tags: ["confuses_iteration_with_condition"],
+      misconception_tags: ["option_misconception"],
       hint_factor: 0.65,
     })
     expect(grade.evidence_score).toBe(0)
+  })
+
+  test("does not copy secure misconception text or rubric IDs into public grades", async () => {
+    const optionArtifact = structuredClone(secureArtifact)
+    optionArtifact.payload!.items = [optionArtifact.payload!.items[0]!]
+    optionArtifact.payload!.objective_coverage = [{
+      objective_id: "O1",
+      item_ids: ["I1"],
+      answer_kinds: ["exact_set"],
+    }]
+    optionArtifact.payload!.items[0]!.misconception_by_option = {
+      opt_wrong: "PRIVATE_CORRECT_ANSWER_IS_opt_correct",
+    }
+    const wrong = structuredClone(submission)
+    wrong.answers = [{
+      item_id: "I1",
+      selected_option_id: "opt_wrong",
+      hint_level_used: 0,
+    }]
+    const optionGrade = await gradeSubmission(wrong, optionArtifact)
+    expect(JSON.stringify(optionGrade))
+      .not.toContain("PRIVATE_CORRECT_ANSWER_IS_opt_correct")
+    expect(optionGrade.item_results[0]!.misconception_tags)
+      .toEqual(["option_misconception"])
+
+    const rubricArtifact = structuredClone(secureArtifact)
+    rubricArtifact.payload!.items = [{
+      item_id: "I2",
+      objective_id: "O2",
+      tier: 2,
+      modality: "short_answer",
+      max_score: 1,
+      answer_spec: {
+        kind: "concept_rubric",
+        criteria: [{
+          criterion_id: "PRIVATE_ANSWER_IS_85",
+          description: "说明顺序",
+          weight: 1,
+          required_evidence: ["顺序"],
+        }],
+        contradictions: [],
+      },
+      misconception_by_option: {},
+      evidence_weight: 1,
+    }]
+    rubricArtifact.payload!.objective_coverage = [{
+      objective_id: "O2",
+      item_ids: ["I2"],
+      answer_kinds: ["concept_rubric"],
+    }]
+    const rubricSubmission = structuredClone(submission)
+    rubricSubmission.answers = [{
+      item_id: "I2",
+      text_response: "列表保持顺序",
+      hint_level_used: 0,
+    }]
+    const rubricGrade = await gradeSubmission(
+      rubricSubmission,
+      rubricArtifact,
+      { rubric_judge: new (class {
+        readonly grader_version = "fixture-rubric-v1"
+        async judge() {
+          return {
+            criteria: [{
+              criterion_id: "PRIVATE_ANSWER_IS_85",
+              status: "met" as const,
+              confidence: 1,
+              evidence_excerpt: "顺序",
+            }],
+          }
+        }
+      })() },
+    )
+    expect(JSON.stringify(rubricGrade))
+      .not.toContain("PRIVATE_ANSWER_IS_85")
+    expect(rubricGrade.item_results[0]!.rubric_results)
+      .toEqual([{
+        criterion_id: "criterion_1",
+        status: "met",
+        awarded_score: 1,
+        confidence: 1,
+        evidence_excerpt: "顺序",
+      }])
   })
 
   test("blocks an incomplete submission instead of freezing omitted items as zero", async () => {
