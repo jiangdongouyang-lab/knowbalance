@@ -52,47 +52,102 @@ describe("role C model-backed auxiliary stages", () => {
   test("critic receives no secure payload and can return only known evidence references", async () => {
     const gateway = new CapturingGateway([{
       checks: [{
-        target_artifact_id: "ART-ASSESS",
+        target_artifact_id: "ART-CONCEPT",
         objective_id: "O1",
-        issue_type: "missing_assessment",
+        issue_type: "unsupported_claim",
         severity: "critical",
-        evidence_refs: ["O1"],
-        proposed_action: "补充与目标直接对应的题目。",
+        evidence_refs: ["BLOCK-O1"],
+        proposed_action: "核对该讲义块与证据事实。",
       }],
     }])
     const critic = new ModelBackedCrossArtifactCritic(gateway)
-    const objections = await critic.review({
-      spec: {
-        spec_id: "SPEC-1",
-        targets: [{ objective_id: "O1", source_id: "K007", required_fact_ids: ["F001"], observable_behavior: "trace", importance: "core" }],
-        path_node: { node_id: "PATH-1", target_source_ids: ["K007"], prerequisite_source_ids: [], goal: "追踪循环" },
-        difficulty: { domain_complexity: 1, cognitive_demand: 1, reasoning_steps: 1, code_complexity: 1, prerequisite_load: 0, scaffold_strength: 2 },
-      } as any,
-      concept: {
-        artifact_id: "ART-CONCEPT", status: "ready", quality: {},
-        payload: { objective_coverage: [{ objective_id: "O1", block_ids: ["BLOCK-O1"] }] },
-      } as any,
-      lab: {
-        artifact_id: "ART-LAB", status: "ready", quality: { execution_verified: true },
-        payload: { instructions: [{ block_id: "LAB-BLOCK" }], public_tests: [{ test_id: "PT-1" }] },
-      } as any,
-      assessment: {
-        artifact_id: "ART-ASSESS", status: "ready", quality: { answer_key_verified: true },
-        payload: { items: [{ item_id: "ITEM-1" }] },
-      } as any,
-      lab_secure: {
-        artifact_id: "ART-LAB-SECURE", quality: { execution_verified: true },
-        payload: { reference_solution: "PRIVATE_REFERENCE_MARKER" },
-      } as any,
-      assessment_secure: {
-        artifact_id: "ART-ASSESS-SECURE", quality: { answer_key_verified: true },
-        payload: { answer_spec: "PRIVATE_ANSWER_MARKER" },
-      } as any,
-    })
+    const input = validCriticInput()
+    const objections = await critic.review(input)
     expect(objections).toHaveLength(1)
     expect(objections[0]).toMatchObject({ from_agent: "cross-artifact-gate", objective_id: "O1" })
     const serialized = JSON.stringify(gateway.inputs[0])
     expect(serialized).not.toContain("PRIVATE_REFERENCE_MARKER")
     expect(serialized).not.toContain("PRIVATE_ANSWER_MARKER")
   })
+
+  test("does not let semantic review contradict trusted execution or deterministic coverage", async () => {
+    const gateway = new CapturingGateway([{
+      checks: [
+        {
+          target_artifact_id: "ART-LAB",
+          objective_id: "pipeline",
+          issue_type: "unexecutable_task",
+          severity: "critical",
+          evidence_refs: ["ART-LAB"],
+          proposed_action: "重新执行。",
+        },
+        {
+          target_artifact_id: "ART-LAB",
+          objective_id: "O1",
+          issue_type: "missing_practice",
+          severity: "critical",
+          evidence_refs: ["O1"],
+          proposed_action: "补练习。",
+        },
+        {
+          target_artifact_id: "ART-ASSESS",
+          objective_id: "O1",
+          issue_type: "difficulty_mismatch",
+          severity: "critical",
+          evidence_refs: ["O1"],
+          proposed_action: "调整难度。",
+        },
+      ],
+    }])
+    const critic = new ModelBackedCrossArtifactCritic(gateway)
+
+    expect(await critic.review(validCriticInput())).toEqual([])
+  })
 })
+
+function validCriticInput(): any {
+  return {
+    spec: {
+      spec_id: "SPEC-1",
+      targets: [{ objective_id: "O1", source_id: "K007", required_fact_ids: ["F001"], observable_behavior: "trace", importance: "core" }],
+      path_node: { node_id: "PATH-1", target_source_ids: ["K007"], prerequisite_source_ids: [], goal: "追踪循环" },
+      difficulty: { domain_complexity: 1, cognitive_demand: 1, reasoning_steps: 1, code_complexity: 1, prerequisite_load: 0, scaffold_strength: 2 },
+    },
+    concept: {
+      artifact_id: "ART-CONCEPT", status: "ready", quality: {},
+      payload: {
+        prerequisite_bridge: [],
+        explanation_blocks: [{ block_id: "BLOCK-O1" }],
+        worked_examples: [], micro_checks: [], summary: [],
+        objective_coverage: [{ objective_id: "O1", block_ids: ["BLOCK-O1"] }],
+      },
+    },
+    lab: {
+      artifact_id: "ART-LAB", status: "ready", quality: { execution_verified: true },
+      payload: {
+        instructions: [{ block_id: "LAB-BLOCK", claims: [] }],
+        public_tests: [{ test_id: "PT-1", objective_id: "O1" }],
+        objective_coverage: [{ objective_id: "O1", instruction_block_ids: ["LAB-BLOCK"], public_test_ids: ["PT-1"] }],
+        used_evidence: [],
+      },
+    },
+    assessment: {
+      artifact_id: "ART-ASSESS", status: "ready", quality: { answer_key_verified: true },
+      payload: {
+        items: [{ item_id: "ITEM-1", objective_id: "O1", modality: "trace", tier: 2, max_score: 1 }],
+        objective_coverage: [{ objective_id: "O1", item_ids: ["ITEM-1"] }],
+      },
+    },
+    lab_secure: {
+      artifact_id: "ART-LAB-SECURE", quality: { execution_verified: true },
+      payload: { reference_solution: "PRIVATE_REFERENCE_MARKER" },
+    },
+    assessment_secure: {
+      artifact_id: "ART-ASSESS-SECURE", quality: { answer_key_verified: true },
+      payload: {
+        answer_spec: "PRIVATE_ANSWER_MARKER",
+        items: [{ item_id: "ITEM-1", objective_id: "O1", modality: "trace", max_score: 1 }],
+      },
+    },
+  }
+}

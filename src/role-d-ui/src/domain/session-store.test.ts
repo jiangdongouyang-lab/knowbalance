@@ -55,6 +55,25 @@ describe("session-store", () => {
     expect(loadSession()).toEqual(session)
   })
 
+  test("round-trips an explicit unavailable diagnosis without inventing an item", () => {
+    const unavailable = structuredClone(session)
+    unavailable.diagnosis = {
+      availability: "unavailable",
+      unavailableReason: "当前目标没有可判分选择题。",
+      items: [],
+      sourceId: "K001",
+      factId: "",
+      concept: "Python 是什么",
+      difficulty: "beginner",
+      question: "",
+      options: [],
+      answer: "",
+    }
+
+    expect(saveSession(unavailable)).toBe(true)
+    expect(loadSession()?.diagnosis).toEqual(unavailable.diagnosis)
+  })
+
   test("round-trips persisted A/B audit and arbitration summaries", () => {
     const audited: RoleDSession = {
       ...session,

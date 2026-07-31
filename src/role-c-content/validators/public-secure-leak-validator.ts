@@ -34,7 +34,8 @@ export function validateCodeLabPublicSecureSeparation(
   const issues = [...validatePublicArtifactNoSecrets(publicPayload).issues]
   const publicText = JSON.stringify(publicPayload)
   const publicStrings = collectStrings(publicPayload)
-  const publicLearnerText = publicStrings.join("\n")
+  const publicLearnerStrings = codeLabLearnerStrings(publicPayload)
+  const publicLearnerText = publicLearnerStrings.join("\n")
   const joinedPublicCode = normalizeCode(publicStrings.join("\n"))
   const normalizedStarter = normalizeCode(publicPayload.starter_code)
   const normalizedReference = normalizeCode(securePayload.reference_solution)
@@ -43,10 +44,10 @@ export function validateCodeLabPublicSecureSeparation(
     publicStrings.some((value) =>
       normalizeCode(value).includes(normalizedReference))
     || joinedPublicCode.includes(normalizedReference)
-    || containsDispersedCodeSecret(
+    || containsReferenceDeltaLeak(
       publicStrings,
-      normalizedReference,
-      normalizedStarter,
+      securePayload.reference_solution,
+      publicPayload.starter_code,
     )
   )) {
     issues.push(issue("reference_solution_leak", "$.public", "公开产物包含完整参考实现内容"))
@@ -61,18 +62,21 @@ export function validateCodeLabPublicSecureSeparation(
     if (publicText.includes(test.test_id)) {
       issues.push(issue("hidden_test_id_leak", "$.public", `公开产物包含隐藏测试 ID ${test.test_id}`))
     }
-    if (containsValueSecret(publicStrings, publicLearnerText, test.input)
+    const hasPrivateCase = carriesPrivateTestCase(test.input)
+    if (hasPrivateCase && (
+      containsValueSecret(publicLearnerStrings, publicLearnerText, test.input)
       || publicPayload.public_tests.some(
         (publicTest) => sameJsonValue(publicTest.input, test.input),
-      )) {
+      )
+    )) {
       issues.push(issue(
         "hidden_test_input_leak",
         "$.public",
         `公开产物包含隐藏测试 ${test.test_id} 的输入值`,
       ))
     }
-    if (containsExpectedSecret(
-      publicStrings,
+    if (hasPrivateCase && containsExpectedSecret(
+      publicLearnerStrings,
       publicLearnerText,
       test.expected,
     )) {
@@ -138,6 +142,19 @@ export function validateAssessmentPublicSecureSeparation(
     }
   }
   for (const suite of securePayload.code_test_suites) {
+    const linkedItemIds = new Set(securePayload.items.flatMap((item) =>
+      item.answer_spec.kind === "code"
+        && item.answer_spec.test_suite_id === suite.test_suite_id
+        ? [item.item_id]
+        : []))
+    const linkedPublicItems = publicPayload.items.filter((item) =>
+      linkedItemIds.has(item.item_id))
+    const suitePublicValue = linkedPublicItems.length > 0
+      ? linkedPublicItems
+      : publicPayload.items
+    const suitePublicText = JSON.stringify(suitePublicValue)
+    const suitePublicStrings = assessmentLearnerStrings(suitePublicValue)
+    const suiteLearnerText = suitePublicStrings.join("\n")
     if (publicText.includes(suite.test_suite_id)) {
       issues.push(issue("test_suite_id_leak", "$.public", `公开测评包含私有测试套件 ${suite.test_suite_id}`))
     }
@@ -145,14 +162,12 @@ export function validateAssessmentPublicSecureSeparation(
     if (reference && (
       publicStrings.some((value) => normalizeCode(value).includes(reference))
       || joinedPublicCode.includes(reference)
-      || containsDispersedCodeSecret(
+      || containsReferenceDeltaLeak(
         publicStrings,
-        reference,
-        normalizeCode(
-          publicPayload.items
-            .map((item) => item.starter_code ?? "")
-            .join("\n"),
-        ),
+        suite.reference_solution,
+        publicPayload.items
+          .map((item) => item.starter_code ?? "")
+          .join("\n"),
       )
     )) {
       issues.push(issue("reference_solution_leak", "$.public", `公开测评包含测试套件 ${suite.test_suite_id} 的参考实现`))
@@ -161,9 +176,10 @@ export function validateAssessmentPublicSecureSeparation(
       if (publicText.includes(test.test_id)) {
         issues.push(issue("hidden_test_id_leak", "$.public", `公开测评包含隐藏测试 ID ${test.test_id}`))
       }
-      if (containsValueSecret(
-        publicStrings,
-        publicLearnerText,
+      const hasPrivateCase = carriesPrivateTestCase(test.input)
+      if (hasPrivateCase && containsValueSecret(
+        suitePublicStrings,
+        suiteLearnerText,
         test.input,
       )) {
         issues.push(issue(
@@ -172,9 +188,9 @@ export function validateAssessmentPublicSecureSeparation(
           `公开测评包含隐藏测试 ${test.test_id} 的输入值`,
         ))
       }
-      if (containsExpectedSecret(
-        publicStrings,
-        publicLearnerText,
+      if (hasPrivateCase && containsExpectedSecret(
+        suitePublicStrings,
+        suitePublicText,
         test.expected,
       )) {
         issues.push(issue(
@@ -207,7 +223,12 @@ function collectStrings(value: unknown): string[] {
   }
 }
 
-function visit(value: unknown, path: string, issues: ValidationIssue[]): void {
+function visit(
+  value: unknown,
+  path: string,
+  issues: ValidationIssue[],
+  inspectKeys = true,
+): void {
   if (typeof value === "string") {
     if (value.toLowerCase().includes("secure://role-c/")) {
       issues.push(issue("secure_ref_leak", path, "公开产物包含私有引用"))
@@ -215,7 +236,8 @@ function visit(value: unknown, path: string, issues: ValidationIssue[]): void {
     return
   }
   if (Array.isArray(value)) {
-    value.forEach((entry, index) => visit(entry, `${path}[${index}]`, issues))
+    value.forEach((entry, index) =>
+      visit(entry, `${path}[${index}]`, issues, inspectKeys))
     return
   }
   if (!value || typeof value !== "object") return
@@ -223,7 +245,7 @@ function visit(value: unknown, path: string, issues: ValidationIssue[]): void {
   for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
     const normalizedKey = key.toLowerCase()
     const childPath = `${path}.${key}`
-    if (FORBIDDEN_PUBLIC_KEYS.has(normalizedKey)) {
+    if (inspectKeys && FORBIDDEN_PUBLIC_KEYS.has(normalizedKey)) {
       issues.push({
         code: "public_secure_leak",
         path: childPath,
@@ -231,7 +253,7 @@ function visit(value: unknown, path: string, issues: ValidationIssue[]): void {
         severity: "critical",
       })
     }
-    visit(child, childPath, issues)
+    visit(child, childPath, issues, inspectKeys && normalizedKey !== "input")
   }
 }
 
@@ -256,9 +278,16 @@ function containsValueSecret(
   value: unknown,
 ): boolean {
   if (containsStructuredSecret(publicText, value)) return true
-  const scalarSequence = flattenScalarTokens(value)
-    .map(normalizeSemanticText)
-    .join("")
+  const rawTokens = flattenScalarTokens(value)
+  const tokens = rawTokens.map(normalizeSemanticText).filter(Boolean)
+  if (tokens.length === 0) return false
+  if (tokens.length === 1) {
+    const token = tokens[0]!
+    return publicStrings.some((text) =>
+      (token.length >= 3 && containsLiteralToken(text, rawTokens[0]!))
+      || containsExplicitInputRelation(text, rawTokens[0]!))
+  }
+  const scalarSequence = tokens.join("")
   if (scalarSequence.length < 3) return false
   return publicStrings.some((text) =>
     normalizeSemanticText(text).includes(scalarSequence))
@@ -268,11 +297,38 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
+/**
+ * `null`, an empty stdin payload, and an empty call envelope describe protocols
+ * without a per-case input. Their expected output is the public task contract,
+ * not a private test vector.
+ */
+function carriesPrivateTestCase(value: unknown): boolean {
+  if (value === null || value === undefined || value === "") return false
+  if (!value || typeof value !== "object" || Array.isArray(value)) return true
+
+  const envelope = value as Record<string, unknown>
+  const keys = Object.keys(envelope)
+  if (!keys.every((key) => key === "args" || key === "kwargs")) return true
+  const args = envelope.args
+  const kwargs = envelope.kwargs
+  const emptyArgs = args === undefined
+    || Array.isArray(args) && args.length === 0
+  const emptyKwargs = kwargs === undefined
+    || Boolean(
+      kwargs
+      && typeof kwargs === "object"
+      && !Array.isArray(kwargs)
+      && Object.keys(kwargs as Record<string, unknown>).length === 0,
+    )
+  return !(emptyArgs && emptyKwargs)
+}
+
 function containsExpectedSecret(
   publicStrings: string[],
   publicText: string,
   value: unknown,
 ): boolean {
+  if (containsStructuredSecret(publicText, value)) return true
   if (typeof value === "string" && value.trim().length >= 8
     && publicText.toLocaleLowerCase().includes(
       JSON.stringify(value).slice(1, -1).toLocaleLowerCase(),
@@ -287,22 +343,27 @@ function containsExpectedSecret(
   if (secret.length === 0) return false
   return publicStrings.some((text) => {
     const compact = normalizeSemanticText(text)
-    if (!compact.includes(secret)) return false
-    return [
-      "输出",
-      "结果",
-      "返回",
-      "预期",
-      "应为",
-      "等于",
-      "满分",
-      "output",
-      "result",
-      "return",
-      "expected",
-      "equals",
-    ].some((marker) => compact.includes(normalizeSemanticText(marker)))
+    const escaped = escapeRegExp(secret)
+    const explicitRelations = [
+      `预期(?:输出|结果|值)?(?:是|为|等于)?${escaped}`,
+      `(?:输出|结果|返回值)(?:是|为|应为|等于)${escaped}`,
+      `(?:应为|等于)${escaped}`,
+      `expected(?:output|result|value)?(?:is|equals)?${escaped}`,
+      `(?:output|result|returnvalue)(?:is|equals)${escaped}`,
+      `returns?${escaped}`,
+    ]
+    return explicitRelations.some((pattern) =>
+      new RegExp(pattern, "u").test(compact))
+      || containsCodeReturnLiteral(text, value)
   })
+}
+
+function containsCodeReturnLiteral(text: string, value: unknown): boolean {
+  if (typeof value !== "string" && typeof value !== "number"
+    && typeof value !== "boolean" && value !== null) return false
+  const literal = value === null ? "None" : String(value)
+  const escaped = escapeRegExp(literal)
+  return new RegExp(`\\breturn\\s+${escaped}(?![A-Za-z0-9_.])`, "iu").test(text)
 }
 
 function containsExplicitAnswerRelation(
@@ -332,6 +393,20 @@ function containsExplicitAnswerRelation(
     })
 }
 
+function containsExplicitInputRelation(text: string, token: string): boolean {
+  const compact = text.normalize("NFKC")
+    .toLocaleLowerCase()
+    .replace(/\s+/g, "")
+  const normalized = token.normalize("NFKC").toLocaleLowerCase().trim()
+  if (!normalized) return false
+  const escaped = escapeRegExp(normalized)
+  const boundary = `(?![a-z0-9_])`
+  return [
+    `(?:隐藏|私有)?(?:测试|用例)?输入(?:值)?(?:是|为|等于|:|=)?${escaped}${boundary}`,
+    `(?:使用|采用|传入|输入|testwith|input)(?:值)?${escaped}${boundary}(?:测试|作为用例|astest)?`,
+  ].some((pattern) => new RegExp(pattern, "u").test(compact))
+}
+
 function containsLiteralToken(text: string, token: string): boolean {
   const normalizedText = text.normalize("NFKC").toLocaleLowerCase()
   const normalizedToken = token.normalize("NFKC")
@@ -346,38 +421,71 @@ function containsLiteralToken(text: string, token: string): boolean {
   ).test(normalizedText)
 }
 
-function containsDispersedCodeSecret(
+/** Detects disclosure of every implementation line that completes a public starter. */
+function containsReferenceDeltaLeak(
   publicStrings: string[],
-  normalizedReference: string,
-  normalizedAllowedCode: string,
+  referenceSolution: string,
+  allowedStarter: string,
 ): boolean {
-  const reference = normalizedReference.slice(0, 4_000)
-  if (reference.length < 8) return false
-  const candidates = publicStrings
+  const starterLines = new Set(codeLines(allowedStarter))
+  const deltaLines = [...new Set(codeLines(referenceSolution)
+    .filter((line) => !starterLines.has(line)))]
+  if (deltaLines.length === 0) return false
+  const publicCandidates = publicStrings
+    .filter((value) => normalizeCode(value) !== normalizeCode(allowedStarter))
     .map(normalizeCode)
-    .filter((value) => value.length >= 8)
-  if (normalizedAllowedCode.length >= 8) {
-    candidates.push(normalizedAllowedCode)
-  }
-  if (candidates.length === 0) return false
+    .filter(Boolean)
+  if (publicCandidates.length === 0) return false
+  return deltaLines.every((line) =>
+    publicCandidates.some((candidate) => candidate.includes(line)))
+}
 
-  const reachable = new Uint8Array(reference.length + 1)
-  reachable[0] = 1
-  for (let start = 0; start < reference.length; start += 1) {
-    if (reachable[start] !== 1) continue
-    for (
-      let end = start + 8;
-      end <= reference.length;
-      end += 1
-    ) {
-      const fragment = reference.slice(start, end)
-      if (candidates.some((candidate) =>
-        candidate.includes(fragment))) {
-        reachable[end] = 1
-      }
-    }
+function codeLines(value: string): string[] {
+  return value.split(/\r?\n/)
+    .map(normalizeCode)
+    .filter((line) => line.length >= 6)
+}
+
+function codeLabLearnerStrings(payload: CodeLabPublicPayload): string[] {
+  return [
+    payload.title,
+    payload.starter_code,
+    ...payload.instructions.flatMap(renderBlockLearnerStrings),
+    ...payload.public_tests.flatMap((test) => [
+      test.description,
+      test.expected_behavior,
+    ]),
+    ...payload.hint_ladders.flatMap((ladder) =>
+      ladder.hints.map((hint) => hint.text)),
+    ...payload.reflection_questions,
+  ]
+}
+
+function assessmentLearnerStrings(
+  items: AssessmentPublicPayload["items"],
+): string[] {
+  return items.flatMap((item) => [
+    item.prompt,
+    item.starter_code ?? "",
+    ...(item.options?.map((option) => `${option.label}. ${option.text}`) ?? []),
+  ]).filter(Boolean)
+}
+
+function renderBlockLearnerStrings(
+  block: CodeLabPublicPayload["instructions"][number],
+): string[] {
+  if (block.block_type === "heading") return [block.text]
+  if (block.block_type === "paragraph") return [block.text, ...block.claims.map((claim) => claim.text)]
+  if (block.block_type === "code") return [block.code, block.caption ?? "", ...block.claims.map((claim) => claim.text)].filter(Boolean)
+  if (block.block_type === "callout") return [block.title, block.text, ...block.claims.map((claim) => claim.text)]
+  if (block.block_type === "comparison") {
+    return [block.title, ...block.columns.flatMap((column) => [column.heading, column.content]), ...block.claims.map((claim) => claim.text)]
   }
-  return reachable[reference.length] === 1
+  if (block.block_type === "quiz") {
+    return [block.prompt, ...(block.options?.map((option) => `${option.label}. ${option.text}`) ?? [])]
+  }
+  if (block.block_type === "hint") return [block.text]
+  return []
 }
 
 function flattenScalarTokens(value: unknown): string[] {

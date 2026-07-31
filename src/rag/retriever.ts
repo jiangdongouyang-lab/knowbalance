@@ -1,5 +1,11 @@
 import { loadKnowledgeBase } from "../knowledge/loader"
-import type { KnowledgeDifficulty, KnowledgeExample, KnowledgeFact, KnowledgeQuizItem } from "../knowledge/types"
+import type {
+  KnowledgeBase,
+  KnowledgeDifficulty,
+  KnowledgeExample,
+  KnowledgeFact,
+  KnowledgeQuizItem,
+} from "../knowledge/types"
 
 export interface RetrieveKnowledgeInput {
   query: string
@@ -62,8 +68,15 @@ const SYNONYMS: Record<string, string[]> = {
 }
 
 export async function retrieveKnowledge(input: RetrieveKnowledgeInput): Promise<RagResult> {
+  return retrieveKnowledgeFromKnowledgeBase(input, await loadKnowledgeBase())
+}
+
+/** Content-based retrieval over an injected knowledge base. */
+export function retrieveKnowledgeFromKnowledgeBase(
+  input: RetrieveKnowledgeInput,
+  knowledgeBase: KnowledgeBase,
+): RagResult {
   const topK = input.topK ?? 3
-  const knowledgeBase = await loadKnowledgeBase()
   const normalizedQuery = normalize(input.query)
   const expandedTerms = expandQueryTerms(normalizedQuery)
 
@@ -75,16 +88,13 @@ export async function retrieveKnowledge(input: RetrieveKnowledgeInput): Promise<
       const factHits = item.facts.filter((fact) => normalizedQueryIncludesAny(normalizedQuery, fact.content)).length
       const taskHits = item.practiceTasks.filter((task) => normalizedQueryIncludesAny(normalizedQuery, task)).length
       const levelBonus = input.learnerLevel ? Math.max(0, 3 - Math.abs(DIFFICULTY_ORDER[item.difficulty] - DIFFICULTY_ORDER[input.learnerLevel])) : 0
-      const projectBonus = normalizedQuery.includes("成绩统计") && item.sourceId === "K018" ? 10 : 0
-      const listBonus = (normalizedQuery.includes("成绩") || normalizedQuery.includes("很多数据") || normalizedQuery.includes("多个数据") || normalizedQuery.includes("一组数据")) && item.sourceId === "K009" ? 16 : 0
-      const loopBonus = (normalizedQuery.includes("循环") || normalizedQuery.includes("重复执行")) && item.sourceId === "K007" ? 18 : 0
       const scoreBreakdown = {
         keyword: matchedKeywords.length * 10,
         title: titleHit ? 5 : 0,
         facts: factHits * 3,
         practiceTasks: taskHits * 2,
         difficulty: levelBonus,
-        bonus: projectBonus + listBonus + loopBonus + synonymHits.length * 6,
+        bonus: synonymHits.length * 6,
       }
       const score = Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0)
       const matchedFields = [
@@ -94,7 +104,6 @@ export async function retrieveKnowledge(input: RetrieveKnowledgeInput): Promise<
         ...(taskHits > 0 ? ["practiceTasks"] : []),
         ...(levelBonus > 0 ? ["difficulty"] : []),
         ...(synonymHits.length > 0 ? ["synonyms"] : []),
-        ...(projectBonus + listBonus + loopBonus > 0 ? ["taskIntent"] : []),
       ]
 
       return {

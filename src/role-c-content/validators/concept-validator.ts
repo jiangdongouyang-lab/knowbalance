@@ -142,27 +142,6 @@ export function validateConceptLesson(input: {
     }
   }
 
-  const usedEvidenceKeys = new Set(payload.used_evidence.map(citationKey))
-  const contentCitationKeys = new Set(contentCitations.map(citationKey))
-  for (const citation of contentCitations) {
-    if (!usedEvidenceKeys.has(citationKey(citation))) {
-      issues.push(issue(
-        "used_evidence_incomplete",
-        "used_evidence",
-        `used_evidence 未登记产物引用：${citation.source_id}:${citation.fact_id}:${citation.relation}`,
-      ))
-    }
-  }
-  for (const citation of payload.used_evidence) {
-    if (!contentCitationKeys.has(citationKey(citation))) {
-      issues.push(issue(
-        "unused_evidence",
-        "used_evidence",
-        `used_evidence 登记了产物未使用的引用：${citation.source_id}:${citation.fact_id}:${citation.relation}`,
-      ))
-    }
-  }
-
   return {
     ok: issues.length === 0,
     issues,

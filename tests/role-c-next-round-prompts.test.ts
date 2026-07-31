@@ -21,7 +21,7 @@ import {
 
 describe("Role C next-round authoring semantics", () => {
   test("applies one versioned next-round policy to all three author Agents and stages", () => {
-    expect(ROLE_C_PROMPT_MANIFEST_VERSION).toBe("c-prompts-1.8.2")
+    expect(ROLE_C_PROMPT_MANIFEST_VERSION).toBe("c-prompts-1.15.0")
     for (const prompt of [
       CONCEPT_TUTOR_SYSTEM_PROMPT,
       CODE_LAB_SYSTEM_PROMPT,

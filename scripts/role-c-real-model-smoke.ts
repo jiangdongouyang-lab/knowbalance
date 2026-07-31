@@ -11,6 +11,7 @@ import {
   defineLearningPathNode,
   DeterministicConceptContentProvider,
   generateConceptLesson,
+  modelBackedProviderOptionsFromEnv,
   ModelBackedRoleCContentProvider,
   ModelOutputValidationError,
   ROLE_C_PROMPT_MANIFEST_VERSION,
@@ -73,28 +74,9 @@ try {
   })
   if (!built.ok) throw new Error(`SPEC_BLOCKED:${built.code}:${built.errors.join(";")}`)
 
-  const monolithicBudgets = {
-    concept_max_tokens: readTokenBudget(env.ROLE_C_MODEL_CONCEPT_MAX_TOKENS, 8_000, "ROLE_C_MODEL_CONCEPT_MAX_TOKENS"),
-    code_lab_max_tokens: readTokenBudget(env.ROLE_C_MODEL_CODE_LAB_MAX_TOKENS, 7_000, "ROLE_C_MODEL_CODE_LAB_MAX_TOKENS"),
-    assessment_max_tokens: readTokenBudget(env.ROLE_C_MODEL_ASSESSMENT_MAX_TOKENS, 8_000, "ROLE_C_MODEL_ASSESSMENT_MAX_TOKENS"),
-  }
-  const stagedOptions = {
-    concept_group_size: readPositiveInteger(env.ROLE_C_MODEL_CONCEPT_GROUP_SIZE, 1, "ROLE_C_MODEL_CONCEPT_GROUP_SIZE"),
-    concept_concurrency: readPositiveInteger(env.ROLE_C_MODEL_CONCEPT_CONCURRENCY, 1, "ROLE_C_MODEL_CONCEPT_CONCURRENCY"),
-    concept_segment_max_tokens: readTokenBudget(env.ROLE_C_MODEL_CONCEPT_SEGMENT_MAX_TOKENS, 3_500, "ROLE_C_MODEL_CONCEPT_SEGMENT_MAX_TOKENS"),
-    code_lab_public_max_tokens: readTokenBudget(env.ROLE_C_MODEL_CODE_LAB_PUBLIC_MAX_TOKENS, 3_500, "ROLE_C_MODEL_CODE_LAB_PUBLIC_MAX_TOKENS"),
-    code_lab_secure_max_tokens: readTokenBudget(env.ROLE_C_MODEL_CODE_LAB_SECURE_MAX_TOKENS, 5_000, "ROLE_C_MODEL_CODE_LAB_SECURE_MAX_TOKENS"),
-    assessment_public_max_tokens: readTokenBudget(env.ROLE_C_MODEL_ASSESSMENT_PUBLIC_MAX_TOKENS, 4_500, "ROLE_C_MODEL_ASSESSMENT_PUBLIC_MAX_TOKENS"),
-    assessment_secure_max_tokens: readTokenBudget(env.ROLE_C_MODEL_ASSESSMENT_SECURE_MAX_TOKENS, 5_500, "ROLE_C_MODEL_ASSESSMENT_SECURE_MAX_TOKENS"),
-  }
-  const generationStrategy = readGenerationStrategy(env.ROLE_C_MODEL_GENERATION_STRATEGY)
-  const maxRepairAttempts = process.argv.includes("--no-repair") ? 0 : 1
-  const provider = new ModelBackedRoleCContentProvider(gateway, {
-    ...monolithicBudgets,
-    ...stagedOptions,
-    generation_strategy: generationStrategy,
-    max_repair_attempts: maxRepairAttempts,
-  })
+  const providerOptions = modelBackedProviderOptionsFromEnv(env)
+  if (process.argv.includes("--no-repair")) providerOptions.max_repair_attempts = 0
+  const provider = new ModelBackedRoleCContentProvider(gateway, providerOptions)
   const conceptRequest = {
     generation_spec: built.spec,
     evidence_pack: evidence,
@@ -174,10 +156,7 @@ try {
       api_key_present: Boolean(env.ROLE_C_MODEL_API_KEY),
       response_format: env.ROLE_C_MODEL_RESPONSE_FORMAT || "json_schema",
       schema_strict: env.ROLE_C_MODEL_SCHEMA_STRICT || "true",
-      generation_strategy: generationStrategy,
-      monolithic_token_budgets: monolithicBudgets,
-      staged_options: stagedOptions,
-      max_repair_attempts: maxRepairAttempts,
+      provider_options: providerOptions,
     },
     author_results: authorResults,
     upstream_fixture: modelConcept?.status === "ready" ? "validated_model_concept" : "validated_deterministic_concept",
@@ -225,30 +204,6 @@ async function readEnvFile(path: string): Promise<Record<string, string>> {
     parsed[match[1]] = value
   }
   return parsed
-}
-
-function readTokenBudget(value: string | undefined, fallback: number, name: string): number {
-  if (value === undefined || value === "") return fallback
-  const parsed = Number(value)
-  if (!Number.isSafeInteger(parsed) || parsed < 500 || parsed > 100_000) {
-    throw new Error(`${name} 必须为 500..100000 的整数`)
-  }
-  return parsed
-}
-
-function readPositiveInteger(value: string | undefined, fallback: number, name: string): number {
-  if (value === undefined || value === "") return fallback
-  const parsed = Number(value)
-  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 30) {
-    throw new Error(`${name} 必须为 1..30 的整数`)
-  }
-  return parsed
-}
-
-function readGenerationStrategy(value: string | undefined): "staged" | "monolithic" {
-  if (!value || value === "staged") return "staged"
-  if (value === "monolithic") return value
-  throw new Error("ROLE_C_MODEL_GENERATION_STRATEGY 只允许 staged 或 monolithic")
 }
 
 type SmokeAgent = "concept" | "code-lab" | "assessment"

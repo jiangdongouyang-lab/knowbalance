@@ -1,7 +1,7 @@
-// 统一 IO 契约适配器：B 角色 → 全链交接
+// 统一 IO 契约适配器：B 角色 → D 公开会话投影
 // 将 B 的内部输出（LearnerProfile, ProfileProvenance, TeachingAuditResult, ArbitrationResult）
-// 转换为统一契约（src/contracts/unified/）定义的 LooseRecord，可直接喂入 normalizeUnifiedHandoff。
-// 边界: B_PROFILE_TO_A_RAG_REQUEST + A_B_C_D_FULL_HANDOFF（B 部分）
+// 转换为统一契约（src/contracts/unified/）定义的 LooseRecord，用于 normalizeUnifiedHandoff。
+// C 生成仍使用保留 RAG 证据和学习路径的 GenerateRoleCForRoleDInput。
 import type { LooseRecord } from "../contracts/unified/types"
 import type {
   LearnerProfile,
@@ -92,7 +92,7 @@ export function buildUnifiedArbitration(result: ArbitrationResult): LooseRecord 
   }
 }
 
-// ── 完整 B→全链 handoff payload ──
+// ── B 公开会话 handoff payload ──
 // 输出可直接作为 normalizeUnifiedHandoff 的输入 LooseRecord
 // 包含: b_profile, b_provenance, audit(teachingAudit + arbitration)
 export interface BuildBHandoffInput {

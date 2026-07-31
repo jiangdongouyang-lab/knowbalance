@@ -12,9 +12,25 @@ describe("unified I/O contract package", () => {
         weak_concepts: ["循环"],
         goal: "完成成绩统计程序",
       },
-      a_rag_result: { query: "循环", topK: 0, results: [] },
+      a_rag_result: {
+        query: "循环",
+        topK: 1,
+        results: [{
+          source_id: "K007",
+          title: "for 循环",
+          difficulty: "beginner",
+          score: 20,
+          facts: [{ source_id: "K007", fact_id: "F001", content: "for 循环可用于遍历序列。" }],
+        }],
+      },
       workflow_events: [],
-      c_artifacts: [],
+      c_artifacts: [{
+        id: "lesson-K007",
+        kind: "lesson",
+        title: "for 循环讲义",
+        content: "for 循环可用于遍历序列。",
+        citations: [{ source_id: "K007", fact_id: "F001" }],
+      }],
     })
 
     expect(unifiedBoundaryReport(handoff)).toEqual({

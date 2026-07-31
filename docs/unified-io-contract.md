@@ -19,9 +19,9 @@ This repository uses one canonical boundary layer to normalize A/B/C/D payloads 
 | Boundary | Input | Output | Rule |
 |---|---|---|---|
 | B → A | learner profile + query | RAG request | normalize only field names |
-| A → C | RAG result | canonical evidence pack | keep invalid or missing evidence visible |
+| A → C | lossless `RagResult` | C-internal `RagEvidencePack` | preserve facts, examples, practice tasks and private quiz seeds |
 | C → D | reviewed artifacts/session | D session view | preserve gaps, never invent citations |
-| Full handoff | mixed snake_case/camelCase payloads | unified handoff | accept both names, emit one canonical shape |
+| Public session projection | mixed snake_case/camelCase payloads | unified handoff | accept both names, emit one answer-free display shape |
 
 ## Hard rules
 
@@ -30,6 +30,8 @@ This repository uses one canonical boundary layer to normalize A/B/C/D payloads 
 3. Invalid citation stays visible as invalid, not silently repaired.
 4. `snake_case` and `camelCase` are both accepted at the boundary.
 5. Internal role logic stays untouched unless a specific adapter needs a boundary fix.
+6. `UnifiedHandoff` is a public D/display projection. It must not be converted back into C's authoring input.
+7. Boundary reports describe observed data segments; readiness is determined by C/D result status and review outcome.
 
 ## Files
 

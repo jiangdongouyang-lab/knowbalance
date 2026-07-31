@@ -1,3 +1,7 @@
+import { isAbsolute, resolve } from "node:path"
+
+export const DEFAULT_ROLE_C_RUNTIME_DATA_DIRECTORY = ".tmp/role-c-runtime"
+
 export function resolveRoleCRuntimeEnvironment(
   processEnvironment: Record<string, string | undefined>,
   privateEnvText = "",
@@ -6,12 +10,29 @@ export function resolveRoleCRuntimeEnvironment(
   return { ...fileEnvironment, ...processEnvironment }
 }
 
+export function resolveRoleCRuntimeDataDirectory(
+  environment: Record<string, string | undefined>,
+  projectDirectory: string,
+): string {
+  const configured = environment.ROLE_C_RUNTIME_DATA_DIR?.trim()
+    || DEFAULT_ROLE_C_RUNTIME_DATA_DIRECTORY
+  return isAbsolute(configured)
+    ? resolve(configured)
+    : resolve(projectDirectory, configured)
+}
+
 export function resolveRoleCProviderMode(
   environment: Record<string, string | undefined>,
-): "model" | "deterministic" {
+): "model" | "deterministic" | "unconfigured" {
+  const explicit = environment.ROLE_C_PROVIDER_MODE?.trim().toLocaleLowerCase()
+  if (explicit && explicit !== "model" && explicit !== "deterministic") {
+    throw new Error("ROLE_C_PROVIDER_MODE 只允许 model 或 deterministic")
+  }
+  if (explicit === "model") return "model"
+  if (explicit === "deterministic") return "deterministic"
   return environment.ROLE_C_MODEL_ENDPOINT?.trim() && environment.ROLE_C_MODEL_ID?.trim()
     ? "model"
-    : "deterministic"
+    : "unconfigured"
 }
 
 function parseEnvFile(text: string): Record<string, string> {

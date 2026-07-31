@@ -39,10 +39,10 @@ export function createCodeLabAgent(
         ],
       }
       try {
-        const draft = structuredClone(
+        let draft = structuredClone(
           await provider.generateCodeLab(request),
         )
-        const structural = validateCodeLabDraftStructure(request, draft)
+        let structural = validateCodeLabDraftStructure(request, draft)
         if (!structural.ok) {
           return invalidPair(
             common,
@@ -50,9 +50,44 @@ export function createCodeLabAgent(
             structural.issues.map((issue) => `${issue.path}: ${issue.message}`),
           )
         }
-        const verification = verifier
+        let verification = verifier
           ? await verifier.verifyCodeLab(request, structuredClone(draft))
           : { execution_verified: false, issues: ["未配置独立 code-lab verifier"] }
+        if (!verification.execution_verified
+          && verifier
+          && provider.repairCodeLabAfterVerification
+          && request.generation_spec.policies.max_semantic_revision >= 1) {
+          draft = structuredClone(await provider.repairCodeLabAfterVerification(
+            request,
+            structuredClone(draft),
+            {
+              revision_round: 1,
+              issues: [...verification.issues],
+              reference_failed: verification.reference_failed,
+              reference_failure_codes: verification.reference_failure_codes
+                ? [...verification.reference_failure_codes]
+                : undefined,
+              starter_status: verification.starter_status,
+              failed_mutations: verification.failed_mutations?.map((entry) => ({
+                ...entry,
+                failure_codes: [...entry.failure_codes],
+                must_fail_test_ids: [...entry.must_fail_test_ids],
+              })),
+            },
+          ))
+          structural = validateCodeLabDraftStructure(request, draft)
+          if (!structural.ok) {
+            return invalidPair(
+              common,
+              "code-lab 执行修订稿未通过结构、引用、public/secure 或目标覆盖门禁",
+              structural.issues.map((issue) => `${issue.path}: ${issue.message}`),
+            )
+          }
+          verification = await verifier.verifyCodeLab(
+            request,
+            structuredClone(draft),
+          )
+        }
         const objectiveCoverage = verification.objective_coverage ?? structural.objective_coverage
         return {
           public_artifact: finalizeDraft({
@@ -69,7 +104,7 @@ export function createCodeLabAgent(
             trusted_objective_coverage: objectiveCoverage,
             verification_issues: verification.execution_verified
               ? []
-              : ["代码实验未通过可信执行验证"],
+              : publicVerificationIssues(verification.issues),
           }),
           secure_artifact: finalizeDraft({
             ...common,
@@ -88,7 +123,12 @@ export function createCodeLabAgent(
         }
       } catch (error) {
         if (error instanceof ModelOutputValidationError) {
-          return invalidPair(common, `${error.stage} 未在有限修复次数内通过校验`, error.issues)
+          return invalidPair(
+            common,
+            `${error.stage} 未在有限修复次数内通过校验`,
+            error.issues,
+            error.stage.endsWith(".public") ? error.issues : undefined,
+          )
         }
         if (error instanceof UnsupportedTargetError) {
           return unsupportedPair(
@@ -102,6 +142,26 @@ export function createCodeLabAgent(
       }
     },
   }
+}
+
+function publicVerificationIssues(issues: string[]): string[] {
+  const categories = new Set<string>()
+  for (const issue of issues) {
+    if (issue.includes("reference_solution")) {
+      categories.add("参考实现未通过全部隐藏测试")
+    } else if (issue.includes("starter code")) {
+      categories.add("起始代码没有保持为待完成状态")
+    } else if (issue.includes("mutation") || issue.includes("错误变体")) {
+      categories.add("错误变体没有被指定隐藏测试稳定检出")
+    } else if (issue.includes("runner_image_digest")) {
+      categories.add("可信执行镜像身份不一致")
+    } else {
+      categories.add("代码实验未通过可信执行验证")
+    }
+  }
+  return categories.size > 0
+    ? [...categories]
+    : ["代码实验未通过可信执行验证"]
 }
 
 function unsupportedPair(
@@ -131,6 +191,7 @@ function invalidPair(
   common: { spec: GenerationSpec; evidence: RagEvidencePack; input_refs: string[] },
   message: string,
   details: string[],
+  publicDetails: string[] = ["code-lab Draft 未通过可信门禁"],
 ): CodeLabArtifactPair {
   return {
     public_artifact: invalidOutputEnvelope({
@@ -138,7 +199,7 @@ function invalidPair(
       agent: "code-lab",
       artifact_type: "code_lab_public",
       message,
-      details: ["code-lab Draft 未通过可信门禁"],
+      details: publicDetails,
     }),
     secure_artifact: invalidOutputEnvelope({
       ...common,

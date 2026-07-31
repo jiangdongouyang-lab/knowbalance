@@ -8,10 +8,23 @@ import type {
   RoleDWorkflowEvent,
 } from "./contracts"
 import { loadKnowledgeBase } from "../knowledge/loader"
-import { retrieveKnowledge, type RagResultItem } from "../rag/retriever"
+import type { KnowledgeBase } from "../knowledge/types"
+import {
+  type RagResult,
+  type RagResultItem,
+} from "../rag/retriever"
+import {
+  retrieveStructuredEvidenceFromKnowledgeBase,
+  type StructuredEvidenceRetrievalPort,
+  type StructuredEvidenceRequest,
+} from "../rag/structured-evidence"
+import { join, resolve } from "node:path"
 import {
   adaptLearnerProfile,
   adaptRagResult,
+  AtomicFileLearningCycleStore,
+  AtomicFileMasteryStateStore,
+  AtomicFileSecureArtifactStore,
   buildGenerationSpec,
   contentHash,
   createLocalABContentReviewPort,
@@ -25,15 +38,19 @@ import {
   InMemorySecureArtifactStore,
   LearningCycleService,
   ModelBackedRoleCContentProvider,
+  modelBackedProviderOptionsFromEnv,
+  projectPublicRagEvidencePack,
   createRoleCModelGatewayFromEnv,
   ROLE_C_PROMPT_MANIFEST_VERSION,
   runRecoverableReviewedCPipeline,
+  stableId,
   TrustedAssessmentVerifier,
   TrustedCodeLabVerifier,
   type AgentTraceEvent,
-  type AssessmentBlueprint,
   type AssessmentPublicArtifact,
   type ContentReviewResult,
+  type ContentReviewPort,
+  type CrossArtifactCritic,
   type CitationRef,
   type CodeLabPublicArtifact,
   type ConceptLessonArtifact,
@@ -41,31 +58,79 @@ import {
   type CodeExecutionResult,
   type CodeRunner,
   type LearningCyclePublicOutcome,
-  type ObservableBehavior,
+  type LearningCycleStore,
+  type MasteryStateStore,
+  type EvidenceRefreshPort,
+  type RecoverableReviewedReadyContext,
   type ReviewRecoveryAttempt,
   type ReviewRecoverySummary,
+  type RoleCContentProvider,
+  type SecureArtifactStore,
   type SubmissionEnvelope,
 } from "../role-c-content"
 
 const CONFORMANCE_DIGEST = `sha256:${"d".repeat(64)}`
-const roleCLearningCycles = new Map<string, LearningCycleService>()
+const defaultInMemoryLearningPersistence: RoleCLearningPersistence = {
+  cycleStore: new InMemoryLearningCycleStore(),
+  secureStore: new InMemorySecureArtifactStore(),
+  masteryStore: new InMemoryMasteryStateStore(),
+}
 
-/**
- * Role D derives targets dynamically, but this local endpoint still uses C's
- * deterministic offline Provider. It proves contracts and the K018 gold path;
- * broad topic generation requires C's model/OpenCode Provider to be wired by the backend.
- */
+/** Fail-closed convenience entry. Runtime adapters select model or explicit offline mode. */
 
 export async function generateRoleCForRoleD(input: GenerateRoleCForRoleDInput): Promise<RoleCForRoleDResult> {
-  return generateRoleCForRoleDWithRuntime(input, {})
+  return generateRoleCForRoleDWithRuntime(input, {
+    providerMode: "unconfigured",
+    allowDeterministicFallback: false,
+  })
 }
 
 export interface RoleCForRoleDRuntimeOptions {
-  providerMode?: "deterministic" | "model"
+  providerMode?: "deterministic" | "model" | "unconfigured"
+  /** UI/production sets false unless offline deterministic mode was selected explicitly. */
+  allowDeterministicFallback?: boolean
   env?: Record<string, string | undefined>
   cwd?: string
   runner?: CodeRunner
+  /** Test/backend seam; production selects the Provider from providerMode. */
+  provider?: RoleCContentProvider
+  /** Backend/test seam for a remote or instrumented A/B review adapter. */
+  reviewPort?: ContentReviewPort
+  /** Optional advisory semantic review; deterministic alignment remains authoritative. */
+  critic?: CrossArtifactCritic
   dockerRunnerFactory?: (env?: Record<string, string | undefined>) => Promise<CodeRunner>
+  /** Stable server-side directory used to recover C sessions after a process restart. */
+  dataDirectory?: string
+  /** Test/backend seam for callers that own equivalent durable stores. */
+  learningPersistence?: RoleCLearningPersistence
+}
+
+export interface RoleCLearningPersistence {
+  cycleStore: LearningCycleStore
+  secureStore: SecureArtifactStore
+  masteryStore: MasteryStateStore
+}
+
+/**
+ * Creates one single-host durable namespace. Every instance opened on the same
+ * directory resolves the same run, secure artifacts, sessions and mastery state.
+ */
+export function createAtomicRoleCLearningPersistence(
+  dataDirectory: string,
+): RoleCLearningPersistence {
+  if (!dataDirectory.trim()) throw new Error("ROLE_C_RUNTIME_DATA_DIR 不能为空")
+  const root = resolve(dataDirectory)
+  return {
+    cycleStore: new AtomicFileLearningCycleStore({
+      root_directory: join(root, "learning-cycle"),
+    }),
+    secureStore: new AtomicFileSecureArtifactStore({
+      root_directory: join(root, "secure-artifacts"),
+    }),
+    masteryStore: new AtomicFileMasteryStateStore({
+      root_directory: join(root, "mastery"),
+    }),
+  }
 }
 
 export async function resolveRoleCCodeRunner(runtime: Pick<RoleCForRoleDRuntimeOptions, "providerMode" | "runner" | "env" | "dockerRunnerFactory">): Promise<CodeRunner> {
@@ -80,18 +145,28 @@ export async function generateRoleCForRoleDWithRuntime(
   input: GenerateRoleCForRoleDInput,
   runtime: RoleCForRoleDRuntimeOptions,
 ): Promise<RoleCForRoleDResult> {
-  const knowledgeBase = await loadKnowledgeBase()
-  const targets = selectTargets(input.ragResult.results, knowledgeBase)
-  if (targets.length === 0) {
+  const explicitOfflineMode = runtime.providerMode === "deterministic"
+    && runtime.allowDeterministicFallback === true
+  if (!runtime.provider
+    && runtime.providerMode !== "model"
+    && !explicitOfflineMode) {
+    const reason = "C 的通用内容生成模型尚未配置。请设置 ROLE_C_PROVIDER_MODE=model、模型接口地址和模型名称；离线金标模式需显式设置 ROLE_C_PROVIDER_MODE=deterministic。"
     return {
       status: "blocked",
       artifacts: [],
-      workflow: [],
+      workflow: [{
+        id: `${input.runId}-provider-mode-blocked`,
+        agent: "role-c-model-provider",
+        stage: "模型 Provider 配置",
+        status: "blocked",
+        summary: reason,
+        timestamp: new Date().toISOString(),
+      }],
       runId: input.runId,
-      reason: "A 检索结果没有可交给 C 的强匹配目标知识点。",
+      reason,
     }
   }
-
+  const knowledgeBase = await loadKnowledgeBase()
   const evidencePack = adaptRagResult(input.ragResult, {
     kb_version: input.kbVersion,
     rag_version: "rule-rag-0.1",
@@ -100,49 +175,31 @@ export async function generateRoleCForRoleDWithRuntime(
     profile_version: `${input.runId}-profile-v1`,
     provenance_ref: "role-d:new-learning-plan",
   })
-  const targetSourceIds = targets.map(sourceIdOf)
-  const prerequisiteSourceIds = input.ragResult.results
-    .map(sourceIdOf)
-    .filter((sourceId) => !targetSourceIds.includes(sourceId))
-    .slice(0, 2)
-  const pathNode = defineLearningPathNode({
-    node_id: `${input.runId}-PATH-${targetSourceIds.join("-")}`,
-    target_source_ids: targetSourceIds,
-    prerequisite_source_ids: prerequisiteSourceIds,
-    goal: input.profile.goal,
-    objectives: targets.map((target, index) => ({
-      objective_id: `O${index + 1}`,
-      source_id: sourceIdOf(target),
-      required_fact_ids: [factIdOf(target)],
-      observable_behavior: behaviorFor(target, index, targets.length),
-      importance: "core" as const,
-    })),
-    assessment_blueprint: blueprintFor(targets.length),
-  })
-  const built = buildGenerationSpec({
-    run_id: input.runId,
-    profile_snapshot: profileSnapshot,
-    path_node: pathNode,
-    evidence_pack: evidencePack,
-    versions: {
-      prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
-      model_config_hash: runtime.providerMode === "model"
-        ? createRoleCModelGatewayFromEnv(runtime.env ?? process.env).model_config_hash
-        : "deterministic-role-d-local-reference-v1",
-      runner_image_digest: runtime.runner?.runner_image_digest ?? CONFORMANCE_DIGEST,
-    },
-    seed: 42,
-  })
-  if (!built.ok) {
+  const pathNode = structuredClone(input.pathNode)
+
+  const runtimeEnv = runtime.env ?? process.env
+  let modelGateway: ReturnType<typeof createRoleCModelGatewayFromEnv> | undefined
+  try {
+    modelGateway = runtime.providerMode === "model"
+      ? createRoleCModelGatewayFromEnv(runtimeEnv)
+      : undefined
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "C 的模型 Provider 配置不可用"
     return {
       status: "blocked",
       artifacts: [],
-      workflow: [],
+      workflow: [{
+        id: `${input.runId}-model-provider-blocked`,
+        agent: "role-c-model-provider",
+        stage: "模型 Provider 配置",
+        status: "blocked",
+        summary: reason,
+        timestamp: new Date().toISOString(),
+      }],
       runId: input.runId,
-      reason: built.errors.join("；"),
+      reason,
     }
   }
-
   let runner: CodeRunner
   try {
     runner = await resolveRoleCCodeRunner(runtime)
@@ -163,46 +220,73 @@ export async function generateRoleCForRoleDWithRuntime(
       reason,
     }
   }
-  const provider = runtime.providerMode === "model"
-    ? new ModelBackedRoleCContentProvider(createRoleCModelGatewayFromEnv(runtime.env ?? process.env), {
-        generation_strategy: "staged",
-        max_repair_attempts: 1,
-      })
-    : new DeterministicCodeLabContentProvider()
+
+  const built = buildGenerationSpec({
+    run_id: input.runId,
+    profile_snapshot: profileSnapshot,
+    path_node: pathNode,
+    evidence_pack: evidencePack,
+    versions: {
+      prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+      model_config_hash: modelGateway
+        ? modelGateway.model_config_hash
+        : "deterministic-role-d-local-reference-v1",
+      runner_image_digest: runner.runner_image_digest,
+    },
+    seed: 42,
+  })
+  if (!built.ok) {
+    return {
+      status: "blocked",
+      artifacts: [],
+      workflow: [],
+      runId: input.runId,
+      reason: built.errors.join("；"),
+    }
+  }
+
+  const provider = runtime.provider ?? (modelGateway
+    ? new ModelBackedRoleCContentProvider(modelGateway, modelBackedProviderOptionsFromEnv(runtimeEnv))
+    : new DeterministicCodeLabContentProvider())
   const agents = createRoleCAgents(provider, {
     code_lab: new TrustedCodeLabVerifier(runner),
     assessment: new TrustedAssessmentVerifier(runner),
   })
-  const secureStore = new InMemorySecureArtifactStore()
+  const persistence = resolveRoleCLearningPersistence(runtime)
+  const secureStore = persistence.secureStore
+  const cycleService = new LearningCycleService({
+    cycle_store: persistence.cycleStore,
+    secure_store: secureStore,
+    mastery_store: persistence.masteryStore,
+    code_runner: runner,
+  })
   const pipelineInput = { generation_spec: built.spec, evidence_pack: evidencePack }
+  let readyContext: RecoverableReviewedReadyContext | undefined
   const pipeline = await runRecoverableReviewedCPipeline(
     pipelineInput,
     agents,
     secureStore,
     {
-      review_port: createLocalABContentReviewPort({ knowledge_base: knowledgeBase }),
+      review_port: runtime.reviewPort
+        ?? createLocalABContentReviewPort({ knowledge_base: knowledgeBase }),
       profile_snapshot: profileSnapshot,
       path_planning_port: createLocalBPathPlanningPort(knowledgeBase),
-      evidence_refresh_port: {
-        async refreshEvidence(request) {
-          const refreshed = await retrieveKnowledge({
-            query: recoveryQuery(
-              input.profile.goal,
-              request.target_source_ids,
-              request.reason,
-              knowledgeBase,
-            ),
-            learnerLevel: request.learner_level,
-            topK: Math.max(5, request.target_source_ids.length + 2),
-          })
-          return adaptRagResult(refreshed, {
-            kb_version: input.kbVersion,
-            rag_version: "rule-rag-0.1-recovery",
-          })
-        },
-      },
+      evidence_refresh_port: createRoleCRecoveryEvidenceRefreshPort({
+        kbVersion: input.kbVersion,
+        knowledgeBase,
+      }),
       max_external_revisions: 2,
       max_recovery_attempts: 2,
+      ...(runtime.critic ? { critic: runtime.critic } : {}),
+      async on_ready(context) {
+        await cycleService.registerReadyRun({
+          pipeline_input: context.pipeline_input,
+          pipeline_result: context.pipeline_result,
+          profile_snapshot: context.profile_snapshot,
+          learner_id_hash: input.profile.learner_id,
+        })
+        readyContext = context
+      },
     },
   )
   const workflow = [
@@ -215,49 +299,45 @@ export async function generateRoleCForRoleDWithRuntime(
     const reviewReason = finalReview
       ? finalReview.artifact_results.flatMap((result) => result.findings.map((finding) => finding.message)).slice(0, 3).join("；")
       : ""
+    const pipelineReason = pipeline.blocked_reason
+      ? [
+          pipeline.blocked_reason.message,
+          ...(pipeline.blocked_reason.details ?? []).slice(0, 3),
+        ].join("；")
+      : pipeline.failure_reason?.message
     return {
       status: pipeline.status === "failed" ? "failed" : "blocked",
       artifacts: [],
       workflow,
-      runId: input.runId,
-      reason: pipeline.recovery.message || pipeline.blocked_reason?.message || pipeline.failure_reason?.message || reviewReason || "A/B 审核未通过，内容未发布给 D。",
+      runId: pipeline.generation_spec.run_id,
+      reason: pipelineReason || pipeline.recovery.message || reviewReason || "A/B 审核未通过，内容未发布给 D。",
       ...(audit ? { audit } : {}),
       recovery: toRoleDRecovery(pipeline.recovery),
     }
   }
+  if (!readyContext) throw new Error("ROLE_C_READY_CONTEXT_MISSING")
   const artifacts = toRoleDArtifacts(pipeline.public_artifacts)
-  const learningSessionId = `C-${input.runId}-SESSION-1`
-  const cycleService = new LearningCycleService({
-    cycle_store: new InMemoryLearningCycleStore(),
-    secure_store: secureStore,
-    mastery_store: new InMemoryMasteryStateStore(),
-    code_runner: runner,
-  })
-  await cycleService.registerReadyRun({
-    pipeline_input: pipelineInput,
-    pipeline_result: pipeline,
-    profile_snapshot: profileSnapshot,
-    learner_id_hash: input.profile.learner_id,
-  })
+  const finalSpec = readyContext.pipeline_input.generation_spec
+  const learningSessionId = `C-${finalSpec.run_id}-SESSION-1`
   const assessment = pipeline.public_artifacts.assessment!
   const requiredItemIds = assessment.payload!.items.map((item) => item.item_id)
-  await cycleService.openSession({
+  await cycleService.openTrustedPreselectedSession({
     session_id: learningSessionId,
-    run_id: input.runId,
+    run_id: finalSpec.run_id,
     authenticated_learner_id_hash: input.profile.learner_id,
     attempt_no: 1,
     required_item_ids: requiredItemIds,
     revealed_hint_levels: Object.fromEntries(requiredItemIds.map((itemId) => [itemId, 0])),
     profile_expectations_by_objective: Object.fromEntries(
-      built.spec.targets.map((target) => [target.objective_id, "weak" as const]),
+      finalSpec.targets.map((target) => [target.objective_id, "weak" as const]),
     ),
+    routing_policy: "trusted_preselected_v1",
   })
-  roleCLearningCycles.set(learningSessionId, cycleService)
   return {
     status: "ready",
     artifacts,
     workflow,
-    runId: input.runId,
+    runId: finalSpec.run_id,
     learningSession: {
       sessionId: learningSessionId,
       formId: assessment.payload!.form_id,
@@ -265,20 +345,155 @@ export async function generateRoleCForRoleDWithRuntime(
     },
     ...(audit ? { audit } : {}),
     recovery: toRoleDRecovery(pipeline.recovery),
+    finalContext: {
+      profileSnapshot: structuredClone(readyContext.profile_snapshot),
+      profileVersion: readyContext.profile_snapshot.profile_version,
+      pathNode: defineLearningPathNode({
+        ...structuredClone(finalSpec.path_node),
+        objectives: structuredClone(finalSpec.targets),
+        assessment_blueprint: structuredClone(finalSpec.assessment_blueprint),
+      }),
+      evidencePack: projectPublicRagEvidencePack(
+        readyContext.pipeline_input.evidence_pack,
+      ),
+    },
   }
 }
 
-function recoveryQuery(
-  goal: string,
+export interface RoleCRecoveryEvidenceRefreshOptions {
+  kbVersion: string
+  knowledgeBase: KnowledgeBase
+  structuredEvidencePort?: StructuredEvidenceRetrievalPort
+}
+
+const RECOVERY_SOURCE_BATCH_SIZE = 8
+
+/**
+ * Resolves B's fixed recovery path through A's identity-based evidence port.
+ * Text retrieval remains reserved for the initial stage, before source IDs are known.
+ */
+export function createRoleCRecoveryEvidenceRefreshPort(
+  options: RoleCRecoveryEvidenceRefreshOptions,
+): EvidenceRefreshPort {
+  const retrieve = options.structuredEvidencePort
+    ? options.structuredEvidencePort.retrieveStructuredEvidence.bind(
+        options.structuredEvidencePort,
+      )
+    : async (request: StructuredEvidenceRequest) =>
+        retrieveStructuredEvidenceFromKnowledgeBase(
+          request,
+          options.knowledgeBase,
+        )
+  return {
+    async refreshEvidence(request) {
+      const sourceIds = [...new Set(request.target_source_ids)]
+      const requiredFactsBySource = groupRequiredFacts(
+        request.required_facts,
+        sourceIds,
+      )
+      const batches = chunk(sourceIds, RECOVERY_SOURCE_BATCH_SIZE)
+      const recalled = await Promise.all(batches.map((batch) =>
+        retrieve({
+          source_ids: batch,
+          fact_ids_by_source: Object.fromEntries(batch.flatMap((sourceId) => {
+            const factIds = requiredFactsBySource[sourceId]
+            return factIds && factIds.length > 0
+              ? [[sourceId, factIds]]
+              : []
+          })),
+        })))
+      const requested = new Set(sourceIds)
+      const mergedBySource = new Map<string, RagResultItem>()
+      const missingSources = new Set<string>()
+      const missingFactKeys = new Set<string>()
+      for (const result of recalled) {
+        for (const sourceId of result.missing_source_ids) {
+          if (requested.has(sourceId)) missingSources.add(sourceId)
+        }
+        for (const fact of result.missing_fact_refs) {
+          if (requested.has(fact.source_id)) {
+            missingFactKeys.add(`${fact.source_id}:${fact.fact_id}`)
+          }
+        }
+        for (const item of result.results) {
+          const sourceId = sourceIdOf(item)
+          if (requested.has(sourceId) && !mergedBySource.has(sourceId)) {
+            mergedBySource.set(sourceId, structuredClone(item))
+          }
+        }
+      }
+      for (const sourceId of sourceIds) {
+        if (!mergedBySource.has(sourceId)) missingSources.add(sourceId)
+        const item = mergedBySource.get(sourceId)
+        const availableFacts = new Set(item?.facts.map((fact) =>
+          fact.factId ?? fact.fact_id) ?? [])
+        for (const factId of requiredFactsBySource[sourceId] ?? []) {
+          if (!availableFacts.has(factId)) {
+            missingFactKeys.add(`${sourceId}:${factId}`)
+          }
+        }
+      }
+      const merged: RagResult = {
+        query: `按标识刷新证据：${sourceIds.join("、")}`,
+        learnerLevel: request.learner_level,
+        topK: Math.max(1, sourceIds.length),
+        results: sourceIds.flatMap((sourceId) => {
+          if (missingSources.has(sourceId)) return []
+          const item = mergedBySource.get(sourceId)
+          if (!item) return []
+          const filtered = {
+            ...item,
+            facts: item.facts.filter((fact) =>
+              !missingFactKeys.has(
+                `${sourceId}:${fact.factId ?? fact.fact_id}`,
+              )),
+          }
+          return [filtered]
+        }),
+      }
+      const evidence = adaptRagResult(merged, {
+        kb_version: options.kbVersion,
+        rag_version: "structured-evidence-1.0-recovery",
+        retrieval_id: stableId("RAG-RECOVERY", {
+          request_id: request.request_id,
+          source_ids: sourceIds,
+          required_facts_by_source: requiredFactsBySource,
+          kb_version: options.kbVersion,
+        }),
+      })
+      return {
+        ...evidence,
+        match_status: missingSources.size === 0 && missingFactKeys.size === 0
+          ? "strong"
+          : evidence.results.length > 0
+            ? "weak"
+            : "no_match",
+      }
+    },
+  }
+}
+
+function groupRequiredFacts(
+  requiredFacts: Array<{ source_id: string; fact_id: string }>,
   sourceIds: string[],
-  reason: string,
-  knowledgeBase: Awaited<ReturnType<typeof loadKnowledgeBase>>,
-): string {
-  const groundedTerms = sourceIds.flatMap((sourceId) => {
-    const item = knowledgeBase.items.find((candidate) => candidate.sourceId === sourceId)
-    return item ? [item.title, ...item.keywords] : []
-  })
-  return `恢复目标：${groundedTerms.join("、")}；学习目标：${goal}；补证据原因：${reason}`
+): Record<string, string[]> {
+  const requested = new Set(sourceIds)
+  const grouped: Record<string, string[]> = {}
+  for (const fact of requiredFacts) {
+    if (!requested.has(fact.source_id)) continue
+    const factIds = grouped[fact.source_id] ?? []
+    if (!factIds.includes(fact.fact_id)) factIds.push(fact.fact_id)
+    grouped[fact.source_id] = factIds
+  }
+  return grouped
+}
+
+function chunk<T>(values: T[], size: number): T[][] {
+  const chunks: T[][] = []
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size))
+  }
+  return chunks
 }
 
 function toRoleDRecovery(recovery: ReviewRecoverySummary) {
@@ -324,16 +539,16 @@ export interface SubmitRoleCAssessmentInput {
 
 export async function submitRoleCAssessment(
   input: SubmitRoleCAssessmentInput,
+  runtime: RoleCForRoleDRuntimeOptions = {},
 ): Promise<LearningCyclePublicOutcome> {
-  const service = roleCLearningCycles.get(input.sessionId)
-  if (!service) {
-    return {
-      status: "blocked",
-      submission_id: input.submissionId,
-      code: "SESSION_NOT_FOUND",
-      message: "C 学习会话不存在或服务已重启，请重新生成学习计划。",
-    }
-  }
+  const persistence = resolveRoleCLearningPersistence(runtime)
+  const runner = await resolveRoleCCodeRunner(runtime)
+  const service = new LearningCycleService({
+    cycle_store: persistence.cycleStore,
+    secure_store: persistence.secureStore,
+    mastery_store: persistence.masteryStore,
+    code_runner: runner,
+  })
   return service.processSubmission({
     session_id: input.sessionId,
     authenticated_learner_id_hash: input.learnerId,
@@ -349,94 +564,18 @@ export async function submitRoleCAssessment(
   })
 }
 
-function selectTargets(
-  results: RagResultItem[],
-  knowledgeBase: Awaited<ReturnType<typeof loadKnowledgeBase>>,
-): RagResultItem[] {
-  const direct = results.filter(hasDirectEvidenceMatch)
-  const candidates = direct.length > 0 ? direct : results.filter((item) => item.score > 0)
-  if (candidates.length === 0) return []
-
-  const maxScore = Math.max(...candidates.map((item) => item.score))
-  const threshold = Math.max(10, maxScore * 0.7)
-  const selected = candidates.filter((item) => item.score >= threshold)
-  const targets = selected.length >= 3
-    ? selected.slice(0, 3)
-    : candidates.slice(0, Math.min(3, candidates.length))
-  return orderTargetsByPrerequisites(targets, knowledgeBase)
-}
-
-function orderTargetsByPrerequisites(
-  targets: RagResultItem[],
-  knowledgeBase: Awaited<ReturnType<typeof loadKnowledgeBase>>,
-): RagResultItem[] {
-  const selectedIds = new Set(targets.map(sourceIdOf))
-  const prerequisites = new Map(knowledgeBase.items.map((item) => [
-    item.sourceId,
-    (item.prerequisites ?? []).filter((sourceId) => selectedIds.has(sourceId)),
-  ]))
-  const dependencyPriority = new Map<string, number>()
-  for (const target of targets) {
-    const targetItem = knowledgeBase.items.find((item) => item.sourceId === sourceIdOf(target))
-    targetItem?.prerequisites.forEach((sourceId, index) => {
-      if (selectedIds.has(sourceId)) {
-        dependencyPriority.set(sourceId, Math.min(dependencyPriority.get(sourceId) ?? Number.MAX_SAFE_INTEGER, index))
-      }
-    })
+function resolveRoleCLearningPersistence(
+  runtime: Pick<RoleCForRoleDRuntimeOptions, "dataDirectory" | "learningPersistence">,
+): RoleCLearningPersistence {
+  if (runtime.learningPersistence) return runtime.learningPersistence
+  if (runtime.dataDirectory) {
+    return createAtomicRoleCLearningPersistence(runtime.dataDirectory)
   }
-  const remaining = [...targets]
-  const ordered: RagResultItem[] = []
-  while (remaining.length > 0) {
-    const available = remaining
-      .map((target, index) => ({ target, index }))
-      .filter(({ target }) => (prerequisites.get(sourceIdOf(target)) ?? []).every((sourceId) =>
-        ordered.some((item) => sourceIdOf(item) === sourceId)))
-      .sort((left, right) =>
-        (dependencyPriority.get(sourceIdOf(left.target)) ?? Number.MAX_SAFE_INTEGER)
-        - (dependencyPriority.get(sourceIdOf(right.target)) ?? Number.MAX_SAFE_INTEGER)
-        || left.index - right.index)
-    const nextIndex = available[0]?.index ?? 0
-    ordered.push(...remaining.splice(nextIndex, 1))
-  }
-  return ordered
-}
-
-function hasDirectEvidenceMatch(item: RagResultItem): boolean {
-  const fields = item.retrievalTrace.matchedFields.filter((field) => field !== "difficulty" && field !== "prerequisite")
-  const scores = item.retrievalTrace.scoreBreakdown
-  return fields.length > 0
-    || item.retrievalTrace.matchedKeywords.length > 0
-    || scores.keyword > 0
-    || scores.title > 0
-    || scores.facts > 0
-    || scores.practiceTasks > 0
-    || scores.bonus > 0
+  return defaultInMemoryLearningPersistence
 }
 
 function sourceIdOf(item: RagResultItem): string {
   return item.sourceId ?? item.source_id
-}
-
-function factIdOf(item: RagResultItem): string {
-  const fact = item.facts[0]
-  if (!fact) throw new Error(`A 检索目标 ${sourceIdOf(item)} 没有可用事实`)
-  return fact.factId ?? fact.fact_id ?? "F001"
-}
-
-function behaviorFor(_item: RagResultItem, index: number, count: number): ObservableBehavior {
-  if (count === 1) return "recognize"
-  if (count === 2) return index === 0 ? "recognize" : "trace"
-  return (["recognize", "apply", "create"] as const)[index] ?? "apply"
-}
-
-function blueprintFor(targetCount: number): AssessmentBlueprint {
-  if (targetCount >= 3) {
-    return { tier_1_count: 2, tier_2_count: 2, tier_3_count: 1, required_modalities: ["mcq", "trace", "code"] }
-  }
-  if (targetCount === 2) {
-    return { tier_1_count: 1, tier_2_count: 1, tier_3_count: 0, required_modalities: ["mcq", "trace"] }
-  }
-  return { tier_1_count: 1, tier_2_count: 0, tier_3_count: 0, required_modalities: ["mcq"] }
 }
 
 function reviewAuditSummary(
@@ -448,14 +587,16 @@ function reviewAuditSummary(
   const artifactById = new Map(artifacts.map((artifact) => [artifact.id, artifact]))
   const factAudits = final.artifact_results.map((result) => {
     const artifact = artifactById.get(result.artifact_id)
+    const factFindings = result.findings.filter((finding) =>
+      finding.source === "fact_audit")
     return {
       artifactId: result.artifact_id,
       artifactTitle: artifact?.title ?? result.artifact_id,
       artifactKind: result.artifact_kind === "concept" ? "lesson" as const : result.artifact_kind === "code_lab" ? "lab" as const : "assessment" as const,
       status: result.fact_status,
-      checkedClaims: result.findings.filter((finding) => finding.source === "fact_audit").length,
-      conflicts: result.findings.filter((finding) => finding.source === "fact_audit").length,
-      notes: result.findings.filter((finding) => finding.source === "fact_audit").map((finding) => finding.message).slice(0, 3),
+      checkedClaims: artifact?.citations.length ?? 0,
+      conflicts: factFindings.length,
+      notes: factFindings.map((finding) => finding.message).slice(0, 3),
     }
   })
   const factStatus = combineReviewStatuses(final.artifact_results.map((result) => result.fact_status))

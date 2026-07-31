@@ -47,14 +47,6 @@ export function validateCodeLabPublicStage(
   ])
   issues.push(...validateCitations(deduplicate([...contentCitations, ...publicPayload.used_evidence]), request.evidence_pack).issues)
   issues.push(...validateClaimGrounding(claims, request))
-  const contentKeys = new Set(contentCitations.map(citationKey))
-  const usedKeys = new Set(publicPayload.used_evidence.map(citationKey))
-  for (const citation of contentCitations) {
-    if (!usedKeys.has(citationKey(citation))) issues.push(issue("used_evidence_incomplete", "$.used_evidence", `未登记实际引用 ${citationKey(citation)}`))
-  }
-  for (const citation of publicPayload.used_evidence) {
-    if (!contentKeys.has(citationKey(citation))) issues.push(issue("unused_evidence", "$.used_evidence", `登记了未使用引用 ${citationKey(citation)}`))
-  }
   for (const objectiveId of publicPayload.objective_ids) {
     if (!targetIds.has(objectiveId)) issues.push(issue("unknown_objective", "$.objective_ids", `实验包含 Spec 外目标 ${objectiveId}`))
   }
@@ -65,20 +57,25 @@ export function validateCodeLabPublicStage(
   let coveredCore = 0
   for (const target of coreTargets) {
     const entry = coverage.get(target.objective_id)
-    const hasRequiredFact = claims.some((claim) => claim.citations.some((citation) =>
-      citation.source_id === target.source_id && target.required_fact_ids.includes(citation.fact_id),
-    ))
+    const citedFactIds = new Set(claims.flatMap((claim) =>
+      claim.citations
+        .filter((citation) => citation.source_id === target.source_id)
+        .map((citation) => citation.fact_id)))
+    const missingRequiredFacts = target.required_fact_ids.filter(
+      (factId) => !citedFactIds.has(factId),
+    )
+    const hasRequiredFacts = missingRequiredFacts.length === 0
     const validCoverage = Boolean(entry
       && entry.instruction_block_ids.every((id) => blocks.has(id))
       && entry.public_test_ids.every((id) => tests.get(id)?.objective_id === target.objective_id))
     const ladder = ladders.get(target.objective_id)
     const levels = new Set(ladder?.hints.map((hint) => hint.hint_level) ?? [])
-    if (!hasRequiredFact) issues.push(issue("missing_required_fact", `$.objective.${target.objective_id}`, "核心目标必要事实未用于实验 Claim"))
+    if (!hasRequiredFacts) issues.push(issue("missing_required_fact", `$.objective.${target.objective_id}`, `核心目标必要事实未全部用于实验 Claim：${missingRequiredFacts.join("、")}`))
     if (!validCoverage) issues.push(issue("missing_public_objective_coverage", `$.objective.${target.objective_id}`, "核心目标缺少 instruction/public test 对齐"))
     if ([1, 2, 3].some((level) => !levels.has(level as 1 | 2 | 3))) {
       issues.push(issue("invalid_hint_ladder", `$.objective.${target.objective_id}`, "核心目标必须包含 level 1/2/3 三级提示"))
     }
-    if (hasRequiredFact && validCoverage && levels.size === 3) coveredCore += 1
+    if (hasRequiredFacts && validCoverage && levels.size === 3) coveredCore += 1
   }
   for (const entry of analyzePythonSource(publicPayload.starter_code, publicPayload.execution_contract)) {
     issues.push(issue(`static_${entry.code}`, "$.starter_code", entry.message))
@@ -126,7 +123,6 @@ export function validateCodeLabDraftStructure(
   const publicTests = uniqueMap(publicPayload.public_tests, "test_id", "$.public_draft.payload.public_tests", issues)
   const hiddenTests = uniqueMap(securePayload.hidden_tests, "test_id", "$.secure_draft.payload.hidden_tests", issues)
   const scoringGroups = uniqueMap(securePayload.scoring_groups, "group_id", "$.secure_draft.payload.scoring_groups", issues)
-  const mutations = uniqueMap(securePayload.mutation_variants, "mutation_id", "$.secure_draft.payload.mutation_variants", issues)
   const hintLadders = uniqueMap(publicPayload.hint_ladders, "objective_id", "$.public_draft.payload.hint_ladders", issues)
 
   for (const test of publicPayload.public_tests) {
@@ -145,28 +141,20 @@ export function validateCodeLabDraftStructure(
   issues.push(...validateCitations(deduplicate([...contentCitations, ...publicPayload.used_evidence]), request.evidence_pack).issues)
   issues.push(...validateClaimGrounding(claims, request))
 
-  const usedKeys = new Set(publicPayload.used_evidence.map(citationKey))
-  const contentKeys = new Set(contentCitations.map(citationKey))
-  for (const citation of contentCitations) {
-    if (!usedKeys.has(citationKey(citation))) {
-      issues.push(issue("used_evidence_incomplete", "$.public_draft.payload.used_evidence", `未登记实际引用 ${citationKey(citation)}`))
-    }
-  }
-  for (const citation of publicPayload.used_evidence) {
-    if (!contentKeys.has(citationKey(citation))) {
-      issues.push(issue("unused_evidence", "$.public_draft.payload.used_evidence", `登记了未使用引用 ${citationKey(citation)}`))
-    }
-  }
-
   const publicCoverage = uniqueMap(publicPayload.objective_coverage, "objective_id", "$.public_draft.payload.objective_coverage", issues)
   const secureCoverage = uniqueMap(securePayload.objective_coverage, "objective_id", "$.secure_draft.payload.objective_coverage", issues)
   let coveredCore = 0
   for (const target of coreTargets) {
     const publicEntry = publicCoverage.get(target.objective_id)
     const secureEntry = secureCoverage.get(target.objective_id)
-    const hasRequiredFact = claims.some((claim) => claim.citations.some((citation) =>
-      citation.source_id === target.source_id && target.required_fact_ids.includes(citation.fact_id),
-    ))
+    const citedFactIds = new Set(claims.flatMap((claim) =>
+      claim.citations
+        .filter((citation) => citation.source_id === target.source_id)
+        .map((citation) => citation.fact_id)))
+    const missingRequiredFacts = target.required_fact_ids.filter(
+      (factId) => !citedFactIds.has(factId),
+    )
+    const hasRequiredFacts = missingRequiredFacts.length === 0
     const publicOk = Boolean(publicObjectiveIds.has(target.objective_id) && publicEntry &&
       publicEntry.instruction_block_ids.length > 0 &&
       publicEntry.instruction_block_ids.every((id) => blocks.has(id)) &&
@@ -176,17 +164,15 @@ export function validateCodeLabDraftStructure(
       secureEntry.hidden_test_ids.length > 0 &&
       secureEntry.hidden_test_ids.every((id) => hiddenTests.get(id)?.objective_id === target.objective_id) &&
       secureEntry.scoring_group_ids.length > 0 &&
-      secureEntry.scoring_group_ids.every((id) => scoringGroups.get(id)?.objective_id === target.objective_id) &&
-      secureEntry.mutation_ids.length > 0 &&
-      secureEntry.mutation_ids.every((id) => mutations.get(id)?.objective_ids.includes(target.objective_id)))
-    if (!hasRequiredFact) issues.push(issue("missing_required_fact", `$.objective.${target.objective_id}`, "核心目标必要事实未用于实验 Claim"))
+      secureEntry.scoring_group_ids.every((id) => scoringGroups.get(id)?.objective_id === target.objective_id))
+    if (!hasRequiredFacts) issues.push(issue("missing_required_fact", `$.objective.${target.objective_id}`, `核心目标必要事实未全部用于实验 Claim：${missingRequiredFacts.join("、")}`))
     if (!publicOk) issues.push(issue("missing_public_objective_coverage", `$.objective.${target.objective_id}`, "核心目标缺少 instruction/public test 对齐"))
-    if (!secureOk) issues.push(issue("missing_secure_objective_coverage", `$.objective.${target.objective_id}`, "核心目标缺少 hidden test/scoring/mutation 对齐"))
+    if (!secureOk) issues.push(issue("missing_secure_objective_coverage", `$.objective.${target.objective_id}`, "核心目标缺少 hidden test/scoring 对齐"))
     const ladder = hintLadders.get(target.objective_id)
     if (!ladder || new Set(ladder.hints.map((hint) => hint.hint_level)).size !== 3) {
       issues.push(issue("invalid_hint_ladder", `$.objective.${target.objective_id}`, "核心目标必须包含 level 1/2/3 三级提示"))
     }
-    if (publicOk && secureOk && hasRequiredFact && ladder) coveredCore += 1
+    if (publicOk && secureOk && hasRequiredFacts && ladder) coveredCore += 1
   }
 
   const assignedTests = new Map<string, string>()
@@ -217,14 +203,6 @@ export function validateCodeLabDraftStructure(
   for (const testId of hiddenTests.keys()) {
     if (!assignedTests.has(testId)) issues.push(issue("ungrouped_hidden_test", "$.secure_draft.payload.scoring_groups", `隐藏测试未进入任何评分组：${testId}`))
   }
-  for (const mutation of securePayload.mutation_variants) {
-    for (const objectiveId of mutation.objective_ids) {
-      if (!targetIds.has(objectiveId)) issues.push(issue("unknown_mutation_objective", `$.mutation.${mutation.mutation_id}`, `错误变体包含 Spec 外 objective ${objectiveId}`))
-    }
-    for (const testId of mutation.must_fail_test_ids) {
-      if (!hiddenTests.has(testId)) issues.push(issue("unknown_mutation_test", `$.mutation.${mutation.mutation_id}`, `错误变体引用未知测试 ${testId}`))
-    }
-  }
   const mappedTests = new Set<string>()
   for (const mapping of securePayload.misconception_map) {
     if (!hiddenTests.has(mapping.failed_test_id)) issues.push(issue("unknown_misconception_test", "$.misconception_map", `误区映射引用未知测试 ${mapping.failed_test_id}`))
@@ -246,15 +224,22 @@ export function validateCodeLabDraftStructure(
 }
 
 export interface TrustedCodeLabVerifierOptions {
-  minimum_mutation_kill_rate?: number
+  /** Limits concurrent isolated mutation executions; reference and starter stay sequential. */
+  mutation_concurrency?: number
 }
 
 /** Independent trust-plane verifier; it never accepts execution claims from the Provider. */
 export class TrustedCodeLabVerifier implements CodeLabDraftVerifier {
+  private readonly mutationConcurrency: number
+
   constructor(
     private readonly runner: CodeRunner,
     private readonly options: TrustedCodeLabVerifierOptions = {},
-  ) {}
+  ) {
+    this.mutationConcurrency = boundedMutationConcurrency(
+      options.mutation_concurrency,
+    )
+  }
 
   async verifyCodeLab(request: CodeLabRequest, draft: CodeLabDraft) {
     const report = validateCodeLabDraftStructure(request, draft)
@@ -273,11 +258,14 @@ export class TrustedCodeLabVerifier implements CodeLabDraftVerifier {
       execution_contract: publicPayload.execution_contract,
       tests: securePayload.hidden_tests,
     }
-    const execute = (code: string) => executeWithRunnerRetry(this.runner, {
+    const execute = (
+      code: string,
+      targetSuite: RunnerTestSuite = suite,
+    ) => executeWithRunnerRetry(this.runner, {
       language: "python",
       code,
-      test_suite_id: suite.test_suite_id,
-      test_suite: suite,
+      test_suite_id: targetSuite.test_suite_id,
+      test_suite: targetSuite,
       timeout_ms: publicPayload.execution_contract.resource_limits.timeout_ms,
       memory_mb: publicPayload.execution_contract.resource_limits.memory_mb,
       max_output_bytes: publicPayload.execution_contract.resource_limits.max_output_bytes,
@@ -294,7 +282,9 @@ export class TrustedCodeLabVerifier implements CodeLabDraftVerifier {
       max_output_bytes: publicPayload.execution_contract.resource_limits.max_output_bytes,
       network_allowed: false,
     }, request.generation_spec.policies.max_tool_retry)
-    if (reference.status !== "passed" || reference.passed_tests !== reference.total_tests) {
+    const referenceFailed = reference.status !== "passed"
+      || reference.passed_tests !== reference.total_tests
+    if (referenceFailed) {
       issues.push(`reference_solution 未通过全部隐藏测试：${reference.failure_codes.join("、")}`)
     }
     if (reference.runner_image_digest !== this.runner.runner_image_digest) {
@@ -308,25 +298,78 @@ export class TrustedCodeLabVerifier implements CodeLabDraftVerifier {
     }
 
     let killed = 0
-    for (const mutation of securePayload.mutation_variants) {
-      const execution = await execute(mutation.code)
+    const failedMutations: Array<{
+      mutation_id: string
+      status: "passed" | "failed" | "timeout" | "runner_error"
+      failure_codes: string[]
+      must_fail_test_ids: string[]
+    }> = []
+    const hiddenTestsById = new Map(
+      securePayload.hidden_tests.map((test) => [test.test_id, test]),
+    )
+    const targetIds = new Set(
+      request.generation_spec.targets.map((target) => target.objective_id),
+    )
+    const runnableMutations = securePayload.mutation_variants.filter((mutation) => {
+      const validObjectives = mutation.objective_ids.length > 0
+        && mutation.objective_ids.every((objectiveId) => targetIds.has(objectiveId))
+      const validTests = mutation.must_fail_test_ids.length > 0
+        && mutation.must_fail_test_ids.every((testId) => {
+          const test = hiddenTestsById.get(testId)
+          return Boolean(test && mutation.objective_ids.includes(test.objective_id))
+        })
+      if (validObjectives && validTests) return true
+      failedMutations.push({
+        mutation_id: mutation.mutation_id,
+        status: "runner_error",
+        failure_codes: ["invalid_optional_mutation_diagnostic"],
+        must_fail_test_ids: [...mutation.must_fail_test_ids],
+      })
+      return false
+    })
+    const mutationExecutions = await mapInOrderWithConcurrency(
+      runnableMutations,
+      this.mutationConcurrency,
+      async (mutation) => {
+        const mutationSuite: RunnerTestSuite = {
+          test_suite_id: suite.test_suite_id,
+          execution_contract: suite.execution_contract,
+          // Structural validation above guarantees every declared ID exists.
+          tests: mutation.must_fail_test_ids.map((testId) =>
+            hiddenTestsById.get(testId)!),
+        }
+        return {
+          mutation,
+          execution: await execute(mutation.code, mutationSuite),
+        }
+      },
+    )
+    for (const { mutation, execution } of mutationExecutions) {
       if (execution.status === "runner_error") {
-        issues.push(`mutation ${mutation.mutation_id} 遇到 runner_error`)
+        failedMutations.push({
+          mutation_id: mutation.mutation_id,
+          status: execution.status,
+          failure_codes: [...execution.failure_codes],
+          must_fail_test_ids: [...mutation.must_fail_test_ids],
+        })
         continue
       }
       const killedRequired = mutation.must_fail_test_ids.every((testId) =>
         execution.failure_codes.some((code) => code === "execution_timeout" || code.startsWith(`${testId}:`)),
       )
       if (execution.status !== "passed" && killedRequired) killed += 1
-      else issues.push(`mutation ${mutation.mutation_id} 未被指定隐藏测试杀死`)
+      else {
+        failedMutations.push({
+          mutation_id: mutation.mutation_id,
+          status: execution.status,
+          failure_codes: [...execution.failure_codes],
+          must_fail_test_ids: [...mutation.must_fail_test_ids],
+        })
+      }
     }
     const mutationKillRate = securePayload.mutation_variants.length === 0
-      ? 0
+      ? undefined
       : killed / securePayload.mutation_variants.length
-    const minimum = this.options.minimum_mutation_kill_rate ?? 0.8
-    if (mutationKillRate < minimum) {
-      issues.push(`mutation_kill_rate=${mutationKillRate.toFixed(3)}，低于门槛 ${minimum}`)
-    }
     return result(
       issues.length === 0,
       issues,
@@ -334,15 +377,53 @@ export class TrustedCodeLabVerifier implements CodeLabDraftVerifier {
       mutationKillRate,
       reference.total_tests,
       report.objective_coverage,
+      {
+        reference_failed: referenceFailed,
+        reference_failure_codes: [...reference.failure_codes],
+        starter_status: starter.status,
+        failed_mutations: failedMutations,
+      },
     )
   }
+}
+
+const DEFAULT_MUTATION_CONCURRENCY = 2
+const MAX_MUTATION_CONCURRENCY = 4
+
+function boundedMutationConcurrency(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MUTATION_CONCURRENCY
+  if (!Number.isSafeInteger(value) || value < 1 || value > MAX_MUTATION_CONCURRENCY) {
+    throw new RangeError(
+      `mutation_concurrency 必须为 1..${MAX_MUTATION_CONCURRENCY} 的整数`,
+    )
+  }
+  return value
+}
+
+/** Runs concurrently while retaining input order for all later diagnostics. */
+async function mapInOrderWithConcurrency<T, R>(
+  values: readonly T[],
+  concurrency: number,
+  mapper: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const output = new Array<R>(values.length)
+  let cursor = 0
+  const workerCount = Math.min(concurrency, values.length)
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (true) {
+      const index = cursor
+      cursor += 1
+      if (index >= values.length) return
+      output[index] = await mapper(values[index]!, index)
+    }
+  }))
+  return output
 }
 
 function staticIssues(publicPayload: CodeLabPublicPayload, securePayload: CodeLabSecurePayload): ValidationIssue[] {
   const sources = [
     ["$.public_draft.payload.starter_code", publicPayload.starter_code],
     ["$.secure_draft.payload.reference_solution", securePayload.reference_solution],
-    ...securePayload.mutation_variants.map((entry) => [`$.mutation.${entry.mutation_id}`, entry.code]),
   ] as const
   return sources.flatMap(([path, source]) => analyzePythonSource(source, publicPayload.execution_contract)
     .map((entry) => issue(`static_${entry.code}`, path, entry.message)))
@@ -382,9 +463,20 @@ function result(
   executionVerified: boolean,
   issues: string[],
   runnerImageDigest: string,
-  mutationKillRate: number,
+  mutationKillRate: number | undefined,
   verifiedTestCount: number,
   objectiveCoverage: number,
+  diagnostics?: {
+    reference_failed: boolean
+    reference_failure_codes: string[]
+    starter_status: "passed" | "failed" | "timeout" | "runner_error"
+    failed_mutations: Array<{
+      mutation_id: string
+      status: "passed" | "failed" | "timeout" | "runner_error"
+      failure_codes: string[]
+      must_fail_test_ids: string[]
+    }>
+  },
 ) {
   return {
     execution_verified: executionVerified,
@@ -393,6 +485,7 @@ function result(
     mutation_kill_rate: mutationKillRate,
     verified_test_count: verifiedTestCount,
     objective_coverage: objectiveCoverage,
+    ...(diagnostics ?? {}),
   }
 }
 

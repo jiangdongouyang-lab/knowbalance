@@ -56,7 +56,10 @@ export function buildDeterministicAssessmentDraft(request: TieredEvaluatorReques
         "阶段 3 条件统计模板要求 2/2/1 蓝图",
       )
     }
-    return buildPassingCountAssessmentDraft(request)
+    return ensureRequiredFactCoverage(
+      request,
+      buildPassingCountAssessmentDraft(request),
+    )
   }
   if (!sameOrderedTargets(targetSourceIds, ["K007", "K009", "K018"])
     || !supportedBlueprint) {
@@ -192,7 +195,10 @@ export function buildDeterministicAssessmentDraft(request: TieredEvaluatorReques
     }],
     objective_coverage: secureCoverage,
   }
-  return { public_draft: { payload: publicPayload }, secure_draft: { payload: securePayload } }
+  return ensureRequiredFactCoverage(request, {
+    public_draft: { payload: publicPayload },
+    secure_draft: { payload: securePayload },
+  })
 }
 
 function buildPassingCountAssessmentDraft(
@@ -472,6 +478,55 @@ function buildPassingCountAssessmentDraft(
     public_draft: { payload: publicPayload },
     secure_draft: { payload: securePayload },
   }
+}
+
+function ensureRequiredFactCoverage(
+  request: TieredEvaluatorRequest,
+  draft: AssessmentDraft,
+): AssessmentDraft {
+  const result = structuredClone(draft)
+  const payload = result.public_draft.payload
+  for (const target of request.generation_spec.targets) {
+    const source = request.evidence_pack.results.find((entry) =>
+      entry.source_id === target.source_id)
+    const facts = target.required_fact_ids.map((factId) =>
+      source?.facts.find((fact) => fact.fact_id === factId))
+    if (!source || facts.some((fact) => !fact)) {
+      throw new ModelProviderUnavailableError(
+        `assessment 缺少目标必要事实 ${target.source_id}`,
+      )
+    }
+    const items = payload.items.filter((item) =>
+      item.objective_id === target.objective_id)
+    const first = items[0]
+    if (!first) {
+      throw new ModelProviderUnavailableError(
+        `assessment 缺少目标题目 ${target.objective_id}`,
+      )
+    }
+    const appendedFacts: string[] = []
+    for (const fact of facts) {
+      if (!fact) continue
+      const alreadyCited = items.some((item) => item.citations.some(
+        (citation) => citation.source_id === fact.source_id
+          && citation.fact_id === fact.fact_id))
+      if (!alreadyCited) {
+        first.citations.push({
+          source_id: fact.source_id,
+          fact_id: fact.fact_id,
+          relation: "derived_from",
+        })
+        appendedFacts.push(fact.content)
+      }
+    }
+    if (appendedFacts.length > 0) {
+      first.prompt = `${first.prompt}\n知识依据：${appendedFacts.join("；")}`
+    }
+  }
+  payload.used_evidence = deduplicate(
+    payload.items.flatMap((item) => item.citations),
+  )
+  return result
 }
 
 function sameOrderedTargets(

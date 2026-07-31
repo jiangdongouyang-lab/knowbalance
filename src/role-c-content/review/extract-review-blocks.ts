@@ -28,34 +28,39 @@ export function extractConceptBlocks(artifact: ConceptLessonArtifact): ReviewCon
     payload.objective_coverage.flatMap((coverage) =>
       coverage.block_ids.map((blockId) => [blockId, coverage.objective_id] as const)),
   )
-  const renderBlocks = [
+  const factNarrativeBlocks = [
     ...payload.prerequisite_bridge,
     ...payload.explanation_blocks,
-    ...payload.worked_examples,
     ...payload.summary,
   ]
   return [
-    ...renderBlocks.flatMap((block) => reviewRenderBlock("concept", block, objectiveByBlock.get(block.block_id))),
+    ...factNarrativeBlocks.flatMap((block) => reviewRenderBlock("concept", block, objectiveByBlock.get(block.block_id))),
+    ...payload.worked_examples.flatMap((block) => reviewRenderBlock(
+      "concept",
+      block,
+      objectiveByBlock.get(block.block_id),
+      "citation_only",
+    )),
     ...payload.misconceptions.map((item) => makeBlock(
       "concept",
       { field: "misconception", ref_id: item.misconception_tag, objective_id: item.objective_id },
       item.explanation,
       item.citations,
-      "claim",
+      "evidence_anchored",
     )),
     ...payload.micro_checks.map((block) => makeBlock(
       "concept",
       { field: "quiz", ref_id: block.item_id, parent_block_id: block.block_id, objective_id: objectiveByBlock.get(block.block_id) },
       promptWithOptions(block.prompt, block.options),
       block.citations,
-      "claim",
+      "citation_only",
     )),
     ...payload.hint_ladders.flatMap((ladder) => ladder.hints.map((hint) => makeBlock(
       "concept",
       { field: "hint", ref_id: `${ladder.objective_id}:hint-${hint.hint_level}`, objective_id: ladder.objective_id },
       hint.text,
       hint.citations,
-      factModeForCitations(hint.citations),
+      "citation_only",
     ))),
   ]
 }
@@ -75,14 +80,14 @@ export function extractCodeLabBlocks(artifact: CodeLabPublicArtifact): ReviewCon
       { field: "public_test", ref_id: test.test_id, objective_id: test.objective_id },
       `${test.description}\n预期行为：${test.expected_behavior}`,
       test.citations,
-      "claim",
+      "citation_only",
     )),
     ...payload.hint_ladders.flatMap((ladder) => ladder.hints.map((hint) => makeBlock(
       "code_lab",
       { field: "hint", ref_id: `${ladder.objective_id}:hint-${hint.hint_level}`, objective_id: ladder.objective_id },
       hint.text,
       hint.citations,
-      factModeForCitations(hint.citations),
+      "citation_only",
     ))),
     makeBlock(
       "code_lab",
@@ -108,7 +113,7 @@ export function extractAssessmentBlocks(artifact: AssessmentPublicArtifact): Rev
       { field: "assessment_item", ref_id: item.item_id, objective_id: item.objective_id },
       item.prompt,
       item.citations,
-      "claim",
+      "citation_only",
     ),
     ...(item.options ?? []).map((option) => makeBlock(
       "assessment",
@@ -141,6 +146,7 @@ function reviewRenderBlock(
   kind: "concept" | "code_lab",
   block: RenderBlock,
   objectiveId?: string,
+  renderedFactMode?: ReviewContentBlock["fact_audit_mode"],
 ): ReviewContentBlock[] {
   const claims = "claims" in block ? block.claims : []
   const citations = deduplicateCitations(claims.flatMap((claim) => claim.citations))
@@ -155,7 +161,8 @@ function reviewRenderBlock(
         },
         rendered,
         citations,
-        block.block_type === "code" ? "citation_only" : "claim",
+        renderedFactMode
+          ?? (block.block_type === "code" ? "citation_only" : "evidence_anchored"),
       )]
     : []
   if ("claims" in block) {
@@ -181,7 +188,7 @@ function reviewRenderBlock(
       { field: "quiz", ref_id: block.item_id, parent_block_id: block.block_id, objective_id: objectiveId },
       promptWithOptions(block.prompt, block.options),
       block.citations,
-      "claim",
+      "citation_only",
     )]
   }
   if (block.block_type === "hint") {
@@ -190,7 +197,7 @@ function reviewRenderBlock(
       { field: "hint", ref_id: block.block_id, objective_id: objectiveId },
       block.text,
       block.citations,
-      "claim",
+      "citation_only",
     )]
   }
   return []
@@ -227,15 +234,6 @@ function promptWithOptions(
     prompt,
     ...options.map((option) => `${option.label}：${option.text}`),
   ].join("\n")
-}
-
-function factModeForCitations(
-  citations: CitationRef[],
-): ReviewContentBlock["fact_audit_mode"] {
-  return citations.some((citation) =>
-    citation.relation === "supports" || citation.relation === "prerequisite")
-    ? "claim"
-    : "citation_only"
 }
 
 function makeBlock(

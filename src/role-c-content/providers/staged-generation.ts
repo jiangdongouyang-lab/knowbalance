@@ -1,4 +1,5 @@
 import type {
+  AnswerSpec,
   AssessmentItemPublic,
   AssessmentItemSecure,
   AssessmentPublicPayload,
@@ -6,18 +7,110 @@ import type {
   CodeLabPublicPayload,
   CodeLabSecurePayload,
   ConceptLessonPayload,
+  ExecutionContract,
   RenderBlock,
+  TestComparison,
 } from "../contracts/artifacts"
 import { stableId, type CitationRef } from "../contracts/common"
 import type { RagEvidencePack } from "../contracts/evidence-pack"
 import type { GenerationSpec } from "../contracts/generation-spec"
 import { ModelOutputValidationError } from "../contracts/model-gateway"
-import { claimTextMatchesFact } from "../validators/claim-grounding"
+import {
+  modalityMeasuresBehavior,
+  preferredModalityForBehavior,
+} from "../contracts/assessment-measurement"
+import {
+  claimTextMatchesFact,
+  normalizeGroundedClaimText,
+} from "../validators/claim-grounding"
 import type { CodeLabRequest, ConceptTutorRequest } from "../agents/types"
 
 export interface ConceptSegmentRequest extends ConceptTutorRequest {
   segment_index: number
   segment_count: number
+}
+
+/** Compact pedagogical prose authored by the model before trusted IDs/citations are attached. */
+export interface ConceptSegmentAuthorPayload {
+  title: string
+  objectives: Array<{
+    explanation: string
+    worked_example: string
+    misconception: string
+    micro_check_prompt: string
+    micro_check_options: string[]
+    hints: string[]
+    summary: string
+  }>
+}
+
+export interface CodeLabObjectivePlan {
+  objective_id: string
+  source_id: string
+  instruction_block_id: string
+  public_test_id: string
+  citations: CitationRef[]
+}
+
+/** Compact public lab semantics before trusted identities and citations are attached. */
+export interface CodeLabPublicAuthorPayload {
+  title: string
+  execution_contract: ExecutionContract
+  starter_code: string
+  objectives: Array<{
+    instruction_text: string
+    public_test: {
+      description: string
+      input: unknown
+      expected_behavior: string
+    }
+    hints: string[]
+    reflection_question: string
+  }>
+}
+
+export interface CodeLabSecurePlan {
+  hidden_tests: Array<{
+    test_id: string
+    objective_id: string
+    case_kind: "normal" | "boundary"
+    weight: number
+  }>
+  mutation_variants: Array<{
+    mutation_id: string
+    objective_ids: string[]
+    must_fail_test_ids: string[]
+  }>
+}
+
+/** Minimal private patch authored after trusted execution; all identities stay frozen. */
+export interface CodeLabExecutionRepairPatch {
+  reference_solution: string | null
+  hidden_test_repairs: Array<{
+    test_id: string
+    input: unknown
+    expected: unknown
+    comparison: TestComparison
+  }>
+  mutation_repairs: Array<{
+    mutation_id: string
+    code: string
+  }>
+}
+
+/** Model-authored executable semantics before deterministic IDs and scoring are attached. */
+export interface CodeLabSecureAuthorPayload {
+  reference_solution: string
+  hidden_tests: Array<{
+    input: unknown
+    expected: unknown
+    comparison: TestComparison
+    misconception_tag: string
+  }>
+  mutation_variants: Array<{
+    code: string
+    misconception_tag: string
+  }>
 }
 
 export interface AssessmentItemPlan {
@@ -30,6 +123,34 @@ export interface AssessmentItemPlan {
   modality: AssessmentItemPublic["modality"]
   max_score: number
   citations: CitationRef[]
+}
+
+/** Public question semantics before stable IDs, scoring, routing and citations are attached. */
+export interface AssessmentPublicAuthorPayload {
+  title: string
+  items: Array<{
+    prompt: string
+    options: string[] | null
+    starter_code: string | null
+  }>
+}
+
+/** Model-authored answer semantics before deterministic item and suite identities are attached. */
+export interface AssessmentSecureAuthorPayload {
+  items: Array<{
+    answer_spec: AnswerSpec | null
+    correct_option_id: string | null
+    misconception_by_option: Record<string, string>
+  }>
+  code_test_suites: Array<{
+    execution_contract: ExecutionContract
+    reference_solution: string
+    hidden_tests: Array<{
+      input: unknown
+      expected: unknown
+      comparison: TestComparison
+    }>
+  }>
 }
 
 export function splitConceptRequest(
@@ -83,6 +204,159 @@ export function splitConceptRequest(
   })
 }
 
+export function validateConceptSegmentAuthorAgainstRequest(
+  request: ConceptTutorRequest,
+  payload: ConceptSegmentAuthorPayload,
+): string[] {
+  const issues: string[] = []
+  if (payload.objectives.length !== request.generation_spec.targets.length) {
+    issues.push(
+      `objectives 数量应为 ${request.generation_spec.targets.length}，实际 ${payload.objectives.length}`,
+    )
+  }
+  payload.objectives.forEach((entry, index) => {
+    if (entry.hints.length !== 3) {
+      issues.push(`objectives[${index}].hints 必须恰好包含三级提示`)
+    }
+    if (entry.micro_check_options.length < 2
+      || entry.micro_check_options.length > 4) {
+      issues.push(`objectives[${index}].micro_check_options 必须包含 2..4 项`)
+    }
+    const normalizedOptions = entry.micro_check_options
+      .map((option) => option.trim().toLocaleLowerCase())
+    if (new Set(normalizedOptions).size !== normalizedOptions.length) {
+      issues.push(`objectives[${index}].micro_check_options 不得重复`)
+    }
+  })
+  return issues
+}
+
+/**
+ * Deterministically expands compact authored prose into the canonical lesson.
+ * Evidence claims, citations, identities and coverage never rely on model output.
+ */
+export function materializeConceptSegmentAuthorPayload(
+  request: ConceptTutorRequest,
+  payload: ConceptSegmentAuthorPayload,
+): ConceptLessonPayload {
+  const facts = new Map(request.evidence_pack.results.flatMap((entry) =>
+    entry.facts.map((fact) => [
+      `${fact.source_id}:${fact.fact_id}`,
+      fact.content,
+    ] as const)))
+  const explanationBlocks: ConceptLessonPayload["explanation_blocks"] = []
+  const workedExamples: ConceptLessonPayload["worked_examples"] = []
+  const misconceptions: ConceptLessonPayload["misconceptions"] = []
+  const microChecks: ConceptLessonPayload["micro_checks"] = []
+  const hintLadders: ConceptLessonPayload["hint_ladders"] = []
+  const summary: ConceptLessonPayload["summary"] = []
+  const objectiveCoverage: ConceptLessonPayload["objective_coverage"] = []
+
+  request.generation_spec.targets.forEach((target, index) => {
+    const authored = payload.objectives[index]!
+    const identity = {
+      spec_id: request.generation_spec.spec_id,
+      objective_id: target.objective_id,
+      source_id: target.source_id,
+    }
+    const citations = target.required_fact_ids.map((factId) => ({
+      source_id: target.source_id,
+      fact_id: factId,
+      relation: "supports" as const,
+    }))
+    const claims = (kind: string) => citations.map((citation, factIndex) => ({
+      claim_id: stableId("CONCEPT-CLAIM", {
+        ...identity,
+        kind,
+        fact_id: citation.fact_id,
+        fact_index: factIndex,
+      }),
+      text: facts.get(`${citation.source_id}:${citation.fact_id}`) ?? "",
+      citations: [structuredClone(citation)],
+    }))
+    const evidenceText = citations
+      .map((citation) => facts.get(`${citation.source_id}:${citation.fact_id}`) ?? "")
+      .filter(Boolean)
+      .join("；")
+    const explanationId = stableId("CONCEPT-EXPLANATION", identity)
+    const workedExampleId = stableId("CONCEPT-EXAMPLE", identity)
+    const checkId = stableId("CONCEPT-CHECK", identity)
+    const summaryId = stableId("CONCEPT-SUMMARY", identity)
+    explanationBlocks.push({
+      block_id: explanationId,
+      block_type: "paragraph",
+      text: `${authored.explanation.trim()}\n证据事实：${evidenceText}`,
+      claims: claims("explanation"),
+    })
+    workedExamples.push({
+      block_id: workedExampleId,
+      block_type: "paragraph",
+      text: `${authored.worked_example.trim()}\n证据事实：${evidenceText}`,
+      claims: claims("worked-example"),
+    })
+    misconceptions.push({
+      misconception_tag: stableId("CONCEPT-MISCONCEPTION", identity),
+      explanation: `${authored.misconception.trim()}\n证据事实：${evidenceText}`,
+      objective_id: target.objective_id,
+      citations: structuredClone(citations),
+    })
+    microChecks.push({
+      block_id: checkId,
+      block_type: "quiz",
+      item_id: stableId("CONCEPT-CHECK-ITEM", identity),
+      prompt: authored.micro_check_prompt.trim(),
+      options: authored.micro_check_options.map((text, optionIndex) => ({
+        option_id: stableId("CONCEPT-CHECK-OPTION", {
+          ...identity,
+          option_index: optionIndex,
+        }),
+        label: String.fromCharCode(65 + optionIndex),
+        text: text.trim(),
+      })),
+      citations: citations.map((citation) => ({
+        ...citation,
+        relation: "derived_from" as const,
+      })),
+    })
+    hintLadders.push({
+      objective_id: target.objective_id,
+      hints: authored.hints.map((text, hintIndex) => ({
+        hint_level: (hintIndex + 1) as 1 | 2 | 3,
+        text: text.trim(),
+        citations: citations.map((citation) => ({
+          ...citation,
+          relation: "derived_from" as const,
+        })),
+      })),
+    })
+    summary.push({
+      block_id: summaryId,
+      block_type: "paragraph",
+      text: `${authored.summary.trim()}\n证据事实：${evidenceText}`,
+      claims: claims("summary"),
+    })
+    objectiveCoverage.push({
+      objective_id: target.objective_id,
+      block_ids: [explanationId, workedExampleId, checkId, summaryId],
+    })
+  })
+
+  return normalizeConceptSegment(request, {
+    title: payload.title.trim(),
+    objective_ids: request.generation_spec.targets.map((target) =>
+      target.objective_id),
+    prerequisite_bridge: [],
+    explanation_blocks: explanationBlocks,
+    worked_examples: workedExamples,
+    misconceptions,
+    micro_checks: microChecks,
+    hint_ladders: hintLadders,
+    summary,
+    objective_coverage: objectiveCoverage,
+    used_evidence: [],
+  })
+}
+
 export function mergeConceptSegments(
   request: ConceptTutorRequest,
   payloads: ConceptLessonPayload[],
@@ -124,6 +398,12 @@ export function normalizeConceptSegment(
     ...normalized.worked_examples,
     ...normalized.summary,
   ], request.evidence_pack)
+  anchorRenderedClaims([
+    ...normalized.prerequisite_bridge,
+    ...normalized.explanation_blocks,
+    ...normalized.summary,
+  ])
+  anchorMisconceptionEvidence(normalized, request.evidence_pack)
   normalized.objective_ids = request.generation_spec.targets.map((target) => target.objective_id)
   const allBlocks = [
     ...normalized.prerequisite_bridge,
@@ -162,49 +442,321 @@ export function buildLabIdentity(spec: GenerationSpec) {
   }
 }
 
+export function buildCodeLabObjectivePlan(
+  spec: GenerationSpec,
+): CodeLabObjectivePlan[] {
+  return spec.targets.map((target) => {
+    const identity = {
+      spec_id: spec.spec_id,
+      objective_id: target.objective_id,
+      source_id: target.source_id,
+    }
+    return {
+      objective_id: target.objective_id,
+      source_id: target.source_id,
+      instruction_block_id: stableId("LAB-INSTRUCTION", identity),
+      public_test_id: stableId("LAB-PUBLIC-TEST", identity),
+      citations: target.required_fact_ids.map((factId) => ({
+        source_id: target.source_id,
+        fact_id: factId,
+        relation: "derived_from" as const,
+      })),
+    }
+  })
+}
+
+export function validateCodeLabPublicAuthorAgainstPlan(
+  payload: CodeLabPublicAuthorPayload,
+  plan: CodeLabObjectivePlan[],
+): string[] {
+  const issues: string[] = []
+  if (payload.objectives.length !== plan.length) {
+    issues.push(`objectives 数量应为 ${plan.length}，实际 ${payload.objectives.length}`)
+  }
+  payload.objectives.forEach((entry, index) => {
+    if (entry.hints.length !== 3) {
+      issues.push(`objectives[${index}].hints 必须恰好包含三级提示`)
+    }
+    if (payload.execution_contract.execution_mode === "function"
+      && !isFunctionInvocationEnvelope(entry.public_test.input)) {
+      issues.push(
+        `objectives[${index}].public_test.input 必须使用 {"args": [...], "kwargs"?: {...}} 调用封装`,
+      )
+    }
+  })
+  return issues
+}
+
+export function materializeCodeLabPublicAuthorPayload(
+  request: CodeLabRequest,
+  payload: CodeLabPublicAuthorPayload,
+  labId: string,
+  plan: CodeLabObjectivePlan[],
+): CodeLabPublicPayload {
+  const facts = new Map(request.evidence_pack.results.flatMap((entry) =>
+    entry.facts.map((fact) => [
+      `${fact.source_id}:${fact.fact_id}`,
+      fact.content,
+    ] as const)))
+  const publicPayload: CodeLabPublicPayload = {
+    lab_id: labId,
+    title: payload.title.trim(),
+    objective_ids: request.generation_spec.targets.map((target) =>
+      target.objective_id),
+    instructions: plan.map((entry, index) => ({
+      block_id: entry.instruction_block_id,
+      block_type: "paragraph",
+      text: payload.objectives[index]!.instruction_text.trim(),
+      claims: entry.citations.map((citation, citationIndex) => ({
+        claim_id: stableId("LAB-CLAIM", {
+          spec_id: request.generation_spec.spec_id,
+          objective_id: entry.objective_id,
+          fact_id: citation.fact_id,
+          citation_index: citationIndex,
+        }),
+        text: facts.get(`${citation.source_id}:${citation.fact_id}`) ?? "",
+        citations: [{ ...citation, relation: "supports" as const }],
+      })),
+    })),
+    execution_contract: structuredClone(payload.execution_contract),
+    starter_code: payload.starter_code,
+    public_tests: plan.map((entry, index) => ({
+      test_id: entry.public_test_id,
+      objective_id: entry.objective_id,
+      description: payload.objectives[index]!.public_test.description.trim(),
+      input: structuredClone(payload.objectives[index]!.public_test.input),
+      expected_behavior: payload.objectives[index]!.public_test.expected_behavior.trim(),
+      citations: structuredClone(entry.citations),
+    })),
+    hint_ladders: plan.map((entry, index) => ({
+      objective_id: entry.objective_id,
+      hints: payload.objectives[index]!.hints.map((text, hintIndex) => ({
+        hint_level: (hintIndex + 1) as 1 | 2 | 3,
+        text: text.trim(),
+        citations: structuredClone(entry.citations),
+      })),
+    })),
+    reflection_questions: payload.objectives.map((entry) =>
+      entry.reflection_question.trim()),
+    objective_coverage: plan.map((entry) => ({
+      objective_id: entry.objective_id,
+      instruction_block_ids: [entry.instruction_block_id],
+      public_test_ids: [entry.public_test_id],
+    })),
+    used_evidence: plan.flatMap((entry) => structuredClone(entry.citations)),
+  }
+  return normalizeCodeLabPublic(request, publicPayload, labId, plan)
+}
+
+export function validateCodeLabPublicAgainstPlan(
+  payload: CodeLabPublicPayload,
+  plan: CodeLabObjectivePlan[],
+): string[] {
+  const issues: string[] = []
+  if (payload.instructions.length !== plan.length) {
+    issues.push(`instructions 数量应为 ${plan.length}，实际 ${payload.instructions.length}`)
+  }
+  if (payload.public_tests.length !== plan.length) {
+    issues.push(`public_tests 数量应为 ${plan.length}，实际 ${payload.public_tests.length}`)
+  }
+  if (payload.hint_ladders.length !== plan.length) {
+    issues.push(`hint_ladders 数量应为 ${plan.length}，实际 ${payload.hint_ladders.length}`)
+  }
+  payload.instructions.forEach((block, index) => {
+    if (!("claims" in block) || block.claims.length === 0) {
+      issues.push(`instructions[${index}] 必须包含可绑定事实的 claims`)
+    }
+  })
+  payload.hint_ladders.forEach((ladder, index) => {
+    if (ladder.hints.length !== 3) {
+      issues.push(`hint_ladders[${index}] 必须恰好包含三级提示`)
+    }
+  })
+  if (payload.execution_contract.execution_mode === "function") {
+    payload.public_tests.forEach((test, index) => {
+      if (!isFunctionInvocationEnvelope(test.input)) {
+        issues.push(`public_tests[${index}].input 必须使用 {"args": [...], "kwargs"?: {...}} 调用封装`)
+      }
+    })
+  }
+  return issues
+}
+
 export function normalizeCodeLabPublic(
   request: CodeLabRequest,
   payload: CodeLabPublicPayload,
   labId: string,
+  plan: CodeLabObjectivePlan[] = buildCodeLabObjectivePlan(
+    request.generation_spec,
+  ),
 ): CodeLabPublicPayload {
   const normalized = structuredClone(payload)
   normalized.lab_id = labId
   normalized.objective_ids = request.generation_spec.targets.map((target) => target.objective_id)
-  freezeClaimTexts(normalized.instructions, request.evidence_pack)
-  normalized.public_tests = normalized.public_tests.map((test) => {
-    const target = targetForCitations(request.generation_spec, test.citations)
-    return target ? { ...test, objective_id: target.objective_id } : test
+  const facts = new Map(request.evidence_pack.results.flatMap((entry) =>
+    entry.facts.map((fact) => [
+      `${fact.source_id}:${fact.fact_id}`,
+      fact.content,
+    ] as const)))
+  normalized.instructions = plan.map((entry, index) => {
+    const block = structuredClone(payload.instructions[index]!)
+    block.block_id = entry.instruction_block_id
+    if ("claims" in block) {
+      block.claims = entry.citations.map((citation, citationIndex) => ({
+        claim_id: stableId("LAB-CLAIM", {
+          spec_id: request.generation_spec.spec_id,
+          objective_id: entry.objective_id,
+          fact_id: citation.fact_id,
+          citation_index: citationIndex,
+        }),
+        text: facts.get(`${citation.source_id}:${citation.fact_id}`) ?? "",
+        citations: [{ ...citation, relation: "supports" as const }],
+      }))
+      anchorRenderedClaim(block)
+    }
+    return block
   })
-  normalized.hint_ladders = normalized.hint_ladders.map((ladder) => {
-    const target = targetForCitations(
-      request.generation_spec,
-      ladder.hints.flatMap((hint) => hint.citations),
-    )
-    return target ? { ...ladder, objective_id: target.objective_id } : ladder
-  })
-  normalized.objective_coverage = request.generation_spec.targets.flatMap((target) => {
-    const existing = payload.objective_coverage.find((entry) => entry.objective_id === target.objective_id)
-    const instructionIds = new Set(payload.instructions.map((block) => block.block_id))
-    const groundedInstructionIds = normalized.instructions.filter((block) => citationsFromBlock(block).some((citation) =>
-      citation.source_id === target.source_id && target.required_fact_ids.includes(citation.fact_id),
-    )).map((block) => block.block_id)
-    const publicTestIds = new Set(normalized.public_tests
-      .filter((test) => test.objective_id === target.objective_id)
-      .map((test) => test.test_id))
-    const instructionBlockIds = unique([
-      ...(existing?.instruction_block_ids ?? []).filter((id) => instructionIds.has(id)),
-      ...groundedInstructionIds,
-    ])
-    const testIds = [...publicTestIds]
-    if (instructionBlockIds.length === 0 || testIds.length === 0) return []
-    return [{
-      objective_id: target.objective_id,
-      instruction_block_ids: instructionBlockIds,
-      public_test_ids: testIds,
-    }]
-  })
+  normalized.public_tests = plan.map((entry, index) => ({
+    ...structuredClone(payload.public_tests[index]!),
+    test_id: entry.public_test_id,
+    objective_id: entry.objective_id,
+    citations: structuredClone(entry.citations),
+  }))
+  normalized.hint_ladders = plan.map((entry, index) => ({
+    ...structuredClone(payload.hint_ladders[index]!),
+    objective_id: entry.objective_id,
+    hints: payload.hint_ladders[index]!.hints.map((hint, hintIndex) => ({
+      ...structuredClone(hint),
+      hint_level: (hintIndex + 1) as 1 | 2 | 3,
+      citations: structuredClone(entry.citations),
+    })),
+  }))
+  normalized.objective_coverage = plan.map((entry) => ({
+    objective_id: entry.objective_id,
+    instruction_block_ids: [entry.instruction_block_id],
+    public_test_ids: [entry.public_test_id],
+  }))
   normalized.used_evidence = collectCodeLabCitations(normalized)
   return normalized
+}
+
+/**
+ * Freezes secure identities and coverage without fabricating executable
+ * semantics. The model authors tests, expected values and reference code; the
+ * isolated runner proves them afterwards. Mutation diagnostics are optional.
+ */
+export function buildCodeLabSecurePlan(
+  spec: GenerationSpec,
+  suiteId: string,
+): CodeLabSecurePlan {
+  if (spec.targets.length === 0) {
+    throw new ModelOutputValidationError("code-lab.secure.plan", ["GenerationSpec 没有可规划的目标"])
+  }
+  const objectiveWeight = 1 / spec.targets.length
+  const hiddenTests = spec.targets.map((target) => {
+    const caseKind = "normal" as const
+    return {
+      test_id: stableId("LAB-HIDDEN-TEST", {
+        test_suite_id: suiteId,
+        objective_id: target.objective_id,
+        case_kind: caseKind,
+      }),
+      objective_id: target.objective_id,
+      case_kind: caseKind,
+      weight: objectiveWeight,
+    }
+  })
+  return {
+    hidden_tests: hiddenTests,
+    mutation_variants: [],
+  }
+}
+
+export function validateCodeLabSecureAgainstPlan(
+  payload: CodeLabSecurePayload,
+  plan: CodeLabSecurePlan,
+): string[] {
+  const issues: string[] = []
+  if (payload.hidden_tests.length !== plan.hidden_tests.length) {
+    issues.push(`hidden_tests 数量应为 ${plan.hidden_tests.length}，实际 ${payload.hidden_tests.length}`)
+  }
+  plan.hidden_tests.forEach((expected, index) => {
+    const actual = payload.hidden_tests[index]
+    if (!actual) return
+    if (actual.test_id !== expected.test_id) issues.push(`hidden_tests[${index}].test_id 未按 objective_plan 返回`)
+    if (actual.objective_id !== expected.objective_id) issues.push(`hidden_tests[${index}].objective_id 未按 objective_plan 返回`)
+  })
+  const mappings = new Map<string, number>()
+  payload.misconception_map.forEach((entry) => {
+    mappings.set(entry.failed_test_id, (mappings.get(entry.failed_test_id) ?? 0) + 1)
+  })
+  for (const test of plan.hidden_tests) {
+    if (mappings.get(test.test_id) !== 1) {
+      issues.push(`misconception_map 必须恰好映射一次计划测试 ${test.test_id}`)
+    }
+  }
+  if (payload.execution_contract.execution_mode === "function") {
+    payload.hidden_tests.forEach((test, index) => {
+      if (!isFunctionInvocationEnvelope(test.input)) {
+        issues.push(`hidden_tests[${index}].input 必须使用 {"args": [...], "kwargs"?: {...}} 调用封装`)
+      }
+    })
+  }
+  return issues
+}
+
+export function validateCodeLabSecureAuthorAgainstPlan(
+  payload: CodeLabSecureAuthorPayload,
+  plan: CodeLabSecurePlan,
+  executionMode: CodeLabPublicPayload["execution_contract"]["execution_mode"],
+): string[] {
+  const issues: string[] = []
+  if (payload.hidden_tests.length !== plan.hidden_tests.length) {
+    issues.push(`hidden_tests 数量应为 ${plan.hidden_tests.length}，实际 ${payload.hidden_tests.length}`)
+  }
+  if (executionMode === "function") {
+    payload.hidden_tests.forEach((test, index) => {
+      if (!isFunctionInvocationEnvelope(test.input)) {
+        issues.push(`hidden_tests[${index}].input 必须使用 {"args": [...], "kwargs"?: {...}} 调用封装`)
+      }
+    })
+  }
+  return issues
+}
+
+export function materializeCodeLabSecureAuthorPayload(
+  spec: GenerationSpec,
+  payload: CodeLabSecureAuthorPayload,
+  publicPayload: CodeLabPublicPayload,
+  suiteId: string,
+  plan: CodeLabSecurePlan = buildCodeLabSecurePlan(spec, suiteId),
+): CodeLabSecurePayload {
+  const draft: CodeLabSecurePayload = {
+    lab_id: publicPayload.lab_id,
+    test_suite_id: suiteId,
+    execution_contract: structuredClone(publicPayload.execution_contract),
+    reference_solution: payload.reference_solution,
+    hidden_tests: plan.hidden_tests.map((entry, index) => ({
+      test_id: entry.test_id,
+      objective_id: entry.objective_id,
+      weight: entry.weight,
+      input: structuredClone(payload.hidden_tests[index]!.input),
+      expected: structuredClone(payload.hidden_tests[index]!.expected),
+      comparison: structuredClone(payload.hidden_tests[index]!.comparison),
+    })),
+    scoring_groups: [],
+    misconception_map: plan.hidden_tests.map((entry, index) => ({
+      failed_test_id: entry.test_id,
+      misconception_tag: payload.hidden_tests[index]!.misconception_tag,
+    })),
+    mutation_variants: plan.mutation_variants.map((entry, index) => ({
+      ...structuredClone(entry),
+      code: payload.mutation_variants[index]!.code,
+      misconception_tag: payload.mutation_variants[index]!.misconception_tag,
+    })),
+    objective_coverage: [],
+  }
+  return normalizeCodeLabSecure(spec, draft, publicPayload, suiteId, plan)
 }
 
 export function normalizeCodeLabSecure(
@@ -212,29 +764,47 @@ export function normalizeCodeLabSecure(
   payload: CodeLabSecurePayload,
   publicPayload: CodeLabPublicPayload,
   suiteId: string,
+  plan: CodeLabSecurePlan = buildCodeLabSecurePlan(spec, suiteId),
 ): CodeLabSecurePayload {
   const normalized = structuredClone(payload)
   normalized.lab_id = publicPayload.lab_id
   normalized.test_suite_id = suiteId
   normalized.execution_contract = structuredClone(publicPayload.execution_contract)
-  const totalWeight = normalized.hidden_tests.reduce((sum, test) => sum + test.weight, 0)
-  if (Number.isFinite(totalWeight) && totalWeight > 0) {
-    normalized.hidden_tests = normalized.hidden_tests.map((test) => ({
-      ...test,
-      weight: test.weight / totalWeight,
-    }))
-  }
-  normalized.scoring_groups = spec.targets.flatMap((target) => {
+  normalized.hidden_tests = plan.hidden_tests.map((entry, index) => {
+    const { case_kind: _caseKind, ...identity } = entry
+    return {
+      ...structuredClone(payload.hidden_tests[index]!),
+      ...identity,
+    }
+  })
+  normalized.mutation_variants = plan.mutation_variants.length > 0
+    ? plan.mutation_variants.map((entry, index) => ({
+        ...structuredClone(payload.mutation_variants[index]!),
+        ...structuredClone(entry),
+      }))
+    : structuredClone(payload.mutation_variants)
+  normalized.scoring_groups = spec.targets.map((target) => {
     const tests = normalized.hidden_tests.filter((test) => test.objective_id === target.objective_id)
-    if (tests.length === 0) return []
-    return [{
+    return {
       group_id: stableId("GROUP", { test_suite_id: suiteId, objective_id: target.objective_id }),
       objective_id: target.objective_id,
       test_ids: tests.map((test) => test.test_id),
       weight: tests.reduce((sum, test) => sum + test.weight, 0),
-    }]
+    }
   })
-  normalized.objective_coverage = spec.targets.flatMap((target) => {
+  normalized.misconception_map = normalized.hidden_tests.map((test) => {
+    const mutation = normalized.mutation_variants.find((entry) =>
+      entry.objective_ids.includes(test.objective_id))
+    const authored = payload.misconception_map.find((entry) =>
+      entry.failed_test_id === test.test_id)
+    return {
+      failed_test_id: test.test_id,
+      misconception_tag: authored?.misconception_tag
+        ?? mutation?.misconception_tag
+        ?? `objective_${test.objective_id}_misconception`,
+    }
+  })
+  normalized.objective_coverage = spec.targets.map((target) => {
     const hiddenTestIds = unique(normalized.hidden_tests
       .filter((test) => test.objective_id === target.objective_id)
       .map((test) => test.test_id))
@@ -244,15 +814,34 @@ export function normalizeCodeLabSecure(
     const mutationIds = unique(normalized.mutation_variants
       .filter((mutation) => mutation.objective_ids.includes(target.objective_id))
       .map((mutation) => mutation.mutation_id))
-    if (hiddenTestIds.length === 0 || scoringGroupIds.length === 0 || mutationIds.length === 0) return []
-    return [{
+    return {
       objective_id: target.objective_id,
       hidden_test_ids: hiddenTestIds,
       scoring_group_ids: scoringGroupIds,
       mutation_ids: mutationIds,
-    }]
+    }
   })
   return normalized
+}
+
+/** Applies only executable semantics selected by stable IDs; structural fields remain prior-owned. */
+export function applyCodeLabExecutionRepairPatch(
+  prior: CodeLabSecurePayload,
+  patch: CodeLabExecutionRepairPatch,
+): CodeLabSecurePayload {
+  const repaired = structuredClone(prior)
+  if (patch.reference_solution !== null) {
+    repaired.reference_solution = patch.reference_solution
+  }
+  const hiddenById = new Map(repaired.hidden_tests.map((entry) => [entry.test_id, entry]))
+  for (const entry of patch.hidden_test_repairs) {
+    const target = hiddenById.get(entry.test_id)
+    if (!target) continue
+    target.input = structuredClone(entry.input)
+    target.expected = structuredClone(entry.expected)
+    target.comparison = structuredClone(entry.comparison)
+  }
+  return repaired
 }
 
 export function buildAssessmentItemPlan(spec: GenerationSpec): AssessmentItemPlan[] {
@@ -300,6 +889,82 @@ export function buildAssessmentFormId(spec: GenerationSpec): string {
     seed: spec.policies.seed,
     version: "assessment-staged-v1",
   })
+}
+
+export function validateAssessmentPublicAuthorAgainstPlan(
+  payload: AssessmentPublicAuthorPayload,
+  plan: AssessmentItemPlan[],
+): string[] {
+  const issues: string[] = []
+  if (payload.items.length !== plan.length) {
+    issues.push(`items 数量应为 ${plan.length}，实际 ${payload.items.length}`)
+    return issues
+  }
+  payload.items.forEach((item, index) => {
+    const expected = plan[index]!
+    const isChoice = expected.modality === "mcq"
+      || expected.modality === "true_false"
+    if (isChoice) {
+      if (!item.options) {
+        issues.push(`items[${index}] 选择题缺少 options`)
+      } else {
+        const expectedCount = expected.modality === "true_false" ? 2 : undefined
+        if (expectedCount && item.options.length !== expectedCount) {
+          issues.push(`items[${index}] true_false 必须恰好包含 2 个选项`)
+        }
+        const normalized = item.options.map((option) =>
+          option.normalize("NFKC").trim().toLocaleLowerCase())
+        if (new Set(normalized).size !== normalized.length) {
+          issues.push(`items[${index}].options 不得重复`)
+        }
+      }
+    } else if (item.options !== null) {
+      issues.push(`items[${index}] 非选择题的 options 必须为 null`)
+    }
+    if (expected.modality === "code") {
+      if (!item.starter_code?.trim()) {
+        issues.push(`items[${index}] 代码题缺少 starter_code`)
+      }
+    } else if (item.starter_code !== null) {
+      issues.push(`items[${index}] 非代码题的 starter_code 必须为 null`)
+    }
+  })
+  return issues
+}
+
+export function materializeAssessmentPublicAuthorPayload(
+  spec: GenerationSpec,
+  payload: AssessmentPublicAuthorPayload,
+  plan: AssessmentItemPlan[],
+  formId: string,
+): AssessmentPublicPayload {
+  const items = payload.items.map((authored, index): AssessmentItemPublic => {
+    const expected = plan[index]!
+    const options = authored.options?.map((text, optionIndex) => ({
+      option_id: stableId("OPTION", {
+        item_id: expected.item_id,
+        option_index: optionIndex,
+      }),
+      label: "ABCD"[optionIndex]!,
+      text,
+    }))
+    return {
+      ...structuredClone(expected),
+      prompt: authored.prompt,
+      ...(options ? { options } : {}),
+      ...(authored.starter_code ? { starter_code: authored.starter_code } : {}),
+    }
+  })
+  return {
+    form_id: formId,
+    title: payload.title,
+    objective_ids: spec.targets.map((target) => target.objective_id),
+    items,
+    submission_policy: { max_attempts: 3, formative: true },
+    routing: deterministicRouting(items),
+    objective_coverage: assessmentPublicCoverage(spec, items),
+    used_evidence: deduplicate(items.flatMap((item) => item.citations)),
+  }
 }
 
 export function validateAssessmentPublicAgainstPlan(
@@ -369,7 +1034,158 @@ export function validateAssessmentSecureAgainstPublic(
   if (payload.code_test_suites.length !== codeCount) {
     issues.push(`code_test_suites 数量应为 ${codeCount}，实际 ${payload.code_test_suites.length}`)
   }
+  payload.items.forEach((item, index) => {
+    const publicItem = publicPayload.items[index]
+    if (!publicItem) return
+    if (item.item_id !== publicItem.item_id) {
+      issues.push(`items[${index}].item_id 未与 public_payload 对齐`)
+    }
+    for (const key of ["objective_id", "tier", "modality", "max_score"] as const) {
+      if (item[key] !== publicItem[key]) {
+        issues.push(`items[${index}].${key} 未与 public_payload 对齐`)
+      }
+    }
+    const isChoice = publicItem.modality === "mcq" || publicItem.modality === "true_false"
+    const optionIds = new Set(publicItem.options?.map((option) => option.option_id) ?? [])
+    if (isChoice) {
+      if (!item.correct_option_id || !optionIds.has(item.correct_option_id)) {
+        issues.push(`items[${index}].correct_option_id 不是当前公开题的选项`)
+      }
+      const invalidMapIds = Object.keys(item.misconception_by_option).filter((optionId) =>
+        !optionIds.has(optionId) || optionId === item.correct_option_id)
+      if (invalidMapIds.length > 0) {
+        issues.push(`items[${index}].misconception_by_option 包含无效或正确选项`)
+      }
+    } else if (item.correct_option_id || Object.keys(item.misconception_by_option).length > 0) {
+      issues.push(`items[${index}] 非选择题不得返回选项答案映射`)
+    }
+  })
+  payload.code_test_suites.forEach((suite, suiteIndex) => {
+    if (suite.execution_contract.execution_mode !== "function") return
+    suite.hidden_tests.forEach((test, testIndex) => {
+      if (!isFunctionInvocationEnvelope(test.input)) {
+        issues.push(`code_test_suites[${suiteIndex}].hidden_tests[${testIndex}].input 必须使用 {"args": [...], "kwargs"?: {...}} 调用封装`)
+      }
+    })
+  })
   return issues
+}
+
+export function validateAssessmentSecureAuthorAgainstPublic(
+  payload: AssessmentSecureAuthorPayload,
+  publicPayload: AssessmentPublicPayload,
+): string[] {
+  const issues: string[] = []
+  if (payload.items.length !== publicPayload.items.length) {
+    issues.push(`secure items 数量应为 ${publicPayload.items.length}，实际 ${payload.items.length}`)
+    return issues
+  }
+  const codeItems = publicPayload.items.filter((item) => item.modality === "code")
+  if (payload.code_test_suites.length !== codeItems.length) {
+    issues.push(`code_test_suites 数量应为 ${codeItems.length}，实际 ${payload.code_test_suites.length}`)
+  }
+  payload.items.forEach((item, index) => {
+    const publicItem = publicPayload.items[index]!
+    const isChoice = publicItem.modality === "mcq" || publicItem.modality === "true_false"
+    if (isChoice) {
+      const optionIds = new Set(publicItem.options?.map((option) => option.option_id) ?? [])
+      if (!item.correct_option_id || !optionIds.has(item.correct_option_id)) {
+        issues.push(`items[${index}].correct_option_id 不是当前公开题的选项`)
+      }
+      if (item.answer_spec !== null) {
+        issues.push(`items[${index}] 选择题 answer_spec 必须交由编排器构造并返回 null`)
+      }
+      return
+    }
+    if (item.correct_option_id !== null || Object.keys(item.misconception_by_option).length > 0) {
+      issues.push(`items[${index}] 非选择题不得返回选项答案映射`)
+    }
+    if (publicItem.modality === "code") {
+      if (item.answer_spec !== null) {
+        issues.push(`items[${index}] 代码题 answer_spec 必须交由编排器绑定 suite 并返回 null`)
+      }
+    } else if (!item.answer_spec || item.answer_spec.kind === "code") {
+      issues.push(`items[${index}] ${publicItem.modality} 缺少可验证 answer_spec`)
+    }
+  })
+  payload.code_test_suites.forEach((suite, suiteIndex) => {
+    if (suite.execution_contract.execution_mode !== "function") return
+    suite.hidden_tests.forEach((test, testIndex) => {
+      if (!isFunctionInvocationEnvelope(test.input)) {
+        issues.push(`code_test_suites[${suiteIndex}].hidden_tests[${testIndex}].input 必须使用 {"args": [...], "kwargs"?: {...}} 调用封装`)
+      }
+    })
+  })
+  return issues
+}
+
+export function materializeAssessmentSecureAuthorPayload(
+  spec: GenerationSpec,
+  publicPayload: AssessmentPublicPayload,
+  payload: AssessmentSecureAuthorPayload,
+): AssessmentSecurePayload {
+  const codeItems = publicPayload.items.filter((item) => item.modality === "code")
+  const suiteIds = codeItems.map((item) => stableId("TS", {
+    form_id: publicPayload.form_id,
+    item_id: item.item_id,
+  }))
+  let codeIndex = 0
+  const items: AssessmentItemSecure[] = publicPayload.items.map((publicItem, index) => {
+    const authored = payload.items[index]!
+    const isChoice = publicItem.modality === "mcq" || publicItem.modality === "true_false"
+    let answerSpec: AnswerSpec
+    if (isChoice) {
+      answerSpec = {
+        kind: "exact_set",
+        accepted: [authored.correct_option_id!],
+        normalization: ["trim", "casefold", "unicode", "collapse_whitespace"],
+      }
+    } else if (publicItem.modality === "code") {
+      answerSpec = { kind: "code", test_suite_id: suiteIds[codeIndex++]! }
+    } else {
+      answerSpec = structuredClone(authored.answer_spec!)
+    }
+    return {
+      item_id: publicItem.item_id,
+      objective_id: publicItem.objective_id,
+      tier: publicItem.tier,
+      modality: publicItem.modality,
+      max_score: publicItem.max_score,
+      answer_spec: answerSpec,
+      ...(isChoice ? { correct_option_id: authored.correct_option_id! } : {}),
+      misconception_by_option: structuredClone(authored.misconception_by_option),
+      evidence_weight: 1,
+    }
+  })
+  const codeTestSuites = payload.code_test_suites.map((suite, suiteIndex) => {
+    const publicItem = codeItems[suiteIndex]!
+    const testSuiteId = suiteIds[suiteIndex]!
+    const weight = 1 / suite.hidden_tests.length
+    return {
+      test_suite_id: testSuiteId,
+      execution_contract: structuredClone(suite.execution_contract),
+      reference_solution: suite.reference_solution,
+      hidden_tests: suite.hidden_tests.map((test, testIndex) => ({
+        test_id: stableId("ASSESSMENT-HIDDEN-TEST", {
+          test_suite_id: testSuiteId,
+          item_id: publicItem.item_id,
+          test_index: testIndex,
+        }),
+        input: structuredClone(test.input),
+        expected: structuredClone(test.expected),
+        objective_id: publicItem.objective_id,
+        weight,
+        comparison: structuredClone(test.comparison),
+      })),
+    }
+  })
+  return normalizeAssessmentPair(spec, publicPayload, {
+    form_id: publicPayload.form_id,
+    items,
+    option_order_seed: spec.policies.seed,
+    code_test_suites: codeTestSuites,
+    objective_coverage: [],
+  }).secure_payload
 }
 
 export function normalizeAssessmentPair(
@@ -401,6 +1217,8 @@ export function normalizeAssessmentPair(
       }
     }
     if (publicItem.modality === "mcq" || publicItem.modality === "true_false") {
+      const wrongOptions = (publicItem.options ?? []).filter((option) =>
+        option.option_id !== base.correct_option_id)
       return {
         ...base,
         answer_spec: {
@@ -408,6 +1226,11 @@ export function normalizeAssessmentPair(
           accepted: base.correct_option_id ? [base.correct_option_id] : [],
           normalization: ["trim", "casefold", "unicode", "collapse_whitespace"],
         },
+        misconception_by_option: Object.fromEntries(wrongOptions.map((option, optionIndex) => [
+          option.option_id,
+          base.misconception_by_option[option.option_id]?.trim()
+            || `unclassified_${publicItem.objective_id}_incorrect_option_${optionIndex + 1}`,
+        ])),
       }
     }
     const { correct_option_id: _correct, ...nonChoice } = base
@@ -578,6 +1401,69 @@ function freezeClaimTexts(blocks: RenderBlock[], evidence: RagEvidencePack): voi
   }
 }
 
+function anchorRenderedClaims(blocks: RenderBlock[]): void {
+  for (const block of blocks) anchorRenderedClaim(block)
+}
+
+function anchorRenderedClaim(block: RenderBlock): void {
+  if (!("claims" in block) || block.block_type === "code") return
+  const rendered = renderedTextForAnchor(block)
+  const missing = unique(block.claims.map((claim) => claim.text).filter((claimText) =>
+    !normalizeGroundedClaimText(rendered).includes(
+      normalizeGroundedClaimText(claimText),
+    )))
+  if (missing.length === 0) return
+  const anchor = `证据事实：${missing.join("；")}`
+  if (block.block_type === "paragraph" || block.block_type === "callout") {
+    block.text = `${block.text.trim()}\n${anchor}`
+    return
+  }
+  if (block.block_type === "comparison") {
+    const column = block.columns[0]
+    if (column) column.content = `${column.content.trim()}\n${anchor}`
+  }
+}
+
+function renderedTextForAnchor(block: RenderBlock): string {
+  if (block.block_type === "heading") return block.text
+  if (block.block_type === "paragraph" || block.block_type === "callout") {
+    return block.text
+  }
+  if (block.block_type === "comparison") {
+    return [block.title, ...block.columns.flatMap((column) => [
+      column.heading,
+      column.content,
+    ])].join("\n")
+  }
+  if (block.block_type === "code") return [block.caption, block.code].filter(Boolean).join("\n")
+  if (block.block_type === "hint") return block.text
+  if (block.block_type === "quiz") return block.prompt
+  return ""
+}
+
+function anchorMisconceptionEvidence(
+  payload: ConceptLessonPayload,
+  evidence: RagEvidencePack,
+): void {
+  const facts = new Map(evidence.results.flatMap((entry) =>
+    entry.facts.map((fact) => [
+      `${fact.source_id}:${fact.fact_id}`,
+      fact.content,
+    ] as const)))
+  for (const misconception of payload.misconceptions) {
+    const rendered = normalizeGroundedClaimText(misconception.explanation)
+    const missing = unique(misconception.citations.flatMap((citation) => {
+      const fact = facts.get(`${citation.source_id}:${citation.fact_id}`)
+      return fact && !rendered.includes(normalizeGroundedClaimText(fact))
+        ? [fact]
+        : []
+    }))
+    if (missing.length > 0) {
+      misconception.explanation = `${misconception.explanation.trim()}\n证据事实：${missing.join("；")}`
+    }
+  }
+}
+
 function ensureRequiredModalities(
   modalities: AssessmentItemPublic["modality"][],
   tiers: Array<1 | 2 | 3>,
@@ -610,13 +1496,39 @@ function assignObjectives(
   modalities: AssessmentItemPublic["modality"][],
 ): GenerationSpec["targets"] {
   const assignments: Array<GenerationSpec["targets"][number] | undefined> = Array(modalities.length)
+  const protectedSlots = new Set<number>()
+  for (const required of spec.assessment_blueprint.required_modalities) {
+    const index = modalities.findIndex((modality, slot) =>
+      modality === required && !protectedSlots.has(slot))
+    if (index >= 0) protectedSlots.add(index)
+  }
   const core = spec.targets.filter((target) => target.importance === "core")
-    .sort((left, right) => compatibleCount(left.observable_behavior, modalities) - compatibleCount(right.observable_behavior, modalities))
+    .sort((left, right) =>
+      compatibleCount(left.observable_behavior, modalities)
+      - compatibleCount(right.observable_behavior, modalities)
+      || left.objective_id.localeCompare(right.objective_id))
   for (const target of core) {
-    const index = modalities.findIndex((modality, slot) => !assignments[slot] && modalityMeasures(target.observable_behavior, modality))
+    const compatibleSlots = modalities.flatMap((modality, slot) =>
+      !assignments[slot]
+        && modalityMeasuresBehavior(target.observable_behavior, modality)
+        ? [slot]
+        : [])
+      .sort((left, right) =>
+        Number(!protectedSlots.has(left)) - Number(!protectedSlots.has(right))
+        || left - right)
+    let index = compatibleSlots[0] ?? -1
+    if (index < 0) {
+      index = modalities.findIndex((_modality, slot) =>
+        !assignments[slot] && !protectedSlots.has(slot))
+      if (index >= 0) {
+        modalities[index] = preferredModalityForBehavior(
+          target.observable_behavior,
+        )
+      }
+    }
     if (index < 0) {
       throw new ModelOutputValidationError("assessment.plan", [
-        `蓝图没有可直接测量核心目标 ${target.objective_id}/${target.observable_behavior} 的题型槽位`,
+        `蓝图的必选题型占满槽位，无法直接测量核心目标 ${target.objective_id}/${target.observable_behavior}`,
       ])
     }
     assignments[index] = target
@@ -624,7 +1536,8 @@ function assignObjectives(
   let cursor = 0
   for (let index = 0; index < assignments.length; index += 1) {
     if (assignments[index]) continue
-    const compatible = spec.targets.filter((target) => modalityMeasures(target.observable_behavior, modalities[index]))
+    const compatible = spec.targets.filter((target) =>
+      modalityMeasuresBehavior(target.observable_behavior, modalities[index]))
     const pool = compatible.length > 0 ? compatible : spec.targets
     assignments[index] = pool[cursor % pool.length]
     cursor += 1
@@ -636,28 +1549,8 @@ function compatibleCount(
   behavior: GenerationSpec["targets"][number]["observable_behavior"],
   modalities: AssessmentItemPublic["modality"][],
 ): number {
-  return modalities.filter((modality) => modalityMeasures(behavior, modality)).length
-}
-
-function modalityMeasures(
-  behavior: GenerationSpec["targets"][number]["observable_behavior"],
-  modality: AssessmentItemPublic["modality"],
-): boolean {
-  const allowed: Record<typeof behavior, AssessmentItemPublic["modality"][]> = {
-    recognize: ["mcq", "true_false", "trace", "short_answer", "code"],
-    explain: ["short_answer"],
-    trace: ["trace", "code"],
-    apply: ["trace", "short_answer", "code"],
-    debug: ["code"],
-    create: ["code"],
-  }
-  return allowed[behavior].includes(modality)
-}
-
-function targetForCitations(spec: GenerationSpec, citations: CitationRef[]) {
-  return spec.targets.find((target) => citations.some((citation) =>
-    citation.source_id === target.source_id && target.required_fact_ids.includes(citation.fact_id),
-  ))
+  return modalities.filter((modality) =>
+    modalityMeasuresBehavior(behavior, modality)).length
 }
 
 function deterministicRouting(items: AssessmentItemPublic[]): AssessmentPublicPayload["routing"] {
@@ -732,6 +1625,19 @@ function deduplicate(citations: CitationRef[]): CitationRef[] {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)]
+}
+
+function isFunctionInvocationEnvelope(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false
+  const record = value as Record<string, unknown>
+  const keys = Object.keys(record)
+  return keys.length > 0
+    && keys.every((key) => key === "args" || key === "kwargs")
+    && Array.isArray(record.args)
+    && (record.kwargs === undefined
+      || (record.kwargs !== null
+        && typeof record.kwargs === "object"
+        && !Array.isArray(record.kwargs)))
 }
 
 function chunk<T>(values: readonly T[], size: number): T[][] {

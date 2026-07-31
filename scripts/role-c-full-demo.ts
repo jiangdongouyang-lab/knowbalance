@@ -1,4 +1,5 @@
 import { loadKnowledgeBase } from "../src/knowledge/loader"
+import { retrieveStructuredEvidence } from "../src/rag/structured-evidence"
 import { executeProfileRetrieval } from "../src/role-b-profile/rag-bridge"
 import type { LearnerProfile } from "../src/role-b-profile/types"
 import {
@@ -42,7 +43,6 @@ const profile: LearnerProfile = {
 const rawPath = (await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()) as LearningPathNode
 const kb = await loadKnowledgeBase()
 const { rag_result: ragResult } = await executeProfileRetrieval(profile)
-const evidence = adaptRagResult(ragResult, { kb_version: kb.version, rag_version: "rule-rag-0.1" })
 const snapshot = adaptLearnerProfile(profile, { profile_version: "profile-full-demo-v1" })
 const path = defineLearningPathNode({
   node_id: rawPath.node_id,
@@ -51,6 +51,44 @@ const path = defineLearningPathNode({
   goal: rawPath.goal,
   objectives: rawPath.objectives,
   assessment_blueprint: rawPath.assessment_blueprint,
+})
+const requiredSourceIds = [...new Set([
+  ...path.target_source_ids,
+  ...path.prerequisite_source_ids,
+])]
+const exactEvidence = await retrieveStructuredEvidence({
+  source_ids: requiredSourceIds,
+})
+if (exactEvidence.missing_source_ids.length > 0) {
+  throw new Error(`路径证据缺失：${exactEvidence.missing_source_ids.join("、")}`)
+}
+const exactBySource = new Map(
+  exactEvidence.results.map((item) => [item.sourceId, item]),
+)
+const recalledBySource = new Map(
+  ragResult.results.map((item) => [item.sourceId, item]),
+)
+const completeRagResult = {
+  ...ragResult,
+  topK: requiredSourceIds.length,
+  results: requiredSourceIds.map((sourceId) => {
+    const exact = exactBySource.get(sourceId)
+    if (!exact) throw new Error(`路径证据缺失：${sourceId}`)
+    const recalled = recalledBySource.get(sourceId)
+    return recalled
+      ? {
+          ...exact,
+          score: recalled.score,
+          reason: recalled.reason,
+          retrievalTrace: structuredClone(recalled.retrievalTrace),
+          retrieval_trace: structuredClone(recalled.retrieval_trace),
+        }
+      : exact
+  }),
+}
+const evidence = adaptRagResult(completeRagResult, {
+  kb_version: kb.version,
+  rag_version: "rule-rag+structured-path-evidence-1.0",
 })
 const built = buildGenerationSpec({
   run_id: "RUN-C-FULL-DEMO",

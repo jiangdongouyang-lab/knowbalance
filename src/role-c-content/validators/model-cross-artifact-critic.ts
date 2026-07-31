@@ -10,6 +10,7 @@ import type {
   CrossArtifactAlignmentInput,
   CrossArtifactCritic,
 } from "./alignment-validator"
+import { validateCrossArtifactAlignment } from "./alignment-validator"
 
 interface CriticCheckDraft {
   target_artifact_id: string
@@ -98,12 +99,29 @@ function validateAndFinalizeChecks(
   ])
   const objectiveIds = new Set(["pipeline", ...input.spec.targets.map((target) => target.objective_id)])
   const evidenceRefs = collectEvidenceRefs(input)
+  const concretePublicRefs = collectConcretePublicRefs(input)
+  const deterministicObjections = new Set(
+    validateCrossArtifactAlignment(input).objections.map(objectionKey),
+  )
   const objections: AlignmentObjection[] = []
   for (const check of judgment.checks) {
     if (!artifactIds.has(check.target_artifact_id)) throw new Error(`CRITIC_UNKNOWN_ARTIFACT:${check.target_artifact_id}`)
     if (!objectiveIds.has(check.objective_id)) throw new Error(`CRITIC_UNKNOWN_OBJECTIVE:${check.objective_id}`)
     if (check.evidence_refs.some((ref) => !evidenceRefs.has(ref))) {
       throw new Error(`CRITIC_UNKNOWN_EVIDENCE_REF:${check.evidence_refs.filter((ref) => !evidenceRefs.has(ref)).join(",")}`)
+    }
+    const deterministicKey = objectionKey(check)
+    const citesConcretePublicContent = check.evidence_refs.some((ref) =>
+      concretePublicRefs.has(ref))
+    const isSemanticJudgment = check.issue_type === "unsupported_claim"
+      || check.issue_type === "difficulty_mismatch"
+    if (isSemanticJudgment) {
+      if (!deterministicObjections.has(deterministicKey)
+        && !citesConcretePublicContent) continue
+    } else if (!deterministicObjections.has(deterministicKey)) {
+      // Semantic review cannot override trusted execution, answer verification,
+      // stable mappings, or deterministic coverage checks.
+      continue
     }
     const core = {
       from_agent: "cross-artifact-gate" as const,
@@ -117,6 +135,23 @@ function validateAndFinalizeChecks(
     objections.push({ objection_id: stableId("OBJ", core), ...core })
   }
   return [...new Map(objections.map((entry) => [entry.objection_id, entry])).values()]
+}
+
+function objectionKey(input: Pick<
+  AlignmentObjection,
+  "target_artifact_id" | "objective_id" | "issue_type"
+>): string {
+  return `${input.target_artifact_id}:${input.objective_id}:${input.issue_type}`
+}
+
+function collectConcretePublicRefs(input: CrossArtifactAlignmentInput): Set<string> {
+  return new Set([
+    ...(input.concept.payload?.objective_coverage.flatMap((entry) =>
+      entry.block_ids) ?? []),
+    ...(input.lab.payload?.instructions.map((block) => block.block_id) ?? []),
+    ...(input.lab.payload?.public_tests.map((test) => test.test_id) ?? []),
+    ...(input.assessment.payload?.items.map((item) => item.item_id) ?? []),
+  ])
 }
 
 function collectEvidenceRefs(input: CrossArtifactAlignmentInput): Set<string> {

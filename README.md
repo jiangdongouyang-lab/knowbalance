@@ -82,7 +82,7 @@ bun run demo:role-c:lab   # concept lesson → Docker-verified code lab
 bun run demo:role-c:full  # three agents → review → Docker grading → next reviewed round
 ```
 
-`code-lab` 参考答案校验、错误变体校验、测评代码题校验和学习者代码评分共用
+`code-lab` 参考答案校验、可选错误变体诊断、测评代码题校验和学习者代码评分共用
 `DockerPythonCodeRunner`。Runner 每次使用镜像的不可变本地 image ID，并关闭网络、使用只读
 文件系统和非 root 用户，同时限制 CPU、内存、进程数、运行时间、临时目录和输出大小。
 隐藏测试的期望答案与权重不进入容器，Docker 只返回代码的实际运行结果，由后端完成比较和计分。
@@ -100,9 +100,9 @@ bun run smoke:role-c:model
 
 Role D provides a React/Vite application with local learner profiles and a per-user learning-plan list. First use collects the background fields required by B; users can switch local profiles, create multiple plans, resume each plan's independent stage and answers, and delete only the selected plan. Existing single-session browser progress migrates into the versioned local workspace.
 
-The Week 1 score-project path runs B profile synthesis, A retrieval, A-prerequisite expansion for a dynamic diagnosis of up to five traceable questions, and the official Role C deterministic pipeline. The verified score-project path currently yields five questions; other goals show only the real answerable questions available from A and its prerequisites rather than padding the set with invented items. Role D renders the verified lesson, code lab, five-item tiered assessment, citations, and agent trace. Selection, true/false, trace, short-answer, and code responses can be entered, saved, refreshed, exported, imported as a sibling plan, and submitted locally. Secure answers, hidden tests, reference solutions, and code suites remain server-side.
+The learning path is built from the learner profile, A retrieval, knowledge prerequisites, and B's formal path contract. Role C then generates and reviews a lesson, code lab, and blueprint-driven assessment for the selected targets. Role D renders the public artifacts, citations, and trace; supports every published question modality; and submits answers to C for trusted grading, mastery updates, adaptive decisions, and reviewed recovery. Secure answers, hidden tests, reference solutions, and code suites remain server-side.
 
-Local assessment submission is complete, but formal `gradeSubmission()` delivery, isolated learner-code execution, mastery updates, and automatic remediate/advance decisions remain Week 2 integration work. Local profiles are not cloud accounts and there is no cross-device synchronization yet. See `docs/role_d_frontend_guide.md`.
+Local profiles are not cloud accounts and there is no cross-device synchronization yet. See `docs/role_d_frontend_guide.md`.
 
 ```bash
 bun run role-d:dev
@@ -121,7 +121,7 @@ bun install --frozen-lockfile
 bun run role-d:dev -- --host 127.0.0.1 --port 5174
 ```
 
-Open `http://127.0.0.1:5174/` in a browser. The page itself opens without Docker or a model key. With no `.env.role-c.local`, generation uses the deterministic local reference path. To reproduce the model-backed path, copy `.env.role-c.example` to `.env.role-c.local`, fill the model endpoint/model/key, build the Role C Docker image, and restart the same command. `.env.role-c.local` is ignored and must never be committed.
+Open `http://127.0.0.1:5174/` in a browser. The page shell opens without Docker or a model key; content generation fails closed until a Provider is configured. For the normal model-backed path, copy `.env.role-c.example` to `.env.role-c.local`, fill the model endpoint/model/key, build the Role C Docker image, and restart the command. The fixed deterministic templates are available only when `ROLE_C_PROVIDER_MODE=deterministic` is selected explicitly for offline regression. `.env.role-c.local` is ignored and must never be committed.
 
 The local Vite middleware exposes `/api/role-c/generate` and `/api/role-c/submit` for this demo. It is a development/integration harness, not a production backend; do not expose it publicly or use it as a substitute for C's persistent service.
 
@@ -129,7 +129,7 @@ Repository tests use `bun test --isolate ./tests` so Role C's schema and frozen-
 
 ## Current milestone boundary
 
-- **Week 1 complete path:** learner input → B profile → A retrieval → C verified lesson/lab/assessment → D display, response capture, local submission, and checkpoint recovery.
-- **Gold path limitation:** the deterministic C provider currently supports the K007/K009/K018 score-project target. Unsupported goals are blocked honestly instead of receiving fabricated artifacts.
-- **Role C Week 2:** formal grading, isolated code execution, mastery evidence, unified adaptive decisions, A/B content review, idempotent delivery, and next-round regeneration are implemented behind transport-neutral ports.
+- **Complete path:** learner input → B profile and path → A retrieval and exact path evidence → C staged model generation, Docker verification, A/B review and recovery → D display and trusted submission.
+- **Provider modes:** the model Provider consumes arbitrary formal targets within the published schemas; deterministic templates are explicit offline regression fixtures.
+- **Adaptive cycle:** formal grading, isolated code execution, mastery evidence, adaptive decisions, idempotent delivery, persistence, and reviewed next-round regeneration are implemented behind transport-neutral ports.
 - **Future product work:** real authentication and cloud synchronization should use a dedicated backend; they must not be simulated with local browser profiles or by widening worker permissions.

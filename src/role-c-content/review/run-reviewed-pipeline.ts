@@ -2,6 +2,7 @@ import type { RoleCAgents } from "../agents/types"
 import type { CPipelineInput, CPipelineOptions, CPipelineResult } from "../orchestrator/content-pipeline"
 import { runCPipeline } from "../orchestrator/content-pipeline"
 import { contentHash } from "../contracts/common"
+import { projectPublicRagEvidencePack } from "../contracts/evidence-pack"
 import {
   InMemorySecureArtifactStore,
   type SecureArtifact,
@@ -36,7 +37,7 @@ export async function runReviewedCPipeline(
   const pipelineInputHash = contentHash(frozenInput)
   const generationSpecHash = contentHash(frozenInput.generation_spec)
   const evidenceHash = contentHash(frozenInput.evidence_pack)
-  const reviewEvidence = deepFreeze(toReviewEvidencePack(frozenInput.evidence_pack))
+  const reviewEvidence = deepFreeze(projectPublicRagEvidencePack(frozenInput.evidence_pack))
   const reviewReports: ContentReviewResult[] = []
   let cumulativeInstructions: ContentRevisionInstruction[] = []
 
@@ -44,7 +45,11 @@ export async function runReviewedCPipeline(
     const temporaryStore = new InMemorySecureArtifactStore()
     const candidate = await runCPipeline(
       frozenInput,
-      agentsWithReviewInstructions(agents, cumulativeInstructions),
+      agentsWithReviewInstructions(
+        agents,
+        cumulativeInstructions,
+        revisionRound as 0 | 1 | 2,
+      ),
       temporaryStore,
       basePipelineOptions(options),
     )
@@ -287,6 +292,7 @@ function buildReviewRequest(
 function agentsWithReviewInstructions(
   agents: RoleCAgents,
   instructions: ContentRevisionInstruction[],
+  revisionRound: 0 | 1 | 2,
 ): RoleCAgents {
   const objections = toAlignmentObjections(instructions)
   const forAgent = (agent: "concept-tutor" | "code-lab" | "tiered-evaluator") =>
@@ -299,6 +305,7 @@ function agentsWithReviewInstructions(
           request.revision_objections ?? [],
           forAgent("concept-tutor"),
         ),
+        external_revision_round: revisionRound,
       }),
     },
     code_lab: {
@@ -308,6 +315,7 @@ function agentsWithReviewInstructions(
           request.revision_objections ?? [],
           forAgent("code-lab"),
         ),
+        external_revision_round: revisionRound,
       }),
     },
     tiered_evaluator: {
@@ -317,6 +325,7 @@ function agentsWithReviewInstructions(
           request.revision_objections ?? [],
           forAgent("tiered-evaluator"),
         ),
+        external_revision_round: revisionRound,
       }),
     },
   }
@@ -823,23 +832,6 @@ function arbitrationDecision(
     return revisionRound < maxRevisionRounds ? "revise" : "reject"
   }
   return "pass"
-}
-
-function toReviewEvidencePack(
-  pack: CPipelineInput["evidence_pack"],
-): ReviewEvidencePack {
-  return {
-    schema_version: pack.schema_version,
-    retrieval_id: pack.retrieval_id,
-    query: pack.query,
-    learner_level: pack.learner_level,
-    top_k: pack.top_k,
-    match_status: pack.match_status,
-    kb_version: pack.kb_version,
-    rag_version: pack.rag_version,
-    results: pack.results.map(({ quiz_seeds: _quizSeeds, ...item }) =>
-      structuredClone(item)),
-  }
 }
 
 function sameStrings(left: string[], right: string[]): boolean {

@@ -1,8 +1,10 @@
 import type {
   ArtifactDraft,
   AssessmentDraft,
+  AssessmentVerificationFeedback,
   CodeLabDraft,
   CodeLabRequest,
+  CodeLabVerificationFeedback,
   ConceptTutorRequest,
   RoleCContentProvider,
   TieredEvaluatorRequest,
@@ -42,8 +44,12 @@ import {
 import {
   ASSESSMENT_PUBLIC_STAGE_SYSTEM_PROMPT,
   ASSESSMENT_SECURE_STAGE_SYSTEM_PROMPT,
+  ASSESSMENT_EXECUTION_REPAIR_SYSTEM_PROMPT,
   CODE_LAB_PUBLIC_STAGE_SYSTEM_PROMPT,
   CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT,
+  CODE_LAB_EXECUTION_REPAIR_SYSTEM_PROMPT,
+  CODE_LAB_PUBLIC_SAFETY_REPAIR_SYSTEM_PROMPT,
+  CODE_LAB_STARTER_REPAIR_SYSTEM_PROMPT,
   CONCEPT_SEGMENT_SYSTEM_PROMPT,
   STAGED_AUTHOR_PROMPT_VERSION,
   stagedRepairPrompt,
@@ -54,23 +60,40 @@ import { validateConceptLesson } from "../validators/concept-validator"
 import {
   getRoleCModelOutputSchema,
   getRoleCModelOutputSchemaFragment,
+  validateRoleCSchema,
   validateRoleCSchemaFragment,
   type RoleCSchemaFile,
 } from "../validators/runtime-schema-validator"
 import {
   buildAssessmentFormId,
   buildAssessmentItemPlan,
+  buildCodeLabObjectivePlan,
+  buildCodeLabSecurePlan,
   buildLabIdentity,
+  applyCodeLabExecutionRepairPatch,
+  materializeConceptSegmentAuthorPayload,
+  materializeAssessmentSecureAuthorPayload,
+  materializeAssessmentPublicAuthorPayload,
+  materializeCodeLabPublicAuthorPayload,
+  materializeCodeLabSecureAuthorPayload,
   mapWithConcurrency,
   mergeConceptSegments,
   normalizeAssessmentPair,
-  normalizeAssessmentPublic,
-  normalizeCodeLabPublic,
   normalizeCodeLabSecure,
-  normalizeConceptSegment,
   splitConceptRequest,
-  validateAssessmentPublicAgainstPlan,
+  validateAssessmentPublicAuthorAgainstPlan,
+  validateAssessmentSecureAuthorAgainstPublic,
   validateAssessmentSecureAgainstPublic,
+  validateCodeLabPublicAuthorAgainstPlan,
+  validateCodeLabSecureAuthorAgainstPlan,
+  validateCodeLabSecureAgainstPlan,
+  validateConceptSegmentAuthorAgainstRequest,
+  type CodeLabExecutionRepairPatch,
+  type CodeLabPublicAuthorPayload,
+  type CodeLabSecureAuthorPayload,
+  type AssessmentSecureAuthorPayload,
+  type AssessmentPublicAuthorPayload,
+  type ConceptSegmentAuthorPayload,
 } from "./staged-generation"
 
 export interface ModelBackedProviderOptions {
@@ -104,6 +127,19 @@ interface StructuredStage<T> {
   idempotency_identity: Record<string, unknown>
   max_repairs: number
   validate: (value: T) => string[]
+}
+
+interface CodeLabStarterRepairPatch {
+  starter_code: string
+}
+
+interface CodeLabPublicSafetyRepairPatch {
+  starter_code: string
+  instruction_texts: string[]
+  public_test_descriptions: string[]
+  public_test_expected_behaviors: string[]
+  hint_texts: string[][]
+  reflection_questions: string[]
 }
 
 /** Model-backed Provider. Stages are internal; public Role C contracts remain unchanged. */
@@ -155,7 +191,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
     const segments = splitConceptRequest(request, this.conceptGroupSize)
     const payloads = await mapWithConcurrency(segments, this.conceptConcurrency, async (segment) => {
       const modelInput = buildConceptTutorModelInput(segment)
-      const payload = await this.generateStage<ConceptLessonPayload>({
+      const authored = await this.generateStage<ConceptSegmentAuthorPayload>({
         task: "role-c.concept-tutor.segment",
         system_prompt: CONCEPT_SEGMENT_SYSTEM_PROMPT,
         input: {
@@ -166,8 +202,11 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
             objective_ids: segment.generation_spec.targets.map((target) => target.objective_id),
           },
         },
-        output_schema_id: "role_c_concept_lesson_segment_v1",
-        output_schema: getRoleCModelOutputSchema("concept_lesson_payload.schema.json"),
+        output_schema_id: "role_c_concept_segment_author_payload_v1",
+        output_schema: fragment(
+          "concept_lesson_payload.schema.json",
+          "/$defs/author_payload",
+        ),
         temperature: this.conceptTemperature,
         max_tokens: this.conceptSegmentMaxTokens,
         idempotency_identity: {
@@ -178,13 +217,26 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
           seed: segment.generation_spec.policies.seed,
         },
         max_repairs: maxRepairs,
-        validate: (payload) => validationIssues(validateConceptLesson({
-          payload: normalizeConceptSegment(segment, payload),
-          spec: segment.generation_spec,
-          evidence: segment.evidence_pack,
-        })),
+        validate: (payload) => {
+          const schema = validateRoleCSchemaFragment(
+            "concept_lesson_payload.schema.json",
+            "/$defs/author_payload",
+            payload,
+          )
+          if (!schema.ok) return validationIssues(schema)
+          const planIssues = validateConceptSegmentAuthorAgainstRequest(
+            segment,
+            payload,
+          )
+          if (planIssues.length > 0) return planIssues
+          return validationIssues(validateConceptLesson({
+            payload: materializeConceptSegmentAuthorPayload(segment, payload),
+            spec: segment.generation_spec,
+            evidence: segment.evidence_pack,
+          }))
+        },
       })
-      return normalizeConceptSegment(segment, payload)
+      return materializeConceptSegmentAuthorPayload(segment, authored)
     })
     const payload = mergeConceptSegments(request, payloads)
     const validation = validateConceptLesson({
@@ -204,8 +256,11 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
 
     const modelInput = buildCodeLabModelInput(request)
     const identity = buildLabIdentity(request.generation_spec)
+    const objectivePlan = buildCodeLabObjectivePlan(
+      request.generation_spec,
+    )
     const maxRepairs = boundedRepairs(this.maxRepairAttempts, request)
-    const publicPayload = await this.generateStage<CodeLabPublicPayload>({
+    const publicAuthor = await this.generateStage<CodeLabPublicAuthorPayload>({
       task: "role-c.code-lab.public",
       system_prompt: CODE_LAB_PUBLIC_STAGE_SYSTEM_PROMPT,
       input: {
@@ -213,10 +268,14 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         staged_contract: {
           lab_id: identity.lab_id,
           objective_ids: request.generation_spec.targets.map((target) => target.objective_id),
+          objective_plan: objectivePlan,
         },
       },
-      output_schema_id: "role_c_code_lab_public_payload_v1",
-      output_schema: fragment("code_lab_draft.schema.json", "/$defs/public_payload"),
+      output_schema_id: "role_c_code_lab_public_author_payload_v1",
+      output_schema: fragment(
+        "code_lab_draft.schema.json",
+        "/$defs/public_author_payload",
+      ),
       temperature: this.codeLabTemperature,
       max_tokens: this.codeLabPublicMaxTokens,
       idempotency_identity: {
@@ -227,14 +286,37 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       },
       max_repairs: maxRepairs,
       validate: (payload) => {
-        const schema = validateRoleCSchemaFragment("code_lab_draft.schema.json", "/$defs/public_payload", payload)
+        const schema = validateRoleCSchemaFragment(
+          "code_lab_draft.schema.json",
+          "/$defs/public_author_payload",
+          payload,
+        )
         if (!schema.ok) return validationIssues(schema)
-        const normalized = normalizeCodeLabPublic(request, payload, identity.lab_id)
+        const planIssues = validateCodeLabPublicAuthorAgainstPlan(
+          payload,
+          objectivePlan,
+        )
+        if (planIssues.length > 0) return planIssues
+        const normalized = materializeCodeLabPublicAuthorPayload(
+          request,
+          payload,
+          identity.lab_id,
+          objectivePlan,
+        )
         return validationIssues(validateCodeLabPublicStage(request, normalized))
       },
     })
-    const normalizedPublic = normalizeCodeLabPublic(request, publicPayload, identity.lab_id)
-    const securePayload = await this.generateStage<CodeLabSecurePayload>({
+    let normalizedPublic = materializeCodeLabPublicAuthorPayload(
+      request,
+      publicAuthor,
+      identity.lab_id,
+      objectivePlan,
+    )
+    const securePlan = buildCodeLabSecurePlan(
+      request.generation_spec,
+      identity.test_suite_id,
+    )
+    const secureAuthorPayload = await this.generateStage<CodeLabSecureAuthorPayload>({
       task: "role-c.code-lab.secure",
       system_prompt: CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT,
       input: {
@@ -246,11 +328,13 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
           lab_id: identity.lab_id,
           test_suite_id: identity.test_suite_id,
           execution_contract: normalizedPublic.execution_contract,
+          objective_plan: securePlan,
         },
         revision_objections: modelInput.revision_objections,
+        external_revision_round: modelInput.external_revision_round,
       },
-      output_schema_id: "role_c_code_lab_secure_payload_v1",
-      output_schema: fragment("code_lab_draft.schema.json", "/$defs/secure_payload"),
+      output_schema_id: "role_c_code_lab_secure_author_payload_v1",
+      output_schema: fragment("code_lab_draft.schema.json", "/$defs/secure_author_payload"),
       temperature: this.codeLabTemperature,
       max_tokens: this.codeLabSecureMaxTokens,
       idempotency_identity: {
@@ -262,30 +346,216 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       },
       max_repairs: maxRepairs,
       validate: (payload) => {
-        const schema = validateRoleCSchemaFragment("code_lab_draft.schema.json", "/$defs/secure_payload", payload)
+        const schema = validateRoleCSchemaFragment("code_lab_draft.schema.json", "/$defs/secure_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
-        const normalized = normalizeCodeLabSecure(
+        const authorIssues = validateCodeLabSecureAuthorAgainstPlan(
+          payload,
+          securePlan,
+          normalizedPublic.execution_contract.execution_mode,
+        )
+        if (authorIssues.length > 0) return authorIssues
+        const normalized = materializeCodeLabSecureAuthorPayload(
           request.generation_spec,
           payload,
           normalizedPublic,
           identity.test_suite_id,
+          securePlan,
         )
-        return validationIssues(validateCodeLabDraftStructure(request, {
+        const planIssues = validateCodeLabSecureAgainstPlan(normalized, securePlan)
+        if (planIssues.length > 0) return planIssues
+        const report = validateCodeLabDraftStructure(request, {
           public_draft: { payload: normalizedPublic },
           secure_draft: { payload: normalized },
+        })
+        return validationIssuesExcludingRepairablePublicAnswerLeak(report)
+      },
+    })
+    let securePayload = materializeCodeLabSecureAuthorPayload(
+      request.generation_spec,
+      secureAuthorPayload,
+      normalizedPublic,
+      identity.test_suite_id,
+      securePlan,
+    )
+    const initialReport = validateCodeLabDraftStructure(request, {
+      public_draft: { payload: normalizedPublic },
+      secure_draft: { payload: securePayload },
+    })
+    if (hasRepairablePublicAnswerLeak(initialReport)) {
+      normalizedPublic = await this.repairCodeLabPublicSafety({
+        request,
+        public_payload: normalizedPublic,
+        secure_payload: securePayload,
+        repair_reason: "公开材料可单独或组合还原完整实现，必须保留任务边界并删除完整答案与逐行解法",
+        revision_identity: "initial-security-gate",
+      })
+      securePayload = normalizeCodeLabSecure(
+        request.generation_spec,
+        securePayload,
+        normalizedPublic,
+        identity.test_suite_id,
+        securePlan,
+      )
+    }
+    const finalReport = validateCodeLabDraftStructure(request, {
+      public_draft: { payload: normalizedPublic },
+      secure_draft: { payload: securePayload },
+    })
+    if (!finalReport.ok) {
+      throw new ModelOutputValidationError(
+        "role-c.code-lab.compose",
+        validationIssues(finalReport),
+      )
+    }
+    return {
+      public_draft: { payload: normalizedPublic },
+      secure_draft: { payload: securePayload },
+    }
+  }
+
+  async repairCodeLabAfterVerification(
+    request: CodeLabRequest,
+    draft: CodeLabDraft,
+    feedback: CodeLabVerificationFeedback,
+  ): Promise<CodeLabDraft> {
+    assertVersionCompatibility(request, this.gateway, CODE_LAB_PROMPT_VERSION)
+    if (this.generationStrategy !== "staged") {
+      throw new ModelProviderUnavailableError(
+        "可信执行后的私有修订仅支持 staged 模型生成策略",
+      )
+    }
+
+    const modelInput = buildCodeLabModelInput(request)
+    const identity = buildLabIdentity(request.generation_spec)
+    const objectivePlan = buildCodeLabSecurePlan(
+      request.generation_spec,
+      identity.test_suite_id,
+    )
+    let publicPayload = structuredClone(draft.public_draft.payload)
+    const maxRepairs = boundedRepairs(this.maxRepairAttempts, request)
+    const verificationIssues = feedback.issues
+      .slice(0, 32)
+      .map((issue) => issue.slice(0, 500))
+    if (feedback.starter_status === "passed") {
+      publicPayload = await this.repairCodeLabStarter({
+        request,
+        public_payload: publicPayload,
+        secure_payload: draft.secure_draft.payload,
+        repair_reason: "公开 starter 已完整通过可信隐藏测试，必须恢复为实质未完成的学习骨架",
+        revision_identity: `trusted-execution-${feedback.revision_round}`,
+      })
+    }
+
+    const needsSecureRepair = trustedReferenceFailed(feedback)
+    if (!needsSecureRepair) {
+      return {
+        public_draft: { payload: publicPayload },
+        secure_draft: {
+          payload: normalizeCodeLabSecure(
+            request.generation_spec,
+            draft.secure_draft.payload,
+            publicPayload,
+            identity.test_suite_id,
+            objectivePlan,
+          ),
+        },
+      }
+    }
+    const repairPatch = await this.generateStage<CodeLabExecutionRepairPatch>({
+      task: "role-c.code-lab.secure.execution-repair",
+      system_prompt: CODE_LAB_EXECUTION_REPAIR_SYSTEM_PROMPT,
+      input: {
+        contract: modelInput.contract,
+        evidence: modelInput.evidence,
+        concept: modelInput.concept,
+        public_payload: publicPayload,
+        prior_secure_payload: draft.secure_draft.payload,
+        trusted_execution_report: {
+          revision_round: feedback.revision_round,
+          issues: verificationIssues,
+          reference_failed: feedback.reference_failed ?? false,
+          reference_failure_codes: feedback.reference_failure_codes ?? [],
+          starter_status: feedback.starter_status ?? null,
+          starter_repaired_by_public_patch: feedback.starter_status === "passed",
+          failed_mutations: [],
+        },
+        staged_contract: {
+          lab_id: identity.lab_id,
+          test_suite_id: identity.test_suite_id,
+          execution_contract: publicPayload.execution_contract,
+          objective_plan: objectivePlan,
+        },
+        revision_objections: modelInput.revision_objections,
+        external_revision_round: modelInput.external_revision_round,
+      },
+      output_schema_id: "role_c_code_lab_execution_repair_patch_v1",
+      output_schema: fragment(
+        "code_lab_draft.schema.json",
+        "/$defs/execution_repair_patch",
+      ),
+      temperature: this.codeLabTemperature,
+      max_tokens: this.codeLabSecureMaxTokens,
+      idempotency_identity: {
+        spec_id: request.generation_spec.spec_id,
+        lab_id: identity.lab_id,
+        public_hash: contentHash(publicPayload),
+        prior_secure_hash: contentHash(draft.secure_draft.payload),
+        trusted_execution_feedback_hash: contentHash(verificationIssues),
+        verification_revision_round: feedback.revision_round,
+        stage: "secure-execution-repair",
+        prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
+      },
+      max_repairs: maxRepairs,
+      validate: (patch) => {
+        const schema = validateRoleCSchemaFragment(
+          "code_lab_draft.schema.json",
+          "/$defs/execution_repair_patch",
+          patch,
+        )
+        if (!schema.ok) return validationIssues(schema)
+        const patchIssues = validateCodeLabExecutionRepairPatch(
+          draft.secure_draft.payload,
+          patch,
+          feedback,
+        )
+        if (patchIssues.length > 0) return patchIssues
+        const repaired = normalizeCodeLabSecure(
+          request.generation_spec,
+          applyCodeLabExecutionRepairPatch(draft.secure_draft.payload, patch),
+          publicPayload,
+          identity.test_suite_id,
+          objectivePlan,
+        )
+        const planIssues = validateCodeLabSecureAgainstPlan(
+          repaired,
+          objectivePlan,
+        )
+        if (planIssues.length > 0) return planIssues
+        const progressIssues = validateCodeLabExecutionRepairProgress(
+          draft.secure_draft.payload,
+          repaired,
+          feedback,
+        )
+        if (progressIssues.length > 0) return progressIssues
+        return validationIssues(validateCodeLabDraftStructure(request, {
+          public_draft: { payload: publicPayload },
+          secure_draft: { payload: repaired },
         }))
       },
     })
+    const securePayload = normalizeCodeLabSecure(
+      request.generation_spec,
+      applyCodeLabExecutionRepairPatch(
+        draft.secure_draft.payload,
+        repairPatch,
+      ),
+      publicPayload,
+      identity.test_suite_id,
+      objectivePlan,
+    )
     return {
-      public_draft: { payload: normalizedPublic },
-      secure_draft: {
-        payload: normalizeCodeLabSecure(
-          request.generation_spec,
-          securePayload,
-          normalizedPublic,
-          identity.test_suite_id,
-        ),
-      },
+      public_draft: { payload: publicPayload },
+      secure_draft: { payload: securePayload },
     }
   }
 
@@ -297,7 +567,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
     const plan = buildAssessmentItemPlan(request.generation_spec)
     const formId = buildAssessmentFormId(request.generation_spec)
     const maxRepairs = boundedRepairs(this.maxRepairAttempts, request)
-    const publicPayload = await this.generateStage<AssessmentPublicPayload>({
+    const publicAuthorPayload = await this.generateStage<AssessmentPublicAuthorPayload>({
       task: "role-c.tiered-evaluator.public",
       system_prompt: ASSESSMENT_PUBLIC_STAGE_SYSTEM_PROMPT,
       input: {
@@ -308,8 +578,8 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
           item_plan: plan,
         },
       },
-      output_schema_id: "role_c_assessment_public_payload_v1",
-      output_schema: fragment("assessment_draft.schema.json", "/$defs/public_payload"),
+      output_schema_id: "role_c_assessment_public_author_payload_v1",
+      output_schema: fragment("assessment_draft.schema.json", "/$defs/public_author_payload"),
       temperature: this.assessmentTemperature,
       max_tokens: this.assessmentPublicMaxTokens,
       idempotency_identity: {
@@ -320,16 +590,26 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       },
       max_repairs: maxRepairs,
       validate: (payload) => {
-        const schema = validateRoleCSchemaFragment("assessment_draft.schema.json", "/$defs/public_payload", payload)
+        const schema = validateRoleCSchemaFragment("assessment_draft.schema.json", "/$defs/public_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
-        const planIssues = validateAssessmentPublicAgainstPlan(payload, plan)
+        const planIssues = validateAssessmentPublicAuthorAgainstPlan(payload, plan)
         if (planIssues.length > 0) return planIssues
-        const normalized = normalizeAssessmentPublic(request.generation_spec, payload, plan, formId)
+        const normalized = materializeAssessmentPublicAuthorPayload(
+          request.generation_spec,
+          payload,
+          plan,
+          formId,
+        )
         return validationIssues(validateAssessmentPublicStage(request, normalized))
       },
     })
-    const normalizedPublic = normalizeAssessmentPublic(request.generation_spec, publicPayload, plan, formId)
-    const securePayload = await this.generateStage<AssessmentSecurePayload>({
+    const normalizedPublic = materializeAssessmentPublicAuthorPayload(
+      request.generation_spec,
+      publicAuthorPayload,
+      plan,
+      formId,
+    )
+    const secureAuthorPayload = await this.generateStage<AssessmentSecureAuthorPayload>({
       task: "role-c.tiered-evaluator.secure",
       system_prompt: ASSESSMENT_SECURE_STAGE_SYSTEM_PROMPT,
       input: {
@@ -343,9 +623,10 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
           item_plan: plan,
         },
         revision_objections: modelInput.revision_objections,
+        external_revision_round: modelInput.external_revision_round,
       },
-      output_schema_id: "role_c_assessment_secure_payload_v1",
-      output_schema: fragment("assessment_draft.schema.json", "/$defs/secure_payload"),
+      output_schema_id: "role_c_assessment_secure_author_payload_v1",
+      output_schema: fragment("assessment_draft.schema.json", "/$defs/secure_author_payload"),
       temperature: this.assessmentTemperature,
       max_tokens: this.assessmentSecureMaxTokens,
       idempotency_identity: {
@@ -357,17 +638,27 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       },
       max_repairs: maxRepairs,
       validate: (payload) => {
-        const schema = validateRoleCSchemaFragment("assessment_draft.schema.json", "/$defs/secure_payload", payload)
+        const schema = validateRoleCSchemaFragment("assessment_draft.schema.json", "/$defs/secure_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
-        const crossIssues = validateAssessmentSecureAgainstPublic(payload, normalizedPublic)
+        const crossIssues = validateAssessmentSecureAuthorAgainstPublic(payload, normalizedPublic)
         if (crossIssues.length > 0) return crossIssues
-        const normalized = normalizeAssessmentPair(request.generation_spec, normalizedPublic, payload)
+        const secure = materializeAssessmentSecureAuthorPayload(
+          request.generation_spec,
+          normalizedPublic,
+          payload,
+        )
+        const normalized = normalizeAssessmentPair(request.generation_spec, normalizedPublic, secure)
         return validationIssues(validateAssessmentDraftStructure(request, {
           public_draft: { payload: normalized.public_payload },
           secure_draft: { payload: normalized.secure_payload },
         }))
       },
     })
+    const securePayload = materializeAssessmentSecureAuthorPayload(
+      request.generation_spec,
+      normalizedPublic,
+      secureAuthorPayload,
+    )
     const normalized = normalizeAssessmentPair(request.generation_spec, normalizedPublic, securePayload)
     return {
       public_draft: { payload: normalized.public_payload },
@@ -375,17 +666,292 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
     }
   }
 
+  async repairAssessmentAfterVerification(
+    request: TieredEvaluatorRequest,
+    draft: AssessmentDraft,
+    feedback: AssessmentVerificationFeedback,
+  ): Promise<AssessmentDraft> {
+    assertVersionCompatibility(request, this.gateway, EVALUATOR_AUTHOR_PROMPT_VERSION)
+    if (this.generationStrategy !== "staged") {
+      throw new ModelProviderUnavailableError(
+        "可信验证后的测评私有修订仅支持 staged 模型生成策略",
+      )
+    }
+
+    const modelInput = buildAssessmentAuthorModelInput(request)
+    const plan = buildAssessmentItemPlan(request.generation_spec)
+    const formId = buildAssessmentFormId(request.generation_spec)
+    const publicPayload = structuredClone(draft.public_draft.payload)
+    const maxRepairs = boundedRepairs(this.maxRepairAttempts, request)
+    const verificationIssues = feedback.issues
+      .slice(0, 32)
+      .map((issue) => issue.slice(0, 500))
+    const securePayload = await this.generateStage<AssessmentSecurePayload>({
+      task: "role-c.tiered-evaluator.secure.execution-repair",
+      system_prompt: ASSESSMENT_EXECUTION_REPAIR_SYSTEM_PROMPT,
+      input: {
+        contract: modelInput.contract,
+        evidence: modelInput.evidence,
+        upstream: modelInput.upstream,
+        public_payload: publicPayload,
+        prior_secure_payload: draft.secure_draft.payload,
+        trusted_verification_report: {
+          revision_round: feedback.revision_round,
+          issues: verificationIssues,
+        },
+        staged_contract: {
+          form_id: formId,
+          option_order_seed: request.generation_spec.policies.seed,
+          item_plan: plan,
+        },
+        revision_objections: modelInput.revision_objections,
+        external_revision_round: modelInput.external_revision_round,
+      },
+      output_schema_id: "role_c_assessment_secure_payload_v1",
+      output_schema: fragment(
+        "assessment_draft.schema.json",
+        "/$defs/secure_payload",
+      ),
+      temperature: this.assessmentTemperature,
+      max_tokens: this.assessmentSecureMaxTokens,
+      idempotency_identity: {
+        spec_id: request.generation_spec.spec_id,
+        form_id: formId,
+        public_hash: contentHash(publicPayload),
+        prior_secure_hash: contentHash(draft.secure_draft.payload),
+        trusted_verification_feedback_hash: contentHash(verificationIssues),
+        verification_revision_round: feedback.revision_round,
+        stage: "secure-execution-repair",
+        prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
+      },
+      max_repairs: maxRepairs,
+      validate: (payload) => {
+        const schema = validateRoleCSchemaFragment(
+          "assessment_draft.schema.json",
+          "/$defs/secure_payload",
+          payload,
+        )
+        if (!schema.ok) return validationIssues(schema)
+        const crossIssues = validateAssessmentSecureAgainstPublic(
+          payload,
+          publicPayload,
+        )
+        if (crossIssues.length > 0) return crossIssues
+        const normalized = normalizeAssessmentPair(
+          request.generation_spec,
+          publicPayload,
+          payload,
+        )
+        return validationIssues(validateAssessmentDraftStructure(request, {
+          public_draft: { payload: normalized.public_payload },
+          secure_draft: { payload: normalized.secure_payload },
+        }))
+      },
+    })
+    const normalized = normalizeAssessmentPair(
+      request.generation_spec,
+      publicPayload,
+      securePayload,
+    )
+    return {
+      public_draft: { payload: normalized.public_payload },
+      secure_draft: { payload: normalized.secure_payload },
+    }
+  }
+
+  /**
+   * Rewrites only learner-visible material when public strings can reconstruct
+   * the trusted reference. Secure values are used by the local validator only
+   * and are never included in the model request.
+   */
+  private async repairCodeLabPublicSafety(input: {
+    request: CodeLabRequest
+    public_payload: CodeLabPublicPayload
+    secure_payload: CodeLabSecurePayload
+    repair_reason: string
+    revision_identity: string
+  }): Promise<CodeLabPublicPayload> {
+    const { request } = input
+    const modelInput = buildCodeLabModelInput(request)
+    const identity = buildLabIdentity(request.generation_spec)
+    const securePlan = buildCodeLabSecurePlan(
+      request.generation_spec,
+      identity.test_suite_id,
+    )
+    const maxRepairs = boundedRepairs(this.maxRepairAttempts, request)
+    const patch = await this.generateStage<CodeLabPublicSafetyRepairPatch>({
+      task: "role-c.code-lab.public.safety-repair",
+      system_prompt: CODE_LAB_PUBLIC_SAFETY_REPAIR_SYSTEM_PROMPT,
+      input: {
+        contract: modelInput.contract,
+        evidence: modelInput.evidence,
+        concept: modelInput.concept,
+        public_payload: input.public_payload,
+        trusted_public_report: { issue: input.repair_reason },
+      },
+      output_schema_id: "role_c_code_lab_public_safety_repair_patch_v1",
+      output_schema: fragment(
+        "code_lab_draft.schema.json",
+        "/$defs/public_safety_repair_patch",
+      ),
+      temperature: this.codeLabTemperature,
+      max_tokens: this.codeLabPublicMaxTokens,
+      idempotency_identity: {
+        spec_id: request.generation_spec.spec_id,
+        lab_id: identity.lab_id,
+        prior_public_hash: contentHash(input.public_payload),
+        revision_identity: input.revision_identity,
+        stage: "public-safety-repair",
+        prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
+      },
+      max_repairs: maxRepairs,
+      validate: (candidatePatch) => {
+        const schema = validateRoleCSchemaFragment(
+          "code_lab_draft.schema.json",
+          "/$defs/public_safety_repair_patch",
+          candidatePatch,
+        )
+        if (!schema.ok) return validationIssues(schema)
+        const shapeIssues = validateCodeLabPublicSafetyPatchShape(
+          input.public_payload,
+          candidatePatch,
+        )
+        if (shapeIssues.length > 0) return shapeIssues
+        const candidate = applyCodeLabPublicSafetyPatch(
+          input.public_payload,
+          candidatePatch,
+        )
+        if (contentHash(candidate) === contentHash(input.public_payload)) {
+          return ["公开安全修订未改变学习者可见内容"]
+        }
+        const publicIssues = validationIssues(
+          validateCodeLabPublicStage(request, candidate),
+        )
+        if (publicIssues.length > 0) return publicIssues
+        const frozenSecure = normalizeCodeLabSecure(
+          request.generation_spec,
+          input.secure_payload,
+          candidate,
+          identity.test_suite_id,
+          securePlan,
+        )
+        return validationIssues(validateCodeLabDraftStructure(request, {
+          public_draft: { payload: candidate },
+          secure_draft: { payload: frozenSecure },
+        }))
+      },
+    })
+    return applyCodeLabPublicSafetyPatch(input.public_payload, patch)
+  }
+
+  /**
+   * Repairs only learner-visible starter code. The model receives no reference,
+   * hidden test, score, or mutation material; the trust plane uses those values
+   * solely to validate the returned public patch before it is accepted.
+   */
+  private async repairCodeLabStarter(input: {
+    request: CodeLabRequest
+    public_payload: CodeLabPublicPayload
+    secure_payload: CodeLabSecurePayload
+    repair_reason: string
+    revision_identity: string
+  }): Promise<CodeLabPublicPayload> {
+    const { request } = input
+    const modelInput = buildCodeLabModelInput(request)
+    const identity = buildLabIdentity(request.generation_spec)
+    const securePlan = buildCodeLabSecurePlan(
+      request.generation_spec,
+      identity.test_suite_id,
+    )
+    const maxRepairs = boundedRepairs(this.maxRepairAttempts, request)
+    const starterPatch = await this.generateStage<CodeLabStarterRepairPatch>({
+      task: "role-c.code-lab.public.starter-repair",
+      system_prompt: CODE_LAB_STARTER_REPAIR_SYSTEM_PROMPT,
+      input: {
+        contract: modelInput.contract,
+        evidence: modelInput.evidence,
+        concept: modelInput.concept,
+        public_payload: input.public_payload,
+        trusted_public_report: {
+          issue: input.repair_reason,
+        },
+      },
+      output_schema_id: "role_c_code_lab_starter_repair_patch_v1",
+      output_schema: fragment(
+        "code_lab_draft.schema.json",
+        "/$defs/starter_repair_patch",
+      ),
+      temperature: this.codeLabTemperature,
+      max_tokens: this.codeLabPublicMaxTokens,
+      idempotency_identity: {
+        spec_id: request.generation_spec.spec_id,
+        lab_id: identity.lab_id,
+        prior_public_hash: contentHash(input.public_payload),
+        revision_identity: input.revision_identity,
+        stage: "public-starter-repair",
+        prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
+      },
+      max_repairs: maxRepairs,
+      validate: (patch) => {
+        const schema = validateRoleCSchemaFragment(
+          "code_lab_draft.schema.json",
+          "/$defs/starter_repair_patch",
+          patch,
+        )
+        if (!schema.ok) return validationIssues(schema)
+        if (contentHash(patch.starter_code)
+          === contentHash(input.public_payload.starter_code)) {
+          return ["starter_code 未发生实质变化"]
+        }
+        const candidate: CodeLabPublicPayload = {
+          ...structuredClone(input.public_payload),
+          starter_code: patch.starter_code,
+        }
+        const publicIssues = validationIssues(
+          validateCodeLabPublicStage(request, candidate),
+        )
+        if (publicIssues.length > 0) return publicIssues
+        const frozenSecure = normalizeCodeLabSecure(
+          request.generation_spec,
+          input.secure_payload,
+          candidate,
+          identity.test_suite_id,
+          securePlan,
+        )
+        return validationIssues(validateCodeLabDraftStructure(request, {
+          public_draft: { payload: candidate },
+          secure_draft: { payload: frozenSecure },
+        }))
+      },
+    })
+    return {
+      ...structuredClone(input.public_payload),
+      starter_code: starterPatch.starter_code,
+    }
+  }
+
   private async generateStage<T>(stage: StructuredStage<T>): Promise<T> {
     let issues: string[] = []
+    let previousOutput: T | undefined
     for (let attempt = 0; attempt <= stage.max_repairs; attempt += 1) {
       let value: T
+      const systemPrompt = attempt === 0
+        ? stage.system_prompt
+        : stagedRepairPrompt(stage.system_prompt, issues)
+      const requestInput = attempt === 0
+        ? stage.input
+        : {
+            ...asRecord(stage.input),
+            ...(previousOutput === undefined
+              ? {}
+              : { previous_output: previousOutput }),
+            validator_report: issues,
+          }
       try {
         value = await this.gateway.generateStructured<T>({
           task: stage.task,
-          system_prompt: attempt === 0
-            ? stage.system_prompt
-            : stagedRepairPrompt(stage.system_prompt, issues),
-          input: attempt === 0 ? stage.input : { ...asRecord(stage.input), validator_report: issues },
+          system_prompt: systemPrompt,
+          input: requestInput,
           output_schema_id: stage.output_schema_id,
           output_schema: stage.output_schema,
           temperature: stage.temperature,
@@ -393,7 +959,12 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
           idempotency_key: idempotencyKey({
             ...stage.idempotency_identity,
             model_config_hash: this.gateway.model_config_hash,
-            input_hash: contentHash(stage.input),
+            task: stage.task,
+            output_schema_id: stage.output_schema_id,
+            request_hash: contentHash({
+              system_prompt: systemPrompt,
+              input: requestInput,
+            }),
             attempt,
           }),
         })
@@ -408,6 +979,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         }
         throw error
       }
+      previousOutput = structuredClone(value)
       issues = stage.validate(value)
       if (issues.length === 0) return value
     }
@@ -539,8 +1111,193 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
   }
 }
 
+const REPAIRABLE_STARTER_LEAK_CODES = new Set([
+  "reference_solution_leak",
+  "starter_equals_reference",
+])
+
+function hasRepairablePublicAnswerLeak(
+  report: ReturnType<typeof validateCodeLabDraftStructure>,
+): boolean {
+  return report.issues.some((issue) =>
+    REPAIRABLE_STARTER_LEAK_CODES.has(issue.code))
+}
+
+function validationIssuesExcludingRepairablePublicAnswerLeak(
+  report: ReturnType<typeof validateCodeLabDraftStructure>,
+): string[] {
+  return report.issues
+    .filter((issue) => !REPAIRABLE_STARTER_LEAK_CODES.has(issue.code))
+    .map((issue) => `${issue.path}: ${issue.message}`)
+}
+
+function validateCodeLabPublicSafetyPatchShape(
+  prior: CodeLabPublicPayload,
+  patch: CodeLabPublicSafetyRepairPatch,
+): string[] {
+  const issues: string[] = []
+  const expected = prior.instructions.length
+  if (patch.instruction_texts.length !== expected) {
+    issues.push(`instruction_texts 数量应为 ${expected}`)
+  }
+  if (patch.public_test_descriptions.length !== prior.public_tests.length) {
+    issues.push(`public_test_descriptions 数量应为 ${prior.public_tests.length}`)
+  }
+  if (patch.public_test_expected_behaviors.length !== prior.public_tests.length) {
+    issues.push(`public_test_expected_behaviors 数量应为 ${prior.public_tests.length}`)
+  }
+  if (patch.hint_texts.length !== prior.hint_ladders.length) {
+    issues.push(`hint_texts 数量应为 ${prior.hint_ladders.length}`)
+  }
+  patch.hint_texts.forEach((hints, index) => {
+    if (hints.length !== 3) issues.push(`hint_texts[${index}] 必须恰好包含三条提示`)
+  })
+  return issues
+}
+
+function applyCodeLabPublicSafetyPatch(
+  prior: CodeLabPublicPayload,
+  patch: CodeLabPublicSafetyRepairPatch,
+): CodeLabPublicPayload {
+  return {
+    ...structuredClone(prior),
+    starter_code: patch.starter_code,
+    instructions: prior.instructions.map((block, index) => {
+      const claims = "claims" in block ? structuredClone(block.claims) : []
+      const evidenceAnchor = claims.map((claim) => claim.text).join("；")
+      return {
+        block_id: block.block_id,
+        block_type: "paragraph" as const,
+        text: `${patch.instruction_texts[index]!.trim()}${evidenceAnchor
+          ? `\n证据事实：${evidenceAnchor}`
+          : ""}`,
+        claims,
+      }
+    }),
+    public_tests: prior.public_tests.map((test, index) => ({
+      ...structuredClone(test),
+      description: patch.public_test_descriptions[index]!.trim(),
+      expected_behavior: patch.public_test_expected_behaviors[index]!.trim(),
+    })),
+    hint_ladders: prior.hint_ladders.map((ladder, index) => ({
+      ...structuredClone(ladder),
+      hints: ladder.hints.map((hint, hintIndex) => ({
+        ...structuredClone(hint),
+        text: patch.hint_texts[index]![hintIndex]!.trim(),
+      })),
+    })),
+    reflection_questions: patch.reflection_questions.map((question) =>
+      question.trim()),
+  }
+}
+
 function fragment(file: RoleCSchemaFile, pointer: string): Record<string, unknown> {
   return getRoleCModelOutputSchemaFragment(file, pointer)
+}
+
+function validateCodeLabExecutionRepairProgress(
+  prior: CodeLabSecurePayload,
+  candidate: CodeLabSecurePayload,
+  feedback: CodeLabVerificationFeedback,
+): string[] {
+  const issues: string[] = []
+  if (trustedReferenceFailed(feedback)) {
+    const failedTestIds = trustedReferenceFailureTestIds(feedback)
+    const referenceChanged = contentHash(prior.reference_solution)
+      !== contentHash(candidate.reference_solution)
+    const testsChanged = relevantHiddenTestsChanged(
+      prior,
+      candidate,
+      failedTestIds,
+    )
+    if (!referenceChanged && !testsChanged) {
+      issues.push("参考实现未通过隐藏测试，修订稿却未改变参考源码或相应隐藏测试")
+    }
+  }
+  return issues
+}
+
+function validateCodeLabExecutionRepairPatch(
+  prior: CodeLabSecurePayload,
+  patch: CodeLabExecutionRepairPatch,
+  feedback: CodeLabVerificationFeedback,
+): string[] {
+  const issues: string[] = []
+  const priorTestIds = new Set(prior.hidden_tests.map((entry) => entry.test_id))
+  const seenTests = new Set<string>()
+  for (const entry of patch.hidden_test_repairs) {
+    if (seenTests.has(entry.test_id)) issues.push(`隐藏测试补丁重复：${entry.test_id}`)
+    seenTests.add(entry.test_id)
+    if (!priorTestIds.has(entry.test_id)) issues.push(`隐藏测试补丁引用未知 test_id：${entry.test_id}`)
+  }
+  if (patch.mutation_repairs.length > 0) {
+    issues.push("mutation 是可选质量诊断，不进入可信执行修订")
+  }
+
+  if (trustedReferenceFailed(feedback)) {
+    const failedTestIds = trustedReferenceFailureTestIds(feedback)
+    const touchesFailedTest = patch.hidden_test_repairs.some((entry) =>
+      failedTestIds.size === 0 || failedTestIds.has(entry.test_id))
+    if (patch.reference_solution === null && !touchesFailedTest) {
+      issues.push("参考实现失败时必须修订参考源码或实际失败的隐藏测试")
+    }
+    if (failedTestIds.size > 0) {
+      for (const entry of patch.hidden_test_repairs) {
+        if (!failedTestIds.has(entry.test_id)
+          && feedback.starter_status !== "passed") {
+          issues.push(`参考实现修订不得改写无关隐藏测试：${entry.test_id}`)
+        }
+      }
+    }
+  }
+  if (patch.reference_solution === null
+    && patch.hidden_test_repairs.length === 0
+    && patch.mutation_repairs.length === 0) {
+    issues.push("可信执行修订补丁为空")
+  }
+  return issues
+}
+
+function trustedReferenceFailed(feedback: CodeLabVerificationFeedback): boolean {
+  return feedback.reference_failed
+    ?? feedback.issues.some((entry) => entry.includes("reference_solution 未通过"))
+}
+
+function trustedReferenceFailureTestIds(
+  feedback: CodeLabVerificationFeedback,
+): Set<string> {
+  const failureCodes = feedback.reference_failure_codes
+    ?? feedback.issues.flatMap((entry) => {
+      if (!entry.includes("reference_solution 未通过")) return []
+      const separator = entry.indexOf("：")
+      return separator >= 0 ? entry.slice(separator + 1).split(/[、,]/) : []
+    })
+  return new Set(failureCodes.flatMap((entry) => {
+    const separator = entry.lastIndexOf(":")
+    if (separator <= 0) return []
+    return [entry.slice(0, separator)]
+  }))
+}
+
+function relevantHiddenTestsChanged(
+  prior: CodeLabSecurePayload,
+  candidate: CodeLabSecurePayload,
+  selectedIds: Set<string>,
+): boolean {
+  const candidateById = new Map(candidate.hidden_tests.map((entry) => [entry.test_id, entry]))
+  return prior.hidden_tests.some((before) => {
+    if (selectedIds.size > 0 && !selectedIds.has(before.test_id)) return false
+    const after = candidateById.get(before.test_id)
+    return Boolean(after && contentHash({
+      input: before.input,
+      expected: before.expected,
+      comparison: before.comparison,
+    }) !== contentHash({
+      input: after.input,
+      expected: after.expected,
+      comparison: after.comparison,
+    }))
+  })
 }
 
 function validationIssues(report: { issues: Array<{ path: string; message: string }> }): string[] {

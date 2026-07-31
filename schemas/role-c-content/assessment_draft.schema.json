@@ -40,6 +40,44 @@
       },
       "additionalProperties": false
     },
+    "public_author_payload": {
+      "type": "object",
+      "required": ["title", "items"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1, "maxLength": 300 },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "required": ["prompt", "options", "starter_code"],
+            "properties": {
+              "prompt": { "type": "string", "minLength": 1, "maxLength": 3000 },
+              "options": {
+                "oneOf": [
+                  {
+                    "type": "array",
+                    "minItems": 2,
+                    "maxItems": 4,
+                    "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+                  },
+                  { "type": "null" }
+                ]
+              },
+              "starter_code": {
+                "oneOf": [
+                  { "type": "string", "minLength": 1, "maxLength": 20000 },
+                  { "type": "null" }
+                ]
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "public_item": {
       "type": "object",
       "required": ["item_id", "family_id", "variant_id", "display_no", "objective_id", "tier", "modality", "prompt", "max_score", "citations"],
@@ -212,7 +250,7 @@
         "test_suite_id": { "type": "string", "minLength": 1 },
         "execution_contract": { "$ref": "code_lab_draft.schema.json#/$defs/execution_contract" },
         "reference_solution": { "type": "string", "minLength": 1, "maxLength": 20000 },
-        "hidden_tests": { "type": "array", "minItems": 2, "maxItems": 64, "items": { "$ref": "code_lab_draft.schema.json#/$defs/hidden_test" } }
+        "hidden_tests": { "type": "array", "minItems": 1, "maxItems": 64, "items": { "$ref": "code_lab_draft.schema.json#/$defs/hidden_test" } }
       },
       "additionalProperties": false
     },
@@ -223,6 +261,68 @@
         "objective_id": { "type": "string", "minLength": 1 },
         "item_ids": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
         "answer_kinds": { "type": "array", "minItems": 1, "items": { "enum": ["exact_set", "numeric", "concept_rubric", "code"] } }
+      },
+      "additionalProperties": false
+    },
+    "secure_author_payload": {
+      "type": "object",
+      "required": ["items", "code_test_suites"],
+      "properties": {
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 30,
+          "items": {
+            "type": "object",
+            "required": ["answer_spec", "correct_option_id", "misconception_by_option"],
+            "properties": {
+              "answer_spec": {
+                "oneOf": [
+                  { "$ref": "#/$defs/answer_spec" },
+                  { "type": "null" }
+                ]
+              },
+              "correct_option_id": {
+                "oneOf": [
+                  { "type": "string", "minLength": 1 },
+                  { "type": "null" }
+                ]
+              },
+              "misconception_by_option": {
+                "type": "object",
+                "additionalProperties": { "type": "string", "minLength": 1 }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "code_test_suites": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["execution_contract", "reference_solution", "hidden_tests"],
+            "properties": {
+              "execution_contract": { "$ref": "code_lab_draft.schema.json#/$defs/execution_contract" },
+              "reference_solution": { "type": "string", "minLength": 1, "maxLength": 20000 },
+              "hidden_tests": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 64,
+                "items": {
+                  "type": "object",
+                  "required": ["input", "expected", "comparison"],
+                  "properties": {
+                    "input": {},
+                    "expected": {},
+                    "comparison": { "$ref": "code_lab_draft.schema.json#/$defs/test_comparison" }
+                  },
+                  "additionalProperties": false
+                }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
       },
       "additionalProperties": false
     },

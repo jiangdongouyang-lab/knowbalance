@@ -95,7 +95,10 @@ export function App() {
   </>
 
   const drawer = session.view.detailDrawer
-  const workflowLabel = session.planSource === "real-ab" ? "查看 A/B/C 执行链" : "查看 Agent 协同"
+  const includesRoleC = Boolean(session.roleC)
+  const workflowLabel = session.planSource === "real-ab"
+    ? includesRoleC ? "查看 A/B/C 执行链" : "查看 B/A 执行链"
+    : "查看 Agent 协同"
   async function createPlan(input: NewLearningPlanInput & { title?: string }) {
     const plan = await createLearningPlan(input)
     setWorkspace((current) => addPlan(current, activeUser!.id, { id: crypto.randomUUID(), title: input.title?.trim() || input.goal, session: plan.session }))
@@ -162,7 +165,12 @@ export function App() {
         selfRating: session.view.selfRatingDraft,
         goal: session.profile.goal,
       },
-      diagnosis: { ...session.diagnosis, items: diagnosisItems(session.diagnosis) },
+      diagnosis: {
+        ...session.diagnosis,
+        availability: session.diagnosis.availability
+          ?? (diagnosisItems(session.diagnosis).length > 0 ? "available" : "unavailable"),
+        items: diagnosisItems(session.diagnosis),
+      },
       session,
     }
     setDiagnosisSubmittingPlanId(targetPlanId)
@@ -207,7 +215,7 @@ export function App() {
         </div>
       </main>
 
-      {drawer === "agents" && <DetailDrawer title={session.planSource === "real-ab" ? "A/B/C 执行详情" : "Agent 协同过程"} onClose={() => updateView({ detailDrawer: "none" })}><WorkflowTimeline events={session.workflow} localExecution={session.planSource === "real-ab"} includesRoleC={session.planSource === "real-ab"} /></DetailDrawer>}
+      {drawer === "agents" && <DetailDrawer title={session.planSource === "real-ab" ? includesRoleC ? "A/B/C 执行详情" : "B/A 执行详情" : "Agent 协同过程"} onClose={() => updateView({ detailDrawer: "none" })}><WorkflowTimeline events={session.workflow} localExecution={session.planSource === "real-ab"} includesRoleC={includesRoleC} /></DetailDrawer>}
       {drawer === "evidence" && <DetailDrawer title="知识证据与引用" onClose={() => updateView({ detailDrawer: "none" })}><EvidenceInspector items={session.retrieval.items} artifacts={session.artifacts} selectedSourceId={session.view.selectedSourceId} onSelect={(selectedSourceId) => updateView({ selectedSourceId })} /></DetailDrawer>}
       {deleteOpen && <ConfirmDialog title="删除当前学习计划？" description="这会删除当前计划的画像、资源、答案和学习进度，但不会影响该用户的其他计划。" confirmLabel="删除计划" onCancel={() => setDeleteOpen(false)} onConfirm={() => { setWorkspace((current) => deletePlan(current, activePlan!.id)); setDeleteOpen(false); setShowPlanList(true) }} />}
       {newPlanOpen && <NewPlanDialog user={activeUser} onCancel={() => setNewPlanOpen(false)} onCreate={createPlan} />}

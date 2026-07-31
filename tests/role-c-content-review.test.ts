@@ -139,13 +139,66 @@ describe("Role C content review extraction and adapters", () => {
       .toEqual(["concept", "code_lab", "assessment"])
     expect(report.artifact_results.every((entry) => entry.fact_status === "pass")).toBe(true)
     expect(report.decision).toBe("reject")
-    expect(report.revision_instructions.some(
+    expect(report.revision_instructions.filter(
       (instruction) => instruction.code === "difficulty_alignment"
         && instruction.fix_scope === "new_spec",
+    )).toHaveLength(1)
+    const teachingFindings = report.artifact_results.flatMap((entry) =>
+      entry.findings.filter((finding) => finding.source === "teaching_audit"))
+    expect(teachingFindings.filter(
+      (finding) => finding.code === "difficulty_alignment",
+    )).toHaveLength(1)
+    expect(teachingFindings.every(
+      (finding) => finding.fix_scope === "new_spec"
+        || finding.fix_scope === "new_evidence",
     )).toBe(true)
+    expect(new Set(report.artifact_results.map(
+      (entry) => entry.teaching_status,
+    )).size).toBe(1)
     expect(report.artifact_results.every((entry) => entry.findings.every(
       (finding) => finding.artifact_id === entry.artifact_id,
     ))).toBe(true)
+  })
+
+  test("keeps free-text goal and weak preferences diagnostic for an evidence-backed path", async () => {
+    const alignedProfile: LearnerProfile = {
+      ...profile,
+      level: "integrated",
+      known_concepts: [...profile.known_concepts, "函数定义与调用"],
+    }
+    const context = await goldenContext(alignedProfile)
+    const kb = await loadKnowledgeBase()
+    let captured: ContentReviewRequest | undefined
+    await runReviewedCPipeline(
+      context.input,
+      context.agents,
+      new InMemorySecureArtifactStore(),
+      {
+        review_port: {
+          policy_version: "capture-path-diagnostic-v1",
+          async review(request) {
+            captured = request
+            return reviewResult(request, "pass", this.policy_version)
+          },
+        },
+      },
+    )
+    const request = structuredClone(captured!)
+    request.generation_spec.path_node.goal = "制作一个可交互作品"
+    request.generation_spec.learner_adaptation.weak_concepts = ["页面布局偏好"]
+
+    const report = await createLocalABContentReviewPort({
+      knowledge_base: kb,
+    }).review(request)
+
+    expect(report.decision).toBe("pass")
+    expect(report.artifact_results.every(
+      (entry) => entry.teaching_status === "pass",
+    )).toBe(true)
+    expect(report.revision_instructions.some(
+      (instruction) => instruction.code === "goal_alignment"
+        || instruction.code === "weak_concept_coverage",
+    )).toBe(false)
   })
 
   test("audits learner-visible render text even when its separate claim stays valid", async () => {
@@ -611,7 +664,7 @@ describe("runReviewedCPipeline publication gate", () => {
     expect(destination.batchWrites).toBe(0)
   })
 
-  test("keeps trace ordering validation behind the reviewed release gate", async () => {
+  test("treats trace ordering as telemetry while keeping reviewed content publishable", async () => {
     const context = await goldenContext()
     const result = await runReviewedCPipeline(
       context.input,
@@ -624,13 +677,13 @@ describe("runReviewedCPipeline publication gate", () => {
     outOfOrder.trace_events[0]!.seq = outOfOrder.trace_events[1]!.seq
     outOfOrder.trace_events[1]!.seq = firstSeq
     let deliveryCalls = 0
-    await expect(deliverRoleCToD({
+    await deliverRoleCToD({
       async publishReviewedRelease(release) {
         deliveryCalls += 1
         return deliveryAck(release)
       },
-    }, outOfOrder)).rejects.toThrow("NOT_STRICTLY_ORDERED")
-    expect(deliveryCalls).toBe(0)
+    }, outOfOrder)
+    expect(deliveryCalls).toBe(1)
   })
 
   test("allows at most two external revisions and reuses one frozen evidence object", async () => {
@@ -640,11 +693,13 @@ describe("runReviewedCPipeline publication gate", () => {
     const evidenceHashes: string[] = []
     let calls = 0
     let conceptCalls = 0
+    const externalRevisionRounds: Array<number | undefined> = []
     const countedAgents: RoleCAgents = {
       ...context.agents,
       concept_tutor: {
         async generate(request) {
           conceptCalls += 1
+          externalRevisionRounds.push(request.external_revision_round)
           return context.agents.concept_tutor.generate(request)
         },
       },
@@ -673,6 +728,7 @@ describe("runReviewedCPipeline publication gate", () => {
     expect(evidenceHashes[0]).not.toBe(contentHash(context.input.evidence_pack))
     expect(Object.isFrozen(evidenceObjects[0])).toBe(true)
     expect(conceptCalls).toBe(3)
+    expect(externalRevisionRounds).toEqual([0, 1, 2])
     expect(destination.batchWrites).toBe(1)
   })
 
@@ -708,7 +764,7 @@ async function goldenContext(
   const rag = await retrieveKnowledge({
     query: request.query,
     learnerLevel: learnerProfile.level,
-    topK: request.top_k,
+    topK: 10,
   })
   const kb = await loadKnowledgeBase()
   const evidence = adaptRagResult(rag, {

@@ -63,8 +63,14 @@ function validateArtifact(value: unknown): asserts value is RoleCArtifactJson {
   }
   if (!("blocks" in value)) printValidationError("MISSING_BLOCKS", "Role C artifact requires a blocks array.")
   if (!Array.isArray(value.blocks)) printValidationError("INVALID_BLOCKS", "Role C artifact blocks must be an array.")
-  if (value.learnerLevel !== undefined && !["beginner", "intermediate", "advanced"].includes(String(value.learnerLevel))) {
-    printValidationError("INVALID_LEARNER_LEVEL", "learnerLevel must be beginner, intermediate or advanced.")
+  if (value.learnerLevel !== undefined
+    && !["beginner", "basic", "intermediate", "integrated"].includes(
+      String(value.learnerLevel),
+    )) {
+    printValidationError(
+      "INVALID_LEARNER_LEVEL",
+      "learnerLevel must be beginner, basic, intermediate or integrated.",
+    )
   }
   if (value.topK !== undefined && (!Number.isInteger(value.topK) || value.topK <= 0)) {
     printValidationError("INVALID_TOP_K", "topK must be a positive integer.")

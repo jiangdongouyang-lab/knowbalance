@@ -388,7 +388,7 @@ describe("role-B profile demo", () => {
     const output = JSON.parse(stdout)
 
     // 统一契约格式验证
-    expect(output.boundary).toBe("A_B_C_D_FULL_HANDOFF")
+    expect(output.boundary).toBe("A_RAG_RESULT_TO_C_CONTENT")
     expect(output.schemaVersion).toBe("1.0")
     expect(output.handoff.profile.learnerId).toBe("demo_loop_weak_001")
     expect(output.handoff.conflicts.length).toBeGreaterThan(0)

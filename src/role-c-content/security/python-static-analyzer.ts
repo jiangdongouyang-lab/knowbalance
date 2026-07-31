@@ -9,13 +9,19 @@ export interface PythonStaticIssue {
 export const PLATFORM_PYTHON_IMPORT_ALLOWLIST = Object.freeze([
   "bisect",
   "collections",
+  "datetime",
   "decimal",
+  "enum",
   "fractions",
   "functools",
   "heapq",
   "itertools",
+  "io",
+  "json",
   "math",
   "operator",
+  "random",
+  "re",
   "statistics",
   "string",
 ] as const)
@@ -46,7 +52,6 @@ const DANGEROUS_PATTERNS: Array<[RegExp, string]> = [
   [/\b(?:globals|locals|vars)\s*\(/, "namespace_introspection"],
   [/\b(?:getattr|setattr|delattr)\s*\(/, "dynamic_attribute_access"],
   [/\bmemoryview\s*\(/, "raw_memory_access"],
-  [/__[^\s]*/, "dunder_access"],
 ]
 
 /** Conservative preflight. Isolation remains mandatory even when this report passes. */

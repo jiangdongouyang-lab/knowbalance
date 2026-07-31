@@ -119,7 +119,9 @@ export function isValidRoleDSession(value: unknown): value is RoleDSession {
     && typeof diagnosis.question === "string"
     && isStringArray(diagnosis.options)
     && typeof diagnosis.answer === "string"
-    && (diagnosis.items === undefined || (Array.isArray(diagnosis.items) && diagnosis.items.length > 0 && diagnosis.items.every(isDiagnosisItem)))
+    && (diagnosis.availability === undefined || diagnosis.availability === "available" || diagnosis.availability === "unavailable")
+    && (diagnosis.unavailableReason === undefined || typeof diagnosis.unavailableReason === "string")
+    && (diagnosis.items === undefined || (Array.isArray(diagnosis.items) && diagnosis.items.every(isDiagnosisItem)))
     && isRecord(view)
     && isGuidedStage(view.currentStage)
     && isGuidedStage(view.maxUnlockedStage)

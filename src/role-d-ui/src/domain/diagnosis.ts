@@ -3,7 +3,9 @@ import type { RoleDSession } from "./types"
 export type DiagnosisItemView = NonNullable<RoleDSession["diagnosis"]["items"]>[number]
 
 export function diagnosisItems(diagnosis: RoleDSession["diagnosis"]): DiagnosisItemView[] {
-  return diagnosis.items?.length ? diagnosis.items : [{
+  if (diagnosis.items !== undefined) return diagnosis.items
+  if (!diagnosis.question.trim() || diagnosis.options.length < 2 || !diagnosis.answer.trim()) return []
+  return [{
     id: `${diagnosis.sourceId}-${diagnosis.factId}-1`,
     sourceId: diagnosis.sourceId,
     factId: diagnosis.factId,

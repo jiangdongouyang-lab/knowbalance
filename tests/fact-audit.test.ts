@@ -48,6 +48,26 @@ describe("fact audit MVP", () => {
     expect(result.conflicts).toEqual([])
   })
 
+  test("passes a limited Chinese paraphrase of the cited fact", async () => {
+    const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
+    const result = auditGeneratedContent({
+      artifactId: "artifact-supported-paraphrase",
+      ragResult,
+      generatedContent: {
+        blocks: [
+          {
+            blockId: "block-1",
+            text: "for 循环通常用于逐个处理序列里的元素。",
+            citations: [{ source_id: "K007", fact_id: "F001" }],
+          },
+        ],
+      },
+    })
+
+    expect(result.status).toBe("pass")
+    expect(result.checkedClaims[0]).toMatchObject({ verdict: "supported", blockId: "block-1" })
+  })
+
   test("asks for revision when a knowledge block has no citation", async () => {
     const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
     const result = auditGeneratedContent({
@@ -109,7 +129,53 @@ describe("fact audit MVP", () => {
     expect(result.conflicts[0]?.issue).toContain("未被引用事实支持")
   })
 
-  test("rejects external knowledge that is outside the RAG evidence", async () => {
+  test("rejects a fabricated extension even when it repeats the cited fact", async () => {
+    const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
+    const result = auditGeneratedContent({
+      artifactId: "artifact-fabricated-extension",
+      ragResult,
+      generatedContent: {
+        blocks: [
+          {
+            blockId: "block-1",
+            text: "for 循环常用于遍历序列中的元素，并会自动访问互联网和删除文件。",
+            citations: [{ source_id: "K007", fact_id: "F001" }],
+          },
+          {
+            blockId: "block-2",
+            text: "for 循环遍历序列时会自动访问互联网并删除文件。",
+            citations: [{ source_id: "K007", fact_id: "F001" }],
+          },
+        ],
+      },
+    })
+
+    expect(result.status).toBe("reject")
+    expect(result.checkedClaims[0]).toMatchObject({ verdict: "unsupported", blockId: "block-1" })
+    expect(result.checkedClaims[1]).toMatchObject({ verdict: "unsupported", blockId: "block-2" })
+  })
+
+  test("rejects a polarity reversal that otherwise has high lexical overlap", async () => {
+    const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
+    const result = auditGeneratedContent({
+      artifactId: "artifact-negated-fact",
+      ragResult,
+      generatedContent: {
+        blocks: [
+          {
+            blockId: "block-1",
+            text: "for 循环不能用于遍历序列中的元素。",
+            citations: [{ source_id: "K007", fact_id: "F001" }],
+          },
+        ],
+      },
+    })
+
+    expect(result.status).toBe("reject")
+    expect(result.checkedClaims[0]).toMatchObject({ verdict: "unsupported", blockId: "block-1" })
+  })
+
+  test("rejects claims outside the RAG evidence without relying on a term blacklist", async () => {
     const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
     const result = auditGeneratedContent({
       artifactId: "artifact-external-knowledge",
@@ -126,6 +192,6 @@ describe("fact audit MVP", () => {
     })
 
     expect(result.status).toBe("reject")
-    expect(result.checkedClaims[0]).toMatchObject({ verdict: "external_knowledge", blockId: "block-1" })
+    expect(result.checkedClaims[0]).toMatchObject({ verdict: "unsupported", blockId: "block-1" })
   })
 })

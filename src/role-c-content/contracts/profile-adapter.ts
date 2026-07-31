@@ -1,5 +1,6 @@
 import type { LearnerProfile } from "../../role-b-profile/types"
-import { C_SCHEMA_VERSION, stableId, type LearnerLevel, type SchemaVersion } from "./common"
+import type { LearnerLevel, SchemaVersion } from "./common"
+import { C_SCHEMA_VERSION, stableId } from "./canonical"
 
 export type ObservableBehavior = "recognize" | "explain" | "trace" | "apply" | "debug" | "create"
 
@@ -32,7 +33,7 @@ export interface LearningObjective {
   importance: "core" | "supporting"
 }
 
-/** B/path → C contract. B currently has no concrete path type, so C publishes this target contract. */
+/** Formal B/path → C generation contract. */
 export interface LearningPathNode {
   schema_version: SchemaVersion
   node_id: string

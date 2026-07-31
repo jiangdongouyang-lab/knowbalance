@@ -6,30 +6,29 @@ import {
   adaptRagResult,
   buildGenerationSpec,
   DeterministicConceptContentProvider,
-  defineLearningPathNode,
   generateConceptLesson,
   ROLE_C_PROMPT_MANIFEST_VERSION,
-  type LearningPathNode,
 } from "../src/role-c-content"
+import { buildInitialRoleCContext } from "../src/role-d-integration/initial-learning-path"
 
 const profile = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
-const rawPath = (await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()) as LearningPathNode
 const kb = await loadKnowledgeBase()
 const { rag_request: ragRequest, rag_result: ragResult } = await executeProfileRetrieval(profile)
+const initialContext = await buildInitialRoleCContext({
+  profile,
+  ragResult,
+  knowledgeBase: kb,
+})
+if (!initialContext.ok) {
+  throw new Error(`${initialContext.code}: ${initialContext.reason}`)
+}
 
 const profileSnapshot = adaptLearnerProfile(profile, {
   profile_version: "profile-demo-v1",
   provenance_ref: "examples/learner_loop_weak.json",
 })
-const pathNode = defineLearningPathNode({
-  node_id: rawPath.node_id,
-  target_source_ids: rawPath.target_source_ids,
-  prerequisite_source_ids: rawPath.prerequisite_source_ids,
-  goal: rawPath.goal,
-  objectives: rawPath.objectives,
-  assessment_blueprint: rawPath.assessment_blueprint,
-})
-const evidencePack = adaptRagResult(ragResult, {
+const pathNode = initialContext.pathNode
+const evidencePack = adaptRagResult(initialContext.ragResult, {
   kb_version: kb.version,
   rag_version: "rule-rag-0.1",
 })

@@ -380,7 +380,6 @@ async function prepareEvidenceRecovery(
   }
   const evidenceIssue = validateRefreshedEvidence(
     evidence,
-    input.evidence_pack,
     pathFromSpec(input.generation_spec),
     profile,
     request.target_source_ids,
@@ -572,16 +571,6 @@ async function prepareSpecRecovery(
       path_request_id: request.request_id,
     }
   }
-  if (planned.profile_snapshot
-    && directive.recommended_level
-    && nextProfile.level !== directive.recommended_level) {
-    return {
-      ok: false,
-      code: "BLOCKED",
-      message: "B 返回画像的 level 与审核建议不一致",
-      path_request_id: request.request_id,
-    }
-  }
   const currentPath = pathFromSpec(input.generation_spec)
   if (contentHash(planned.path_draft) === contentHash(currentPath)
     && contentHash(nextProfile) === contentHash(profile)) {
@@ -596,34 +585,64 @@ async function prepareSpecRecovery(
   let evidence = input.evidence_pack
   let resolvedPath: LearningPathNode = structuredClone(validationPath)
   let evidenceRequestId: string | undefined
-  let built: BuildGenerationSpecResult | undefined = requiresFactBinding
-    ? undefined
-    : evidenceCoverageIssues(evidence, resolvedPath, nextProfile).length === 0
-      ? buildRecoverySpec(
-          input.generation_spec,
-          nextProfile,
-          resolvedPath,
-          evidence,
-          "new_spec",
-        )
-      : undefined
-  if (built && !built.ok && built.code === "INVALID_INPUT") {
-    return {
-      ok: false,
-      code: "BLOCKED",
-      message: `B 返回的路径无法创建 GenerationSpec：${built.errors.join("；")}`,
-      path_request_id: request.request_id,
+  let currentBindingErrors: string[] = []
+  if (requiresFactBinding) {
+    const currentBinding = bindUnboundObjectiveFacts(
+      planned.path_draft,
+      evidence,
+    )
+    if (currentBinding.ok) {
+      resolvedPath = formalizeDraftPath(
+        currentBinding.path,
+        request.request_id,
+      )
+      const resolvedPathReport = validateRoleCSchema(
+        "learning_path_node.schema.json",
+        resolvedPath,
+      )
+      if (!resolvedPathReport.ok) {
+        return {
+          ok: false,
+          code: "BLOCKED",
+          message: "事实绑定后的学习路径未通过 C Schema 校验",
+          path_request_id: request.request_id,
+        }
+      }
+    } else {
+      currentBindingErrors = currentBinding.errors
     }
   }
 
-  if (!built?.ok) {
+  const currentEvidenceIssues = currentBindingErrors.length > 0
+    ? currentBindingErrors
+    : evidenceCoverageIssues(evidence, resolvedPath, nextProfile)
+  let built: BuildGenerationSpecResult | undefined
+  if (currentEvidenceIssues.length === 0) {
+    built = buildRecoverySpec(
+      input.generation_spec,
+      nextProfile,
+      resolvedPath,
+      evidence,
+      "new_spec",
+    )
+    if (!built.ok) {
+      return {
+        ok: false,
+        code: "BLOCKED",
+        message: `B 返回的路径无法创建 GenerationSpec：${built.errors.join("；")}`,
+        path_request_id: request.request_id,
+      }
+    }
+  }
+
+  if (!built) {
     const gap = pathEvidenceGapRequest(
       input,
       nextProfile,
       planned.path_draft,
       directive,
-      built && !built.ok && "gap_request" in built
-        ? built.gap_request
+      !preflight.ok && "gap_request" in preflight
+        ? preflight.gap_request
         : undefined,
     )
     evidenceRequestId = gap.request_id
@@ -652,7 +671,6 @@ async function prepareSpecRecovery(
     }
     const evidenceIssue = validateRefreshedEvidence(
       evidence,
-      input.evidence_pack,
       planned.path_draft,
       nextProfile,
       gap.target_source_ids,
@@ -714,7 +732,7 @@ async function prepareSpecRecovery(
       "new_spec",
     )
   }
-  if (!built.ok) {
+  if (!built?.ok) {
     return {
       ok: false,
       code: "BLOCKED",
@@ -978,16 +996,12 @@ function pipelineInputAfterRecovery(
 
 function validateRefreshedEvidence(
   refreshed: RagEvidencePack,
-  previous: RagEvidencePack,
   path: LearningPathNode | RoleBPathDraft,
   profile: LearnerProfileSnapshot,
   requiredSourceIds: string[] = [],
 ): string | undefined {
   const schema = validateRoleCSchema("rag_evidence_pack.schema.json", refreshed)
   if (!schema.ok) return "A 返回的新证据包未通过 C Schema 校验"
-  if (contentHash(refreshed) === contentHash(previous)) {
-    return "A 返回的证据包没有新增或修正内容"
-  }
   const issues = evidenceCoverageIssues(
     refreshed,
     path,
@@ -1019,6 +1033,8 @@ type PathFactBindingResult =
   | { ok: true; path: LearningPathNode }
   | { ok: false; errors: string[] }
 
+const MAX_REQUIRED_FACTS_PER_OBJECTIVE = 3
+
 function bindUnboundObjectiveFacts(
   path: RoleBPathDraft,
   evidence: RagEvidencePack,
@@ -1033,7 +1049,7 @@ function bindUnboundObjectiveFacts(
         .flatMap((item) => item.facts)
         .filter((fact) => fact.source_id === objective.source_id)
         .map((fact) => fact.fact_id),
-    ).sort()
+    ).sort().slice(0, MAX_REQUIRED_FACTS_PER_OBJECTIVE)
     if (availableFactIds.length === 0) {
       errors.push(
         `目标 ${objective.objective_id} 的知识点 ${objective.source_id} 没有可用事实`,
@@ -1098,15 +1114,6 @@ function evidenceCoverageIssues(
       if (!facts.has(factId)) {
         issues.push(`缺少事实 ${objective.source_id}:${factId}`)
       }
-    }
-    if (item.examples.length === 0) {
-      issues.push(`目标知识点 ${objective.source_id} 缺少示例`)
-    }
-    if (item.practice_tasks.length === 0) {
-      issues.push(`目标知识点 ${objective.source_id} 缺少实践任务`)
-    }
-    if (item.quiz_seeds.length === 0) {
-      issues.push(`目标知识点 ${objective.source_id} 缺少题目种子`)
     }
   }
   return unique(issues)

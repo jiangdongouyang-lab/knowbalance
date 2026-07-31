@@ -223,6 +223,8 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     expect(screen.queryByText("A/B/C 本次实跑")).not.toBeInTheDocument()
     expect(screen.queryByText("实时事件")).not.toBeInTheDocument()
 
+    expect(screen.getByRole("button", { name: "查看 B/A 执行链" })).toBeInTheDocument()
+    await answerDynamicDiagnosis()
     await userEvent.click(screen.getByRole("button", { name: "查看 A/B/C 执行链" }))
     expect(screen.getByText("concept-tutor")).toBeInTheDocument()
     expect(screen.getByText("code-lab")).toBeInTheDocument()
@@ -239,10 +241,9 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     expect(screen.getAllByText("K007-F001").length).toBeGreaterThan(0)
   })
 
-  test("keeps a delayed onboarding result bound to the plan that started it", async () => {
+  test("keeps a delayed C result bound to the diagnosed plan that started it", async () => {
     render(<App />)
     await setupRealPlan()
-    await userEvent.click(screen.getByRole("button", { name: "返回计划信息" }))
 
     let release!: () => void
     const delayed = new Promise<void>((resolve) => { release = resolve })
@@ -260,23 +261,28 @@ describe("Role D dynamic diagnosis and official C resources", () => {
       return response
     }))
 
-    await userEvent.clear(screen.getByLabelText("这次你想学会什么？"))
-    await userEvent.type(screen.getByLabelText("这次你想学会什么？"), "更新后的成绩统计目标")
-    await userEvent.click(screen.getByRole("button", { name: "下一步：客观诊断" }))
+    const radios = screen.getAllByRole("radio")
+    const selected = new Set<string>()
+    for (const radio of radios) {
+      const input = radio as HTMLInputElement
+      if (selected.has(input.name)) continue
+      await userEvent.click(input)
+      selected.add(input.name)
+    }
+    await userEvent.click(screen.getByRole("button", { name: "提交 5 道诊断题" }))
     await userEvent.click(screen.getByRole("button", { name: "返回学习计划单" }))
     await userEvent.click(screen.getByRole("button", { name: "新建学习计划" }))
     await userEvent.type(screen.getByLabelText("计划名称 *"), "另一个计划")
     await userEvent.type(screen.getByLabelText("学习目标 *"), "学会变量与赋值，能用变量保存和更新数据")
     await userEvent.click(screen.getByRole("button", { name: "创建学习计划" }))
-    await userEvent.click(screen.getByRole("button", { name: "返回计划信息" }))
-    expect(screen.getByRole("button", { name: "下一步：客观诊断" })).toBeEnabled()
     release()
     await requestCompleted
 
     await vi.waitFor(() => {
       const workspace = JSON.parse(localStorage.getItem("knowbalance.role-d.workspace")!) as LearningWorkspaceState
-      expect(workspace.plans.find((plan) => plan.title === "循环专项")?.session.profile.goal).toBe("更新后的成绩统计目标")
+      expect(workspace.plans.find((plan) => plan.title === "循环专项")?.session.roleC?.runId).toBeTruthy()
       expect(workspace.plans.find((plan) => plan.title === "另一个计划")?.session.profile.goal).toBe("学会变量与赋值，能用变量保存和更新数据")
+      expect(workspace.plans.find((plan) => plan.title === "另一个计划")?.session.roleC).toBeUndefined()
     })
   })
 

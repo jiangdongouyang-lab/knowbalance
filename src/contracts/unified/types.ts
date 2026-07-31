@@ -11,8 +11,21 @@ export type LooseRecord = Record<string, any>
 
 export const UNIFIED_SCHEMA_VERSION = "1.0" as const
 
+export interface UnifiedObservedSegments {
+  profile: boolean
+  retrieval: boolean
+  content: boolean
+}
+
+/**
+ * Canonical public session projection consumed by Role D and debugging tools.
+ * It is not Role C's authoring input: C requires the lossless
+ * GenerateRoleCForRoleDInput contract (profile + RagResult + LearningPathNode).
+ */
 export interface UnifiedHandoff extends RoleDSession {
   schemaVersion: typeof UNIFIED_SCHEMA_VERSION
+  /** Data segments observed at normalization time; this is not a health check. */
+  observedSegments: UnifiedObservedSegments
 }
 
 export interface UnifiedRagResult {

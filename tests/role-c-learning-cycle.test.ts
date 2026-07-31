@@ -126,9 +126,9 @@ async function readyFixture(runId: string) {
   }
   const kb = await loadKnowledgeBase()
   const rag = await retrieveKnowledge({
-    query: "循环 列表 成绩统计",
+    query: "循环 列表 成绩统计 变量 条件判断",
     learnerLevel: profile.level,
-    topK: 3,
+    topK: 5,
   })
   const evidence = adaptRagResult(rag, {
     kb_version: kb.version,

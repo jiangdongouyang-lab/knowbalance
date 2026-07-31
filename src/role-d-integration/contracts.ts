@@ -1,5 +1,10 @@
 import type { RagResult } from "../rag/retriever"
 import type { LearnerProfile } from "../role-b-profile/types"
+import type {
+  LearnerProfileSnapshot,
+  LearningPathNode,
+  PublicRagEvidencePack,
+} from "../role-c-content"
 
 export interface RoleDPublicCitation {
   source_id: string
@@ -85,6 +90,14 @@ export interface RoleDReviewRecoverySummary {
   message: string
 }
 
+export interface RoleDFinalContentContext {
+  /** Final answer-free profile selected by the recoverable C pipeline. */
+  profileSnapshot: LearnerProfileSnapshot
+  profileVersion: string
+  pathNode: LearningPathNode
+  evidencePack: PublicRagEvidencePack
+}
+
 export type RoleCForRoleDResult =
   | {
       status: "ready"
@@ -98,6 +111,7 @@ export type RoleCForRoleDResult =
       }
       audit?: RoleDContentAuditSummary
       recovery?: RoleDReviewRecoverySummary
+      finalContext: RoleDFinalContentContext
     }
   | {
       status: "blocked" | "failed"
@@ -114,4 +128,6 @@ export interface GenerateRoleCForRoleDInput {
   ragResult: RagResult
   kbVersion: string
   runId: string
+  /** Formal B path consumed verbatim by C. */
+  pathNode: LearningPathNode
 }

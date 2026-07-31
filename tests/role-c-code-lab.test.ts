@@ -32,6 +32,7 @@ import {
   type CodeExecutionRequest,
   type CodeExecutionResult,
   type CodeLabRequest,
+  type RoleCContentProvider,
   type CodeRunner,
   type DockerCommandExecutor,
   type DockerCommandRequest,
@@ -60,7 +61,7 @@ async function buildContext(
   provider: DeterministicCodeLabContentProvider
 }> {
   const ragRequest = buildRagRequest(profile)
-  const rag = await retrieveKnowledge({ query: ragRequest.query, learnerLevel: profile.level, topK: 5 })
+  const rag = await retrieveKnowledge({ query: ragRequest.query, learnerLevel: profile.level, topK: 10 })
   const kb = await loadKnowledgeBase()
   const pack = adaptRagResult(rag, { kb_version: kb.version, rag_version: "rule-rag-0.1" })
   const rawPath = await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()
@@ -242,6 +243,145 @@ describe("role C phase-two trusted code-lab", () => {
       .toBe(originalReference)
   })
 
+  test("repairs only private lab material once after a trusted reference failure", async () => {
+    const { request, provider } = await buildContext()
+    const firstDraft = await provider.generateCodeLab(request)
+    const publicSnapshot = structuredClone(firstDraft.public_draft.payload)
+    let repairCalls = 0
+    const repairProvider: RoleCContentProvider = {
+      generateConceptLesson: provider.generateConceptLesson.bind(provider),
+      async generateCodeLab() {
+        return structuredClone(firstDraft)
+      },
+      async repairCodeLabAfterVerification(_request, draft, feedback) {
+        repairCalls += 1
+        expect(feedback).toEqual({
+          revision_round: 1,
+          issues: ["reference_solution 未通过全部隐藏测试"],
+          reference_failed: true,
+          reference_failure_codes: ["HT-1:assertion_failed"],
+          starter_status: "failed",
+        })
+        expect(draft.public_draft.payload).toEqual(publicSnapshot)
+        return structuredClone(draft)
+      },
+      generateAssessment: provider.generateAssessment.bind(provider),
+    }
+    let verificationCalls = 0
+    const pair = await generateCodeLab(request, repairProvider, {
+      async verifyCodeLab() {
+        verificationCalls += 1
+        return verificationCalls === 1
+          ? {
+              execution_verified: false,
+              issues: ["reference_solution 未通过全部隐藏测试"],
+              reference_failed: true,
+              reference_failure_codes: ["HT-1:assertion_failed"],
+              starter_status: "failed" as const,
+            }
+          : {
+              execution_verified: true,
+              issues: [],
+              runner_image_digest: RUNNER_DIGEST,
+              mutation_kill_rate: 1,
+              verified_test_count: 5,
+              objective_coverage: 1,
+            }
+      },
+    })
+
+    expect(repairCalls).toBe(1)
+    expect(verificationCalls).toBe(2)
+    expect(pair.public_artifact.status).toBe("ready")
+    expect(pair.public_artifact.payload).toEqual(publicSnapshot)
+  })
+
+  test("keeps surviving mutations as a nonblocking quality metric", async () => {
+    const { request, provider } = await buildContext()
+    const firstDraft = await provider.generateCodeLab(request)
+    const failedMutation = firstDraft.secure_draft.payload.mutation_variants[0]!
+    let repairCalls = 0
+    const repairProvider: RoleCContentProvider = {
+      generateConceptLesson: provider.generateConceptLesson.bind(provider),
+      async generateCodeLab() {
+        return structuredClone(firstDraft)
+      },
+      async repairCodeLabAfterVerification(_request, draft) {
+        repairCalls += 1
+        return structuredClone(draft)
+      },
+      generateAssessment: provider.generateAssessment.bind(provider),
+    }
+    let verificationCalls = 0
+    const pair = await generateCodeLab(request, repairProvider, {
+      async verifyCodeLab(_request, draft) {
+        verificationCalls += 1
+        expect(draft.secure_draft.payload.mutation_variants[0]!.code)
+          .toBe(failedMutation.code)
+        return {
+          execution_verified: true,
+          issues: [],
+          reference_failed: false,
+          reference_failure_codes: [],
+          starter_status: "failed" as const,
+          mutation_kill_rate: 0,
+          failed_mutations: [{
+            mutation_id: failedMutation.mutation_id,
+            status: "passed" as const,
+            failure_codes: [],
+            must_fail_test_ids: [...failedMutation.must_fail_test_ids],
+          }],
+        }
+      },
+    })
+
+    expect(repairCalls).toBe(0)
+    expect(verificationCalls).toBe(1)
+    expect(pair.public_artifact.status).toBe("ready")
+    expect(pair.secure_artifact.status).toBe("ready")
+    expect(pair.public_artifact.quality.mutation_kill_rate).toBe(0)
+  })
+
+  test("publishes without mutations and ignores optional mutation diagnostics in structure gates", async () => {
+    const { request, provider } = await buildContext()
+    const draft = await provider.generateCodeLab(request)
+    draft.secure_draft.payload.mutation_variants = []
+    draft.secure_draft.payload.objective_coverage.forEach((entry) => {
+      entry.mutation_ids = []
+    })
+
+    expect(validateCodeLabDraftStructure(request, draft).ok).toBe(true)
+    provider.generateCodeLab = async () => structuredClone(draft)
+    const withoutMutations = await generateCodeLab(
+      request,
+      provider,
+      new TrustedCodeLabVerifier(new FixtureIsolatedRunner()),
+    )
+    expect(withoutMutations.public_artifact.status).toBe("ready")
+    expect(withoutMutations.public_artifact.quality.mutation_kill_rate).toBeUndefined()
+
+    const diagnostic = structuredClone(draft)
+    diagnostic.secure_draft.payload.mutation_variants = [{
+      mutation_id: "MUT-OPTIONAL-DIAGNOSTIC",
+      code: "import os\ndef calculate_average(scores):\n    return 0",
+      objective_ids: ["OUTSIDE-SPEC"],
+      misconception_tag: "仅用于离线质量诊断",
+      must_fail_test_ids: ["UNKNOWN-HIDDEN-TEST"],
+    }]
+    diagnostic.secure_draft.payload.objective_coverage[0]!.mutation_ids = [
+      "MUT-UNKNOWN-COVERAGE",
+    ]
+    expect(validateCodeLabDraftStructure(request, diagnostic).ok).toBe(true)
+    provider.generateCodeLab = async () => structuredClone(diagnostic)
+    const withInvalidDiagnostic = await generateCodeLab(
+      request,
+      provider,
+      new TrustedCodeLabVerifier(new FixtureIsolatedRunner()),
+    )
+    expect(withInvalidDiagnostic.public_artifact.status).toBe("ready")
+    expect(withInvalidDiagnostic.public_artifact.quality.mutation_kill_rate).toBe(0)
+  })
+
   test("blocks ungrounded claims and value-level reference leaks before runner execution", async () => {
     const { request, provider } = await buildContext()
     const draft = await provider.generateCodeLab(request)
@@ -280,6 +420,32 @@ describe("role C phase-two trusted code-lab", () => {
       (entry) => entry.code === "hidden_test_input_leak",
     )).toBe(true)
 
+    const businessDictionaryInput = structuredClone(draft)
+    businessDictionaryInput.public_draft.payload.public_tests[0]!.input = {
+      args: [{ answer: 42, solution: "draft" }],
+      kwargs: {},
+    }
+    const businessDictionaryReport =
+      validateCodeLabDraftStructure(request, businessDictionaryInput)
+    expect(businessDictionaryReport.issues.some(
+      (entry) => entry.code === "public_secure_leak",
+    )).toBe(false)
+
+    const noInputContract = structuredClone(draft)
+    for (const test of noInputContract.secure_draft.payload.hidden_tests) {
+      test.input = null
+      test.expected = "Python 是一种通用编程语言。"
+    }
+    noInputContract.public_draft.payload.public_tests[0]!.input = null
+    noInputContract.public_draft.payload.public_tests[0]!.expected_behavior =
+      "输出 Python 是一种通用编程语言。"
+    const noInputReport =
+      validateCodeLabDraftStructure(request, noInputContract)
+    expect(noInputReport.issues.some(
+      (entry) => entry.code === "hidden_test_input_leak"
+        || entry.code === "hidden_test_expected_leak",
+    )).toBe(false)
+
     const splitReferenceLeak = structuredClone(draft)
     const reference =
       splitReferenceLeak.secure_draft.payload.reference_solution
@@ -305,6 +471,28 @@ describe("role C phase-two trusted code-lab", () => {
       (entry) => entry.code === "reference_solution_leak",
     )).toBe(true)
 
+    const starterDeltaLeak = structuredClone(draft)
+    starterDeltaLeak.public_draft.payload.reflection_questions = [
+      "total += score",
+      "count += 1",
+      "return total / count",
+    ]
+    const starterDeltaReport =
+      validateCodeLabDraftStructure(request, starterDeltaLeak)
+    expect(starterDeltaReport.issues.some(
+      (entry) => entry.code === "reference_solution_leak",
+    )).toBe(true)
+
+    const incompleteStarterDelta = structuredClone(draft)
+    incompleteStarterDelta.public_draft.payload.reflection_questions = [
+      "return total / count",
+    ]
+    const incompleteDeltaReport =
+      validateCodeLabDraftStructure(request, incompleteStarterDelta)
+    expect(incompleteDeltaReport.issues.some(
+      (entry) => entry.code === "reference_solution_leak",
+    )).toBe(false)
+
     const semanticHiddenInputLeak = structuredClone(draft)
     semanticHiddenInputLeak.secure_draft.payload.hidden_tests[0]!.input =
       [10, 20, 30, 40]
@@ -318,17 +506,43 @@ describe("role C phase-two trusted code-lab", () => {
     expect(semanticHiddenInputReport.issues.some(
       (entry) => entry.code === "hidden_test_input_leak",
     )).toBe(true)
+
+    const numericSubstring = structuredClone(draft)
+    numericSubstring.secure_draft.payload.hidden_tests[0]!.input = 200
+    numericSubstring.public_draft.payload.title = "实验流程编号 X2000"
+    const numericSubstringReport =
+      validateCodeLabDraftStructure(request, numericSubstring)
+    expect(numericSubstringReport.issues.some(
+      (entry) => entry.code === "hidden_test_input_leak",
+    )).toBe(false)
+
+    numericSubstring.public_draft.payload.reflection_questions = [
+      "隐藏测试输入为 200。",
+    ]
+    const explicitNumericLeakReport =
+      validateCodeLabDraftStructure(request, numericSubstring)
+    expect(explicitNumericLeakReport.issues.some(
+      (entry) => entry.code === "hidden_test_input_leak",
+    )).toBe(true)
   })
 
-  test("blocks a reference failure, a solved starter, or weak mutation tests", async () => {
+  test("blocks a reference failure or solved starter while reporting mutation quality", async () => {
     const { request, provider } = await buildContext()
-    const cases = ["reference_fails", "starter_passes", "mutation_survives"] as const
+    const cases = ["reference_fails", "starter_passes"] as const
     for (const mode of cases) {
       const pair = await generateCodeLab(request, provider, new TrustedCodeLabVerifier(new FixtureIsolatedRunner(mode)))
       expect(pair.public_artifact.status).toBe("blocked")
       expect(pair.public_artifact.blocked_reason?.code).toBe("BLOCKED_EXECUTION_UNVERIFIED")
       expect(JSON.stringify(pair.public_artifact)).not.toContain("HT-")
     }
+
+    const mutationPair = await generateCodeLab(
+      request,
+      provider,
+      new TrustedCodeLabVerifier(new FixtureIsolatedRunner("mutation_survives")),
+    )
+    expect(mutationPair.public_artifact.status).toBe("ready")
+    expect(mutationPair.public_artifact.quality.mutation_kill_rate).toBeLessThan(1)
   })
 
   test("keeps quiz answers and learner identity out of model-visible lab context", async () => {
@@ -455,22 +669,62 @@ describe("role C Docker runner boundary", () => {
     const executor = new CapturingExecutor()
     const runner = new DockerPythonCodeRunner({ docker_binary: "docker", image_id: RUNNER_DIGEST, executor })
 
-    const unsupported = minimalSuite()
-    unsupported.execution_contract.allowed_imports = ["random"]
-    const blocked = await runner.execute(executionRequest(unsupported, "def average_score(scores):\n    return 1"))
+    const forbidden = minimalSuite()
+    forbidden.execution_contract.allowed_imports = ["socket"]
+    const blocked = await runner.execute(executionRequest(forbidden, "def average_score(scores):\n    return 1"))
     expect(blocked.status).toBe("failed")
-    expect(blocked.failure_codes).toContain("static:unsupported_contract_import")
+    expect(blocked.failure_codes).toContain("static:forbidden_contract_import")
     expect(executor.requests).toHaveLength(0)
+
+    const randomSuite = minimalSuite()
+    randomSuite.execution_contract.allowed_imports = ["random"]
+    const randomPassed = await runner.execute(executionRequest(
+      randomSuite,
+      "import random\ndef average_score(scores):\n    return random.choice([1])",
+    ))
+    expect(randomPassed.status).toBe("passed")
+    expect(executor.requests).toHaveLength(1)
 
     const supported = minimalSuite()
     supported.execution_contract.allowed_imports = ["math"]
     const passed = await runner.execute(executionRequest(supported, "import math\ndef average_score(scores):\n    return math.fsum(scores)"))
     expect(passed.status).toBe("passed")
-    expect(executor.requests).toHaveLength(1)
+    expect(executor.requests).toHaveLength(2)
+
+    const inMemoryFile = minimalSuite()
+    inMemoryFile.execution_contract.allowed_imports = ["io"]
+    const memoryPassed = await runner.execute(executionRequest(
+      inMemoryFile,
+      "import io\ndef average_score(scores):\n    buffer = io.StringIO('1')\n    return int(buffer.read())",
+    ))
+    expect(memoryPassed.status).toBe("passed")
+    expect(executor.requests).toHaveLength(3)
 
     const schema = await Bun.file("schemas/role-c-content/code_lab_draft.schema.json").json()
     expect(schema.$defs.execution_contract.properties.allowed_imports.items.enum)
       .toEqual([...PLATFORM_PYTHON_IMPORT_ALLOWLIST])
+  })
+
+  test("allows ordinary class constructors while the container keeps attribute escape blocked", async () => {
+    const executor = new CapturingExecutor(1)
+    const runner = new DockerPythonCodeRunner({
+      docker_binary: "docker",
+      image_id: RUNNER_DIGEST,
+      executor,
+    })
+    const result = await runner.execute(executionRequest(
+      minimalSuite(),
+      [
+        "class Counter:",
+        "    def __init__(self, value):",
+        "        self.value = value",
+        "",
+        "def average_score(scores):",
+        "    return Counter(len(scores)).value",
+      ].join("\n"),
+    ))
+    expect(result.status).toBe("passed")
+    expect(executor.requests).toHaveLength(1)
   })
 
   test("resolves the dedicated Docker image to its immutable local image ID", async () => {

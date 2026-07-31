@@ -2204,7 +2204,7 @@ function pathFor(nodeId: string, sourceId: string, objectiveId: string): Learnin
       tier_1_count: 1,
       tier_2_count: 0,
       tier_3_count: 0,
-      required_modalities: ["mcq"],
+      required_modalities: ["trace"],
     },
   }
 }

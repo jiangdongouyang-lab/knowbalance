@@ -69,6 +69,28 @@ export interface RagEvidencePack {
   results: RagEvidenceItem[]
 }
 
+/** Answer-free projection that may cross C's public boundary. */
+export interface PublicRagEvidencePack extends Omit<RagEvidencePack, "results"> {
+  results: Array<Omit<RagEvidenceItem, "quiz_seeds">>
+}
+
+export function projectPublicRagEvidencePack(
+  pack: RagEvidencePack,
+): PublicRagEvidencePack {
+  return {
+    schema_version: pack.schema_version,
+    retrieval_id: pack.retrieval_id,
+    query: pack.query,
+    learner_level: pack.learner_level,
+    top_k: pack.top_k,
+    match_status: pack.match_status,
+    kb_version: pack.kb_version,
+    rag_version: pack.rag_version,
+    results: pack.results.map(({ quiz_seeds: _quizSeeds, ...item }) =>
+      structuredClone(item)),
+  }
+}
+
 export interface EvidenceGapRequest {
   schema_version: SchemaVersion
   request_id: string

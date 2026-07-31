@@ -15,7 +15,7 @@ Role D 提供 KnowBalance 的独立 Web 学习应用，负责把本机用户资�
 
 - **A：知识与检索**：Python 基础知识库、真实 facts/examples/quiz seeds 和规则检索。当前是关键词、同义词及规则扩展，不是 embedding 服务。
 - **B：画像构建**：`background-collector → self-assessor → objective-diagnostician → profile-builder` 的真实 prompt 与确定性参考实现。B 按 `objective > self > background` 合并证据并记录冲突。
-- **C：资源生成**：`concept-tutor`、`code-lab`、`tiered-evaluator` 通过服务端 `runCPipeline()` 生成并验证讲义、代码实验和分阶测评。
+- **C：资源生成**：`concept-tutor`、`code-lab`、`tiered-evaluator` 通过可恢复审核流水线生成讲义、代码实验和分阶测评。
 - **D：学习交互**：采集用户/计划输入，展示画像、路径、检索证据、C 资源、Agent trace，保存作答和阶段，并提供本地恢复。
 
 浏览器只接收 public artifacts、公开 citations 和 trace。以下安全信息不会进入前端：
@@ -68,7 +68,7 @@ Role D 按 C 返回的动态 `modality` 渲染：
 
 当前 D 已把公开作答转换为 C 的 `SubmissionEnvelope`，并通过 `/api/role-c/submit` 消费 C 返回的公开正式评分、逐目标掌握度及 `remediate/reinforce/advance/reprofile` 决策。D 会校验 run/session/learner/form/attempt/submission 身份和响应结构，不在浏览器计算分数，也不会恢复本地缓存或导入文件中的“正式评分”。
 
-当前接线仍是本地 Vite dev/preview middleware：默认 deterministic Provider 使用进程内学习周期和参考 runner，服务重启后需要重新生成计划；真实 Docker 代码执行、持久化 C 后端、C→B 正式学习进展投递和下一轮自动生成仍由 C/后端负责，D 不伪造这些能力。
+当前接线使用本地 Vite dev/preview middleware 作为 D→C HTTP 适配层。模型模式使用 Docker Runner 和 `.tmp/role-c-runtime` 原子文件存储，学习周期可在服务重启后继续。没有配置 Provider 时生成接口明确返回配置缺失。
 
 ## 本地用户与计划存储
 
@@ -121,11 +121,9 @@ LearningWorkspaceState
 
 ### Week 2 当前接入状态
 
-- **已接入 D**：A/B 审核发布门禁与仲裁可视化；C 公开正式评分、逐目标掌握度和动态决策展示；评分响应身份/结构校验；跨计划异步隔离；浏览器缓存和进度导入的正式评分降级。
-- **仍由 C/后端完成**：digest-pinned OCI 学生代码执行和公开执行摘要；跨重启持久化会话/掌握度；C→B 正式学习进展投递；评分后自动准备、审核并发布下一轮；独立认证后端。
-- **范围限制**：默认 deterministic Provider 仍以 K007/K009/K018 成绩统计金标路径为主；其他目标不满足证据或审核要求时会诚实 blocked。
-
-当前 C 使用官方确定性 Provider、运行时 Schema、可信 verifier 和 public/secure 发布门禁，不需要模型 API Key，也不等同于实时大模型生成。顶部“A/B/C 本次实跑”表示一次同步调用已真实执行，不代表已接入实时事件流。K007 + K009 + K018 成绩统计目标是已验证金标路径；不支持的目标会明确 blocked，不回退成伪造内容。
+- **D 交互**：A/B 审核结果、C 公开正式评分、逐目标掌握度、动态决策、身份校验和跨计划隔离均已接入。
+- **C 后端**：digest-pinned Docker 代码执行、跨重启会话/掌握度、学习进展投递、审核恢复和下一轮生成已实现。
+- **Provider**：模型模式按 B 的正式路径动态生成；确定性 Provider 只用于显式离线回归。
 
 ## 运行与验证
 
@@ -150,7 +148,7 @@ bun install --frozen-lockfile
 bun run role-d:dev -- --host 127.0.0.1 --port 5174
 ```
 
-然后打开 `http://127.0.0.1:5174/`。网页壳本身不依赖 API Key 或 Docker；没有 `.env.role-c.local` 时，生成接口使用确定性本地参考路径。B/C 可以先调试页面、输入、诊断、画像、路径和状态展示；创建计划仍会同步调用本地生成接口，非金标目标可能被如实 blocked。
+然后打开 `http://127.0.0.1:5174/`。网页壳本身不依赖 API Key 或 Docker；创建学习计划会调用本地 C 接口，未配置 Provider 时返回明确的配置错误。
 
 如果要复现模型 Provider + Docker Runner，再执行：
 
@@ -160,7 +158,7 @@ copy .env.role-c.example .env.role-c.local
 
 填写 `.env.role-c.local` 中的 `ROLE_C_MODEL_ENDPOINT`、`ROLE_C_MODEL_ID` 和本机 API Key；安装并启动 Docker 后运行 `bun run docker:role-c:build`、`bun run docker:role-c:doctor`，再重启 Vite。不要提交 `.env.role-c.local`。
 
-请把运行环境、Provider 模式、runId 和页面显示的终局 reason 一并发给 D/C；“本地确定性参考路径”与“模型 Provider + Docker”不是同一条验收证据。
+联调记录包含运行环境、Provider 模式、runId 和页面终局 reason。模型 Provider + Docker 是通用目标的端到端验收路径。
 
 生产构建位于 `dist/role-d-ui/`。当前 Vite 开发/预览服务提供 `/api/role-c/generate` 与 `/api/role-c/submit`；部署纯静态 `dist` 时需要由 C/后端部署等价 API、可信 runner 和持久化存储，不能把 C 的安全逻辑打包进浏览器。
 

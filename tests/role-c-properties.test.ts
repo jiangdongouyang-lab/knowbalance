@@ -49,7 +49,7 @@ const DIGEST = `sha256:${"e".repeat(64)}`
 const profile: LearnerProfile = {
   learner_id: "property-learner",
   level: "beginner",
-  known_concepts: ["变量"],
+  known_concepts: ["变量", "条件判断"],
   weak_concepts: ["循环", "列表"],
   goal: "完成成绩统计程序",
 }

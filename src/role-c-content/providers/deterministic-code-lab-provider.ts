@@ -41,7 +41,10 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
       (target) => target.source_id,
     )
     if (isPassingCountTargetSet(targetSourceIds)) {
-      return buildPassingCountCodeLabDraft(request)
+      return ensureRequiredFactCoverage(
+        request,
+        buildPassingCountCodeLabDraft(request),
+      )
     }
     if (!sameOrderedTargets(
       targetSourceIds,
@@ -126,7 +129,10 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
       {
         mutation_id: "MUT-HARDCODED",
         code: "def average_score(scores):\n    return 80",
-        objective_ids: [objectiveIds[2] ?? objectiveIds.at(-1)!],
+        objective_ids: [
+          objectiveIds[1] ?? objectiveIds[0],
+          objectiveIds[2] ?? objectiveIds.at(-1)!,
+        ],
         misconception_tag: "hardcodes_visible_example",
         must_fail_test_ids: ["HT-O2-SINGLE", "HT-O2-MIXED"],
       },
@@ -148,7 +154,7 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
       }
     })
 
-    return {
+    return ensureRequiredFactCoverage(request, {
       public_draft: {
         payload: {
           lab_id: labId,
@@ -209,7 +215,7 @@ export class DeterministicCodeLabContentProvider implements RoleCContentProvider
           })),
         },
       },
-    }
+    })
   }
 
   async generateAssessment(request: Parameters<RoleCContentProvider["generateAssessment"]>[0]): Promise<AssessmentDraft> {
@@ -485,6 +491,64 @@ function sameOrderedTargets(
 ): boolean {
   return actual.length === expected.length
     && actual.every((sourceId, index) => sourceId === expected[index])
+}
+
+function ensureRequiredFactCoverage(
+  request: CodeLabRequest,
+  draft: CodeLabDraft,
+): CodeLabDraft {
+  const result = structuredClone(draft)
+  const payload = result.public_draft.payload
+  const coverageByObjective = new Map(
+    payload.objective_coverage.map((entry) => [entry.objective_id, entry]),
+  )
+  for (const target of request.generation_spec.targets) {
+    const source = request.evidence_pack.results.find((entry) =>
+      entry.source_id === target.source_id)
+    const facts = target.required_fact_ids.map((factId) =>
+      source?.facts.find((fact) => fact.fact_id === factId))
+    if (!source || facts.some((fact) => !fact)) {
+      throw new ModelProviderUnavailableError(
+        `code-lab 缺少目标必要事实 ${target.source_id}`,
+      )
+    }
+    const blockId = coverageByObjective.get(target.objective_id)
+      ?.instruction_block_ids[0]
+    const block = payload.instructions.find((entry) =>
+      entry.block_id === blockId)
+    if (!block || block.block_type !== "paragraph") {
+      throw new ModelProviderUnavailableError(
+        `code-lab 缺少目标说明块 ${target.objective_id}`,
+      )
+    }
+    for (const fact of facts) {
+      if (!fact) continue
+      const alreadyCited = block.claims.some((entry) =>
+        entry.citations.some((citation) =>
+          citation.source_id === fact.source_id
+            && citation.fact_id === fact.fact_id))
+      if (!alreadyCited) {
+        block.claims.push(claim(
+          `${target.objective_id}-LAB-CLAIM-${fact.fact_id}`,
+          fact.content,
+          cite(fact.source_id, fact.fact_id, "supports"),
+        ))
+      }
+      if (!block.text.includes(fact.content)) {
+        block.text = `${block.text}\n${fact.content}`
+      }
+    }
+  }
+  payload.used_evidence = deduplicate([
+    ...payload.instructions.flatMap((block) =>
+      "claims" in block
+        ? block.claims.flatMap((entry) => entry.citations)
+        : []),
+    ...payload.public_tests.flatMap((test) => test.citations),
+    ...payload.hint_ladders.flatMap((ladder) =>
+      ladder.hints.flatMap((hint) => hint.citations)),
+  ])
+  return result
 }
 
 function adaptiveInstruction(request: CodeLabRequest, title: string, fact: string): string {

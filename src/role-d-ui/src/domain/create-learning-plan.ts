@@ -5,6 +5,8 @@ import { synthesizeProfile } from "../../../role-b-profile/profile-synthesizer"
 import type { BackgroundEvidence, ObjectiveDiagnosisEvidence, SelfAssessmentEvidence } from "../../../role-b-profile/types"
 import type { RagResult, RagResultItem } from "../../../rag/retriever"
 import type { RoleCForRoleDResult } from "../../../role-d-integration/contracts"
+import { buildInitialRoleCContext } from "../../../role-d-integration/initial-learning-path"
+import type { LearnerProfileSnapshot, LearningPathNode, PublicRagEvidencePack } from "../../../role-c-content"
 import { adaptHandoff } from "./adapt-handoff"
 import { requestRoleCContent } from "./role-c-client"
 import type { RoleDSession } from "./types"
@@ -21,6 +23,8 @@ export interface NewLearningPlanInput {
 }
 
 export interface PlanDiagnosis {
+  availability: "available" | "unavailable"
+  unavailableReason?: string
   items: PlanDiagnosisItem[]
   sourceId: string
   factId: string
@@ -51,7 +55,7 @@ export interface CreatedLearningPlan {
 
 export type RoleCRequester = (input: Parameters<typeof requestRoleCContent>[0]) => Promise<RoleCForRoleDResult>
 
-export async function createLearningPlan(input: NewLearningPlanInput, requestRoleC: RoleCRequester = requestRoleCContent): Promise<CreatedLearningPlan> {
+export async function createLearningPlan(input: NewLearningPlanInput, _requestRoleC: RoleCRequester = requestRoleCContent): Promise<CreatedLearningPlan> {
   const knowledgeBase = await loadKnowledgeBase()
   const evidence = buildEvidence(input, [])
   const synthesis = synthesizeProfile({ ...evidence, knowledgeBase })
@@ -59,13 +63,7 @@ export async function createLearningPlan(input: NewLearningPlanInput, requestRol
   const diagnosisRagResult = expandDiagnosisEvidence(ragResult, knowledgeBase)
   const diagnosis = selectDiagnosis(diagnosisRagResult, knowledgeBase)
   const sessionId = `session-${input.learnerId}-${Date.now()}`
-  const roleC = await requestRoleC({
-    profile: synthesis.profile,
-    ragResult,
-    kbVersion: knowledgeBase.version,
-    runId: `RUN-${sessionId}`,
-  })
-  const session = buildSession(input, synthesis, diagnosisRagResult, diagnosis, roleC, sessionId)
+  const session = buildSession(input, synthesis, diagnosisRagResult, diagnosis, undefined, sessionId)
   return { source: "real-ab", input, diagnosis, session }
 }
 
@@ -89,12 +87,34 @@ export async function evaluatePlanDiagnosis(plan: CreatedLearningPlan, answers: 
   const synthesis = synthesizeProfile({ ...evidence, knowledgeBase })
   const { rag_result: ragResult } = await executeProfileRetrieval(synthesis.profile)
   const diagnosisRagResult = expandDiagnosisEvidence(ragResult, knowledgeBase)
-  const roleC = await requestRoleC({
+  const runId = `RUN-${plan.session.sessionId}-diagnosed`
+  const initialContext = await buildInitialRoleCContext({
     profile: synthesis.profile,
     ragResult,
-    kbVersion: knowledgeBase.version,
-    runId: `RUN-${plan.session.sessionId}-diagnosed`,
+    knowledgeBase,
   })
+  const roleC: RoleCForRoleDResult = initialContext.ok
+    ? await requestRoleC({
+        profile: synthesis.profile,
+        ragResult: initialContext.ragResult,
+        kbVersion: knowledgeBase.version,
+        runId,
+        pathNode: initialContext.pathNode,
+      })
+    : {
+        status: "blocked",
+        artifacts: [],
+        workflow: [{
+          id: `${runId}-initial-path-blocked`,
+          agent: "B-initial-path-planner",
+          stage: "初始学习路径",
+          status: "blocked",
+          summary: initialContext.reason,
+          timestamp: new Date().toISOString(),
+        }],
+        runId,
+        reason: `${initialContext.code}: ${initialContext.reason}`,
+      }
   const session = buildSession(plan.input, synthesis, diagnosisRagResult, plan.diagnosis, roleC, plan.session.sessionId)
   session.view.diagnosisAnswers = answerMap
   session.view.diagnosisAnswer = answerMap[firstId] ?? ""
@@ -209,22 +229,41 @@ type DiagnosisCandidate = Pick<RagResultItem, "sourceId" | "title" | "difficulty
 function selectDiagnosis(ragResult: RagResult, knowledgeBase: KnowledgeBase): PlanDiagnosis {
   const items: PlanDiagnosisItem[] = []
   const usedQuizKeys = new Set<string>()
-  const supplemental = supplementalDiagnosisCandidates(ragResult.results, knowledgeBase)
 
   const targetMatches = ragResult.results.filter((item) => hasDiagnosisTargetMatch(item, ragResult.query, knowledgeBase))
   const focusedTarget = targetMatches.length === 1 ? targetMatches[0] : undefined
   if (focusedTarget) {
     addDiagnosisCandidates(items, [focusedTarget], usedQuizKeys, "all")
-    if (items.length === 0) throw new Error("A 精确命中的知识点没有可直接作答的选择题，请让 A 补充该知识点的 quizItems")
+    if (items.length === 0) return unavailableDiagnosis(
+      focusedTarget,
+      "当前目标没有知识库选择题，本轮不产生客观诊断证据。",
+    )
   }
-  if (items.length > 0) return { ...items[0]!, items }
+  if (items.length > 0) return { ...items[0]!, availability: "available", items }
   addDiagnosisCandidates(items, ragResult.results, usedQuizKeys, "one-per-source")
-  if (items.length === 0) {
-    addDiagnosisCandidates(items, supplemental, usedQuizKeys, "one-per-source")
-  }
+  if (items.length > 0) return { ...items[0]!, availability: "available", items }
+  return unavailableDiagnosis(
+    ragResult.results[0],
+    "当前检索范围没有可判分的知识库选择题，本轮不产生客观诊断证据。",
+  )
+}
 
-  if (items.length > 0) return { ...items[0]!, items }
-  throw new Error("A 检索结果中没有可直接作答的知识库选择题，请补充已学或薄弱知识后重试")
+function unavailableDiagnosis(
+  target: DiagnosisCandidate | undefined,
+  reason: string,
+): PlanDiagnosis {
+  return {
+    availability: "unavailable",
+    unavailableReason: reason,
+    items: [],
+    sourceId: target?.sourceId ?? "",
+    factId: "",
+    concept: target?.title ?? "当前学习目标",
+    difficulty: target?.difficulty ?? "beginner",
+    question: "",
+    options: [],
+    answer: "",
+  }
 }
 
 function hasDiagnosisTargetMatch(item: RagResultItem, query: string, knowledgeBase: KnowledgeBase): boolean {
@@ -279,30 +318,6 @@ function hasDirectTargetMatch(item: RagResultItem): boolean {
   return item.retrievalTrace.matchedKeywords.length > 0 || directFields.length > 0 || scores.keyword > 0 || scores.title > 0 || scores.facts > 0 || scores.practiceTasks > 0 || scores.bonus > 0
 }
 
-function supplementalDiagnosisCandidates(ragItems: RagResultItem[], knowledgeBase: KnowledgeBase): DiagnosisCandidate[] {
-  const byId = new Map(knowledgeBase.items.map((item) => [item.sourceId, item]))
-  const dependents = new Map<string, string[]>()
-  for (const item of knowledgeBase.items) {
-    for (const prerequisite of item.prerequisites) {
-      dependents.set(prerequisite, [...(dependents.get(prerequisite) ?? []), item.sourceId])
-    }
-  }
-
-  const ordered: DiagnosisCandidate[] = []
-  const visited = new Set<string>()
-  const queue = ragItems.map((item) => item.sourceId)
-  while (queue.length > 0 && visited.size < knowledgeBase.items.length) {
-    const sourceId = queue.shift()!
-    if (visited.has(sourceId)) continue
-    visited.add(sourceId)
-    const item = byId.get(sourceId)
-    if (!item) continue
-    ordered.push(item)
-    queue.push(...item.prerequisites, ...(dependents.get(sourceId) ?? []))
-  }
-  return ordered
-}
-
 function normalizeDiagnosis(item: DiagnosisCandidate, quiz: KnowledgeQuizItem, index: number): PlanDiagnosisItem {
   return {
     id: `${quiz.sourceId}-${quiz.factId}-${index + 1}`,
@@ -321,14 +336,23 @@ function buildSession(
   synthesis: ReturnType<typeof synthesizeProfile>,
   ragResult: RagResult,
   diagnosis: PlanDiagnosis,
-  roleC: RoleCForRoleDResult,
+  roleC: RoleCForRoleDResult | undefined,
   sessionId = `session-${input.learnerId}-${Date.now()}`,
 ): RoleDSession {
-  const path = buildPath(ragResult, synthesis.provenance.concepts)
-  const artifacts = roleC.artifacts
-  const roleCWorkflow = roleC.workflow.length > 0
-    ? roleC.workflow
-    : [{
+  const finalContext = roleC?.status === "ready" ? roleC.finalContext : undefined
+  const displayEvidence = finalContext
+    ? mergeFinalEvidenceWithDiagnosis(finalContext.evidencePack, ragResult)
+    : ragResult
+  const finalProfile = finalContext?.profileSnapshot
+  const path = finalContext
+    ? buildFinalPath(finalContext.pathNode, finalContext.evidencePack, finalContext.profileSnapshot)
+    : buildPath(ragResult, synthesis.provenance.concepts)
+  const artifacts = roleC?.artifacts ?? []
+  const roleCWorkflow = !roleC
+    ? []
+    : roleC.workflow.length > 0
+      ? roleC.workflow
+      : [{
         id: `${roleC.runId}-blocked`,
         agent: "role-c-pipeline",
         stage: "个性化资源",
@@ -343,20 +367,20 @@ function buildSession(
     diagnosis,
     session_id: sessionId,
     updated_at: new Date().toISOString(),
-    b_profile: synthesis.profile,
+    b_profile: finalProfile ?? synthesis.profile,
     b_provenance: synthesis.provenance,
-    a_rag_result: ragResult,
+    a_rag_result: displayEvidence,
     learning_path: path,
     workflow_events: [
       { id: "ab-background", agent: "input-normalizer", stage: "输入标准化", status: "completed", summary: `已整理${input.educationContext || "学习者"}的目标与时间预算。`, timestamp: "刚刚" },
       { id: "ab-profile", agent: "synthesizeProfile()", stage: "B 画像合成", status: "completed", summary: `B 本地函数已生成 ${synthesis.profile.level} 画像。`, timestamp: "刚刚" },
-      { id: "ab-rag", agent: "executeProfileRetrieval()", stage: "A 知识检索", status: "completed", summary: `A 本地检索器已返回 ${ragResult.results.length} 个候选知识点。`, timestamp: "刚刚" },
+      { id: "ab-rag", agent: "executeProfileRetrieval()", stage: "A 知识检索", status: "completed", summary: `A 本地检索器已返回 ${displayEvidence.results.length} 个候选知识点。`, timestamp: "刚刚" },
       ...roleCWorkflow,
-      ...auditWorkflowEvents(roleC),
+      ...(roleC ? auditWorkflowEvents(roleC) : []),
     ],
     c_artifacts: artifacts,
-    ...(roleC.audit ? { audit: roleC.audit } : {}),
-    ...(roleC.status === "ready" && roleC.learningSession ? {
+    ...(roleC?.audit ? { audit: roleC.audit } : {}),
+    ...(roleC?.status === "ready" && roleC.learningSession ? {
       roleC: {
         runId: roleC.runId,
         learningSessionId: roleC.learningSession.sessionId,
@@ -370,10 +394,12 @@ function buildSession(
       currentStage: "diagnosis",
       maxUnlockedStage: "diagnosis",
       activeArtifactKind: "lesson",
-      selectedSourceId: ragResult.results[0]?.sourceId ?? "",
+      selectedSourceId: finalContext?.pathNode.target_source_ids[0]
+        ?? ragResult.results[0]?.sourceId
+        ?? "",
       remediationStarted: false,
-      goalDraft: input.goal,
-      selfRatingDraft: input.selfRating,
+      goalDraft: finalProfile?.goal ?? input.goal,
+      selfRatingDraft: finalProfile?.level ?? input.selfRating,
       diagnosisAnswer: "",
       diagnosisAnswers: {},
       diagnosisSubmitted: false,
@@ -452,6 +478,75 @@ function buildPath(
   return nodes.sort((left, right) => order[left.status] - order[right.status])
 }
 
+function buildFinalPath(
+  pathNode: LearningPathNode,
+  evidence: PublicRagEvidencePack,
+  profile: LearnerProfileSnapshot,
+): RoleDSession["path"] {
+  const evidenceBySource = new Map(
+    evidence.results.map((item) => [item.source_id, item]),
+  )
+  const sourceIds = [...new Set([
+    ...pathNode.prerequisite_source_ids,
+    ...pathNode.target_source_ids,
+  ])]
+  let currentAssigned = false
+  return sourceIds.flatMap((sourceId) => {
+    const item = evidenceBySource.get(sourceId)
+    if (!item) return []
+    const completed = profile.known_concepts.some((concept) =>
+      sameConcept(concept, item.title))
+    const weak = profile.weak_concepts.some((concept) =>
+      sameConcept(concept, item.title))
+    const status = completed
+      ? "completed" as const
+      : currentAssigned
+        ? "upcoming" as const
+        : "current" as const
+    if (status === "current") currentAssigned = true
+    return [{
+      id: sourceId,
+      title: item.title,
+      difficulty: item.difficulty,
+      status,
+      reason: completed
+        ? "B 画像将其标记为已掌握。"
+        : weak
+          ? "B 画像将其标记为待补强。"
+          : item.match_reason,
+    }]
+  })
+}
+
+function mergeFinalEvidenceWithDiagnosis(
+  finalEvidence: PublicRagEvidencePack,
+  diagnosisEvidence: RagResult,
+): Omit<PublicRagEvidencePack, "results"> & {
+  results: Array<PublicRagEvidencePack["results"][number] | RagResultItem>
+} {
+  const finalSourceIds = new Set(
+    finalEvidence.results.map((item) => item.source_id),
+  )
+  const diagnosisOnly = diagnosisEvidence.results.filter((item) =>
+    !finalSourceIds.has(item.sourceId))
+  return {
+    ...structuredClone(finalEvidence),
+    top_k: finalEvidence.results.length + diagnosisOnly.length,
+    results: [
+      ...structuredClone(finalEvidence.results),
+      ...structuredClone(diagnosisOnly),
+    ],
+  }
+}
+
 function normalize(value: string): string {
   return value.trim().toLowerCase()
+}
+
+function sameConcept(left: string, right: string): boolean {
+  const normalizedLeft = normalize(left).replace(/\s+/g, "")
+  const normalizedRight = normalize(right).replace(/\s+/g, "")
+  return normalizedLeft === normalizedRight
+    || (normalizedLeft.length >= 2 && normalizedRight.includes(normalizedLeft))
+    || (normalizedRight.length >= 2 && normalizedLeft.includes(normalizedRight))
 }
