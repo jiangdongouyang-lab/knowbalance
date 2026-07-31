@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import Ajv from "ajv"
 import { retrieveKnowledge } from "../src/rag/retriever"
-import { auditGeneratedContent, buildEvidenceIndex } from "../src/fact-audit/auditor"
+import { auditGeneratedContent, auditGeneratedContentWithSemantic, buildEvidenceIndex } from "../src/fact-audit/auditor"
+import { adaptRagResult } from "../src/role-c-content/contracts/evidence-pack"
 
 describe("RAG result schema", () => {
   test("accepts the real retrieveKnowledge output including object examples, quiz items and retrieval trace", async () => {
@@ -127,5 +128,124 @@ describe("fact audit MVP", () => {
 
     expect(result.status).toBe("reject")
     expect(result.checkedClaims[0]).toMatchObject({ verdict: "external_knowledge", blockId: "block-1" })
+  })
+
+  test("audits against a frozen evidence pack without depending on a fresh RAG result", async () => {
+    const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
+    const evidencePack = adaptRagResult(ragResult, {
+      kb_version: "python-basic@0.2.0",
+      rag_version: "rule-rag@0.1",
+      retrieval_id: "RAG-FROZEN-TEST",
+    })
+
+    const result = auditGeneratedContent({
+      artifactId: "artifact-frozen-evidence",
+      evidencePack,
+      generatedContent: {
+        blocks: [
+          {
+            blockId: "block-1",
+            text: "for 循环常用于遍历序列中的元素。",
+            citations: [{ source_id: "K007", fact_id: "F001" }],
+          },
+        ],
+      },
+    })
+
+    expect(result.status).toBe("pass")
+    expect(result.evidence).toMatchObject({
+      kind: "frozen_evidence_pack",
+      retrieval_id: "RAG-FROZEN-TEST",
+      content_hash: expect.stringMatching(/^sha256:/),
+    })
+  })
+
+  test("reports a frozen evidence mismatch when a caller provides the wrong expected hash", async () => {
+    const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
+    const evidencePack = adaptRagResult(ragResult, {
+      kb_version: "python-basic@0.2.0",
+      rag_version: "rule-rag@0.1",
+      retrieval_id: "RAG-FROZEN-TEST",
+    })
+
+    const result = auditGeneratedContent({
+      artifactId: "artifact-frozen-mismatch",
+      evidencePack,
+      expectedEvidenceContentHash: "sha256:not-the-pack-hash",
+      generatedContent: {
+        blocks: [
+          {
+            blockId: "block-1",
+            text: "for 循环常用于遍历序列中的元素。",
+            citations: [{ source_id: "K007", fact_id: "F001" }],
+          },
+        ],
+      },
+    })
+
+    expect(result.status).toBe("reject")
+    expect(result.checkedClaims).toEqual([])
+    expect(result.conflicts[0]).toMatchObject({
+      blockId: "__evidence_pack__",
+      issue: "冻结证据包哈希不匹配",
+    })
+  })
+
+  test("lets a semantic audit port reject a claim that passes lexical overlap", async () => {
+    const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
+    const result = await auditGeneratedContentWithSemantic({
+      input: {
+        artifactId: "artifact-semantic-reject",
+        ragResult,
+        generatedContent: {
+          blocks: [
+            {
+              blockId: "block-1",
+              text: "for 循环常用于遍历序列中的元素。",
+              citations: [{ source_id: "K007", fact_id: "F001" }],
+            },
+          ],
+        },
+      },
+      semanticAuditPort: {
+        async auditClaim() {
+          return { verdict: "unsupported", confidence: 0.95, reason: "claim negates the cited fact" }
+        },
+      },
+    })
+
+    expect(result.status).toBe("reject")
+    expect(result.checkedClaims[0]).toMatchObject({
+      blockId: "block-1",
+      verdict: "semantic_unsupported",
+      reason: expect.stringContaining("claim negates"),
+    })
+  })
+
+  test("keeps a lexically supported claim passing when the semantic audit port agrees", async () => {
+    const ragResult = await retrieveKnowledge({ query: "怎么让代码重复执行", learnerLevel: "beginner", topK: 3 })
+    const result = await auditGeneratedContentWithSemantic({
+      input: {
+        artifactId: "artifact-semantic-pass",
+        ragResult,
+        generatedContent: {
+          blocks: [
+            {
+              blockId: "block-1",
+              text: "for 循环常用于遍历序列中的元素。",
+              citations: [{ source_id: "K007", fact_id: "F001" }],
+            },
+          ],
+        },
+      },
+      semanticAuditPort: {
+        async auditClaim() {
+          return { verdict: "supported", confidence: 0.99, reason: "same meaning" }
+        },
+      },
+    })
+
+    expect(result.status).toBe("pass")
+    expect(result.checkedClaims[0]).toMatchObject({ verdict: "supported", semantic: { confidence: 0.99 } })
   })
 })

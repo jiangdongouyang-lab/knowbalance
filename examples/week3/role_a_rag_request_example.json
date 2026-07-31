@@ -1,0 +1,11 @@
+{
+  "learner_profile": {
+    "learner_id": "stu_week3_demo",
+    "level": "beginner",
+    "known_concepts": ["变量", "条件判断"],
+    "weak_concepts": ["循环", "列表"],
+    "goal": "完成成绩统计程序"
+  },
+  "query": "初学者，不会循环，需要完成成绩统计程序",
+  "top_k": 3
+}

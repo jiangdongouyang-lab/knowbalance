@@ -1,0 +1,11 @@
+{
+  "artifactId": "role-c-week3-demo",
+  "evidence_hash": "sha256:ec46623c9c8075df2a3505dedcc91672af15e9f0c0a90f9d3192b92e0d43c99b",
+  "blocks": [
+    {
+      "blockId": "claim-1",
+      "text": "for 循环常用于遍历序列中的元素。",
+      "citations": [{ "source_id": "K007", "fact_id": "F001", "relation": "supports" }]
+    }
+  ]
+}

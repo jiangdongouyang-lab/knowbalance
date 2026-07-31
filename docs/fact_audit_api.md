@@ -57,7 +57,7 @@ const input = adaptRoleCBlocksToFactAuditInput({
 const audit = auditGeneratedContent(input)
 ```
 
-如果 C 已经输出 `ArtifactEnvelope<ConceptLessonPayload>`，A 可以直接用：
+如果 C 已经输出 `ArtifactEnvelope<ConceptLessonPayload | CodeLabPublicPayload | AssessmentPublicPayload>`，A 可以直接用：
 
 ```ts
 import { adaptRoleCArtifactToFactAuditInput } from "../src/fact-audit/adapters/role-c-block-adapter"
@@ -66,16 +66,37 @@ const input = adaptRoleCArtifactToFactAuditInput({ artifact, ragResult })
 const audit = auditGeneratedContent(input)
 ```
 
+如果 C 已经冻结了生成时使用的 evidence pack，优先直接把冻结包交给 A，避免审核阶段重新检索导致证据漂移：
+
+```ts
+const audit = auditGeneratedContent({
+  artifactId: "concept-lesson-1",
+  evidencePack,
+  expectedEvidenceContentHash,
+  generatedContent: { blocks },
+})
+```
+
+如需接入 embedding / LLM 语义审核，用可插拔端口包一层：
+
+```ts
+const audit = await auditGeneratedContentWithSemantic({
+  input,
+  semanticAuditPort,
+})
+```
+
 ## 4. 当前审核规则
 
 MVP 先做硬门禁：
 
 1. 每个知识性 block 必须有 citation。
-2. citation 必须存在于当前 `ragResult`。
+2. citation 必须存在于当前 `ragResult` 或冻结 `evidencePack`。
 3. claim 文本必须和引用 fact 有词面支撑。
 4. 明显知识库外内容会被驳回。
+5. 可选语义审核端口可在词面通过后继续判定 `semantic_unsupported`。
 
-当前不是 embedding/LLM 语义审核。Week2 先保证可测、可拦截、可联调。
+当前已提供 embedding/LLM 语义审核的可插拔接口；默认路径仍是确定性硬门禁，不强依赖外部模型。
 
 ## 5. 验证命令
 

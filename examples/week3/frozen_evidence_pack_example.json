@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "retrieval_id": "RAG-W3-DEMO",
+  "query": "初学者，不会循环，需要完成成绩统计程序",
+  "learner_level": "beginner",
+  "top_k": 3,
+  "match_status": "strong",
+  "kb_version": "python-basic@0.2.0",
+  "rag_version": "rule-rag@0.1",
+  "results": [
+    {
+      "source_id": "K007",
+      "title": "for 循环",
+      "difficulty": "beginner",
+      "rank_score": 31,
+      "match_reason": "query 命中关键词：循环",
+      "snippet": "for 循环常用于遍历序列中的元素。",
+      "facts": [
+        { "source_id": "K007", "fact_id": "F001", "content": "for 循环常用于遍历序列中的元素。" }
+      ],
+      "examples": [],
+      "practice_tasks": [],
+      "quiz_seeds": [],
+      "source_file": "knowledge_base/python_basic/K007_for_loop.md",
+      "retrieval_trace": {
+        "matched_keywords": ["循环"],
+        "matched_fields": ["keywords", "taskIntent"],
+        "difficulty_match": true,
+        "score_breakdown": { "keyword": 10, "title": 0, "facts": 0, "practice_tasks": 0, "difficulty": 3, "bonus": 18 }
+      }
+    }
+  ]
+}

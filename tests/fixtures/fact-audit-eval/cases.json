@@ -1,0 +1,1218 @@
+{
+  "suite_id": "role-a-fact-audit-eval-v1",
+  "description": "Role A 60-case fact-audit benchmark for citation, frozen evidence, and semantic hallucination gates.",
+  "cases": [
+    {
+      "case_id": "correct_for_f001",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_for_f001",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环常用于遍历序列中的元素。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_for_f002",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_for_f002",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环适合对列表、字符串等对象逐个处理。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_for_f003",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_for_f003",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "range 可生成整数序列配合 for 重复执行固定次数。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_project_f001",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_project_f001",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩统计项目可综合练习列表、循环和函数。",
+            "citations": [
+              {
+                "source_id": "K018",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_project_f002",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_project_f002",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩列表可以用 for 循环逐项累计求和。",
+            "citations": [
+              {
+                "source_id": "K018",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_project_f003",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_project_f003",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "把统计逻辑封装为函数可提升复用性。",
+            "citations": [
+              {
+                "source_id": "K018",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_list_f001",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_list_f001",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表可用于保存多个有序元素。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_list_f002",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_list_f002",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表元素可以通过索引访问。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_list_f003",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_list_f003",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "append 可向列表末尾添加元素。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_for_repeat",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_for_repeat",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "range 可生成整数序列配合 for 重复执行固定次数。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_score_sum",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_score_sum",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩列表可以用 for 循环逐项累计求和。",
+            "citations": [
+              {
+                "source_id": "K018",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "correct_append",
+      "category": "correct_citation",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-correct_append",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "append 可向列表末尾添加元素。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_01",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_01",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环常用于遍历序列中的元素。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_02",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_02",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表可用于保存多个有序元素。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_03",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_03",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩列表可以用 for 循环逐项累计求和。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_04",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_04",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "append 可向列表末尾添加元素。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_05",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_05",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表元素可以通过索引访问。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_06",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_06",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "range 可生成整数序列配合 for 重复执行固定次数。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_07",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_07",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩统计项目可综合练习列表、循环和函数。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_08",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_08",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "把统计逻辑封装为函数可提升复用性。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_09",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_09",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环适合对列表、字符串等对象逐个处理。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "missing_10",
+      "category": "missing_citation",
+      "expected_status": "revise",
+      "artifact": {
+        "artifactId": "eval-missing_10",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表保存多个有序元素。",
+            "citations": []
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_01",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_01",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环常用于遍历序列中的元素。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_02",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_02",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表可用于保存多个有序元素。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_03",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_03",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩列表可以用 for 循环逐项累计求和。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_04",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_04",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "append 可向列表末尾添加元素。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F004",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_05",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_05",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "range 可生成整数序列配合 for 重复执行固定次数。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F005",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_06",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_06",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表元素可以通过索引访问。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F006",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_07",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_07",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩统计项目可综合练习列表、循环和函数。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F007",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_08",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_08",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "把统计逻辑封装为函数可提升复用性。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F008",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_09",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_09",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环适合对列表、字符串等对象逐个处理。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F009",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "fake_10",
+      "category": "fake_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-fake_10",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩列表可以用 for 循环逐项累计求和。",
+            "citations": [
+              {
+                "source_id": "K999",
+                "fact_id": "F010",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_dict",
+      "category": "wrong_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-wrong_dict",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "字典使用键值对保存数据。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_if",
+      "category": "wrong_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-wrong_if",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "if 语句用于根据条件选择分支。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_input",
+      "category": "wrong_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-wrong_input",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "input 函数用于读取键盘输入。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_string",
+      "category": "wrong_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-wrong_string",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "字符串可以保存文本内容。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_exception",
+      "category": "wrong_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-wrong_exception",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "try except 可捕获运行错误。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_file",
+      "category": "wrong_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-wrong_file",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "open 函数可以读取文件内容。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_module",
+      "category": "wrong_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-wrong_module",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "import 语句可以导入模块。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "wrong_float",
+      "category": "wrong_citation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-wrong_float",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "浮点数用于表示小数。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "external_transformer",
+      "category": "external_knowledge",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-external_transformer",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "Transformer 通过自注意力机制学习上下文关系。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "external_sql",
+      "category": "external_knowledge",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-external_sql",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "SQL 可以查询数据库中的表。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "external_cnn",
+      "category": "external_knowledge",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-external_cnn",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "CNN 常用于图像识别任务。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "external_pandas",
+      "category": "external_knowledge",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-external_pandas",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "Pandas DataFrame 可用于表格数据分析。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "external_async",
+      "category": "external_knowledge",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-external_async",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "async 和 await 可实现并发网络请求。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "external_http",
+      "category": "external_knowledge",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-external_http",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "HTTP API 可以通过 requests 调用。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "external_git",
+      "category": "external_knowledge",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-external_git",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "git 可用于版本控制和 GitHub 协作。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "external_numpy",
+      "category": "external_knowledge",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-external_numpy",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "NumPy 数组适合进行向量化计算。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "case_id": "semantic_mutation_01",
+      "category": "semantic_mutation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-semantic_mutation_01",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环常用于遍历序列中的元素，所以 for 循环不能用于遍历序列中的元素。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "unsupported"
+    },
+    {
+      "case_id": "semantic_mutation_02",
+      "category": "semantic_mutation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-semantic_mutation_02",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表可用于保存多个有序元素，所以列表不能保存多个有序元素。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "unsupported"
+    },
+    {
+      "case_id": "semantic_mutation_03",
+      "category": "semantic_mutation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-semantic_mutation_03",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩列表可以用 for 循环逐项累计求和，所以成绩列表不能用 for 循环累计求和。",
+            "citations": [
+              {
+                "source_id": "K018",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "unsupported"
+    },
+    {
+      "case_id": "semantic_mutation_04",
+      "category": "semantic_mutation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-semantic_mutation_04",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "append 可向列表末尾添加元素，所以 append 不能向列表末尾添加元素。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "unsupported"
+    },
+    {
+      "case_id": "semantic_mutation_05",
+      "category": "semantic_mutation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-semantic_mutation_05",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "range 可生成整数序列配合 for 重复执行固定次数，所以 range 不能生成整数序列。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "unsupported"
+    },
+    {
+      "case_id": "semantic_mutation_06",
+      "category": "semantic_mutation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-semantic_mutation_06",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表元素可以通过索引访问，所以列表元素不能通过索引访问。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "unsupported"
+    },
+    {
+      "case_id": "semantic_mutation_07",
+      "category": "semantic_mutation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-semantic_mutation_07",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "把统计逻辑封装为函数可提升复用性，所以函数封装会降低复用性。",
+            "citations": [
+              {
+                "source_id": "K018",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "unsupported"
+    },
+    {
+      "case_id": "semantic_mutation_08",
+      "category": "semantic_mutation",
+      "expected_status": "reject",
+      "artifact": {
+        "artifactId": "eval-semantic_mutation_08",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环适合对列表、字符串等对象逐个处理，所以 for 循环不适合逐个处理列表或字符串。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "unsupported"
+    },
+    {
+      "case_id": "semantic_paraphrase_01",
+      "category": "semantic_paraphrase",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-semantic_paraphrase_01",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "for 循环常用于遍历序列中的元素。",
+            "citations": [
+              {
+                "source_id": "K007",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "supported"
+    },
+    {
+      "case_id": "semantic_paraphrase_02",
+      "category": "semantic_paraphrase",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-semantic_paraphrase_02",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "列表可用于保存多个有序元素。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F001",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "supported"
+    },
+    {
+      "case_id": "semantic_paraphrase_03",
+      "category": "semantic_paraphrase",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-semantic_paraphrase_03",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "成绩列表可以用 for 循环逐项累计求和。",
+            "citations": [
+              {
+                "source_id": "K018",
+                "fact_id": "F002",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "supported"
+    },
+    {
+      "case_id": "semantic_paraphrase_04",
+      "category": "semantic_paraphrase",
+      "expected_status": "pass",
+      "artifact": {
+        "artifactId": "eval-semantic_paraphrase_04",
+        "blocks": [
+          {
+            "blockId": "b1",
+            "text": "append 可向列表末尾添加元素。",
+            "citations": [
+              {
+                "source_id": "K009",
+                "fact_id": "F003",
+                "relation": "supports"
+              }
+            ]
+          }
+        ]
+      },
+      "semantic_verdict": "supported"
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "artifactId": "role-c-week3-demo",
+  "status": "pass",
+  "checkedClaims": [
+    {
+      "blockId": "claim-1",
+      "claim": "for 循环常用于遍历序列中的元素。",
+      "citations": [{ "source_id": "K007", "fact_id": "F001" }],
+      "verdict": "supported",
+      "evidence": "for 循环常用于遍历序列中的元素。",
+      "reason": "生成内容与引用事实存在足够词面重叠。"
+    }
+  ],
+  "conflicts": [],
+  "evidence": {
+    "kind": "frozen_evidence_pack",
+    "retrieval_id": "RAG-W3-DEMO",
+    "content_hash": "sha256:ec46623c9c8075df2a3505dedcc91672af15e9f0c0a90f9d3192b92e0d43c99b"
+  }
+}

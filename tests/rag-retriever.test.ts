@@ -65,4 +65,23 @@ describe("RAG retriever", () => {
     expect(result.results.map((item) => item.sourceId)).toContain("K009")
     expect(result.results[0].retrievalTrace.matchedFields).toContain("synonyms")
   })
+
+  test("expands the extended synonym table for condition, display, error, and dict queries", async () => {
+    const synonymCases = [
+      { query: "我想知道如果成绩大于60就输出及格", expected: "K006" },
+      { query: "怎么把结果显示在屏幕上", expected: "K004" },
+      { query: "程序报错了怎么处理", expected: "K016" },
+      { query: "用键值对保存学生信息", expected: "K010" },
+      { query: "把多个文本拼成一段话", expected: "K012" },
+      { query: "怎么把数据保存到文件里", expected: "K015" },
+    ]
+
+    for (const evaluation of synonymCases) {
+      const result = await retrieveKnowledge({ query: evaluation.query, topK: 3 })
+      expect(
+        result.results.map((item) => item.sourceId),
+        `${evaluation.query} 应命中 ${evaluation.expected}`,
+      ).toContain(evaluation.expected)
+    }
+  })
 })

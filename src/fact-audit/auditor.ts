@@ -1,14 +1,52 @@
-import { buildEvidenceIndex } from "./evidence-index"
-import type { CheckedClaim, FactAuditConflict, FactAuditInput, FactAuditResult, FactAuditStatus } from "./types"
+import { contentHash } from "../role-c-content/contracts/common"
+import { buildEvidenceIndex, buildEvidenceIndexFromPack } from "./evidence-index"
+import type { CheckedClaim, EvidenceIndex, FactAuditConflict, FactAuditInput, FactAuditResult, FactAuditStatus } from "./types"
 
-const EXTERNAL_KNOWLEDGE_TERMS = ["Transformer", "自注意力", "神经网络", "梯度下降", "CNN"]
+const EXTERNAL_KNOWLEDGE_TERMS = [
+  "Transformer", "自注意力", "神经网络", "梯度下降", "CNN",
+  "Pandas", "NumPy", "matplotlib", "数据框", "DataFrame",
+  "λ", "yield",
+  "闭包", "作用域", "global", "nonlocal",
+  "正则表达式", "re模块", "正则",
+  "多线程", "多进程", "并发", "async", "await",
+  "数据库", "SQL", "MySQL", "SQLite",
+  "GUI", "图形界面", "tkinter",
+  "API", "HTTP", "网络请求", "requests",
+  "单元测试", "unittest", "pytest",
+  "pip", "虚拟环境", "venv", "conda",
+  "git", "版本控制", "GitHub",
+  "AI", "机器学习", "深度学习", "大模型", "LLM",
+]
 const TOKEN_PATTERN = /[A-Za-z]+|[\u4e00-\u9fff]{2,}/g
 
 export { buildEvidenceIndex }
 export type { FactAuditInput, FactAuditResult } from "./types"
 
+export interface SemanticAuditPort {
+  auditClaim(input: {
+    claim: string
+    evidence: string
+    citations: { source_id: string; fact_id: string }[]
+  }): Promise<{
+    verdict: "supported" | "unsupported" | "uncertain"
+    confidence: number
+    reason: string
+  }>
+}
+
 export function auditGeneratedContent(input: FactAuditInput): FactAuditResult {
-  const evidenceIndex = buildEvidenceIndex(input.ragResult)
+  const evidence = resolveAuditEvidence(input)
+  if (evidence.error) {
+    return {
+      artifactId: input.artifactId,
+      status: "reject",
+      checkedClaims: [],
+      conflicts: [evidence.error],
+      evidence: evidence.metadata,
+    }
+  }
+
+  const evidenceIndex = evidence.index
   const checkedClaims: CheckedClaim[] = []
   const conflicts: FactAuditConflict[] = []
 
@@ -88,11 +126,103 @@ export function auditGeneratedContent(input: FactAuditInput): FactAuditResult {
     status: deriveStatus(checkedClaims),
     checkedClaims,
     conflicts,
+    evidence: evidence.metadata,
+  }
+}
+
+export async function auditGeneratedContentWithSemantic(input: {
+  input: FactAuditInput
+  semanticAuditPort: SemanticAuditPort
+}): Promise<FactAuditResult> {
+  const base = auditGeneratedContent(input.input)
+  if (base.status === "reject") return base
+
+  const checkedClaims: CheckedClaim[] = []
+  const semanticConflicts: FactAuditConflict[] = []
+  for (const claim of base.checkedClaims) {
+    if (claim.verdict !== "supported" || !claim.evidence) {
+      checkedClaims.push(claim)
+      continue
+    }
+
+    const semantic = await input.semanticAuditPort.auditClaim({
+      claim: claim.claim,
+      evidence: claim.evidence,
+      citations: claim.citations,
+    })
+    if (semantic.verdict === "supported") {
+      checkedClaims.push({ ...claim, semantic })
+      continue
+    }
+
+    checkedClaims.push({
+      ...claim,
+      verdict: "semantic_unsupported",
+      semantic,
+      reason: `语义审核未通过：${semantic.reason}`,
+    })
+    semanticConflicts.push({
+      blockId: claim.blockId,
+      claim: claim.claim,
+      issue: "语义审核未通过",
+      expectedEvidence: semantic.reason,
+    })
+  }
+
+  return {
+    ...base,
+    status: checkedClaims.some((claim) => claim.verdict === "semantic_unsupported") ? "reject" : base.status,
+    checkedClaims,
+    conflicts: [...base.conflicts, ...semanticConflicts],
+  }
+}
+
+function resolveAuditEvidence(input: FactAuditInput): {
+  index: EvidenceIndex
+  metadata: NonNullable<FactAuditResult["evidence"]>
+  error?: FactAuditConflict
+} {
+  if (input.evidencePack) {
+    const actualHash = contentHash(input.evidencePack)
+    const metadata = {
+      kind: "frozen_evidence_pack" as const,
+      retrieval_id: input.evidencePack.retrieval_id,
+      content_hash: actualHash,
+    }
+
+    if (input.expectedEvidenceContentHash && input.expectedEvidenceContentHash !== actualHash) {
+      return {
+        index: new Map(),
+        metadata,
+        error: {
+          blockId: "__evidence_pack__",
+          claim: input.evidencePack.retrieval_id,
+          issue: "冻结证据包哈希不匹配",
+          expectedEvidence: `expected=${input.expectedEvidenceContentHash}; actual=${actualHash}`,
+        },
+      }
+    }
+
+    return { index: buildEvidenceIndexFromPack(input.evidencePack), metadata }
+  }
+
+  if (input.ragResult) {
+    return { index: buildEvidenceIndex(input.ragResult), metadata: { kind: "rag_result" } }
+  }
+
+  return {
+    index: new Map(),
+    metadata: { kind: "rag_result" },
+    error: {
+      blockId: "__evidence__",
+      claim: input.artifactId,
+      issue: "缺少审核证据：必须提供 ragResult 或冻结 evidencePack",
+    },
   }
 }
 
 function deriveStatus(checkedClaims: CheckedClaim[]): FactAuditStatus {
-  if (checkedClaims.some((claim) => claim.verdict === "unsupported" || claim.verdict === "external_knowledge")) return "reject"
+  if (checkedClaims.some((claim) => claim.verdict === "unsupported" || claim.verdict === "external_knowledge" || claim.verdict === "semantic_unsupported")) return "reject"
   if (checkedClaims.some((claim) => claim.verdict === "missing_citation")) return "revise"
   return "pass"
 }

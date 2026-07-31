@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test"
+import { mkdtemp, writeFile } from "node:fs/promises"
+import { join } from "node:path"
+import { tmpdir } from "node:os"
+import { retrieveKnowledge } from "../src/rag/retriever"
+import { contentHash } from "../src/role-c-content/contracts/common"
+import { adaptRagResult } from "../src/role-c-content/contracts/evidence-pack"
 
 const REQUIRED_ACCEPTANCE_PHRASES = [
   "角色 A Week 2 验收报告",
@@ -48,6 +54,36 @@ describe("Role A week-two fact-audit assets", () => {
     expect(output.input_file).toBe("examples/role_c_artifact_example.json")
     expect(output.audit.status).toBe("pass")
     expect(output.audit.checkedClaims[0]).toMatchObject({ verdict: "supported" })
+  })
+
+  test("audits a Role C JSON file against a frozen evidence pack instead of re-retrieving", async () => {
+    const root = await mkdtemp(join(tmpdir(), "knowbalance-audit-cli-"))
+    const ragResult = await retrieveKnowledge({ query: "初学者，不会循环，需要完成成绩统计程序", learnerLevel: "beginner", topK: 3 })
+    const evidencePack = adaptRagResult(ragResult, {
+      kb_version: "python-basic@0.2.0",
+      rag_version: "rule-rag@0.1",
+      retrieval_id: "RAG-CLI-FROZEN",
+    })
+    const evidenceFile = join(root, "evidence-pack.json")
+    await writeFile(evidenceFile, JSON.stringify(evidencePack), "utf8")
+
+    const proc = Bun.spawn([
+      "bun",
+      "scripts/audit-role-c-json.ts",
+      "examples/role_c_artifact_example.json",
+      "--evidence",
+      evidenceFile,
+      "--expected-evidence-hash",
+      contentHash(evidencePack),
+    ], { stdout: "pipe", stderr: "pipe" })
+    const [stdout, stderr, exitCode] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text(), proc.exited])
+
+    expect(stderr).toBe("")
+    expect(exitCode).toBe(0)
+    const output = JSON.parse(stdout)
+    expect(output.audit.status).toBe("pass")
+    expect(output.evidence_source).toEqual({ kind: "frozen_evidence_pack", retrieval_id: "RAG-CLI-FROZEN" })
+    expect(output.audit.evidence.content_hash).toBe(contentHash(evidencePack))
   })
 
   test("audits revise and reject Role C example artifacts from disk", async () => {
