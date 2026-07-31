@@ -99,10 +99,13 @@ describe("Role C learning-cycle persistence", () => {
       .toEqual(scored)
 
     for (const directory of ["runs", "sessions", "submissions"]) {
-      expect((await stat(join(root, directory))).mode & 0o777).toBe(0o700)
+      expectPrivateMode(await stat(join(root, directory)).then((value) => value.mode & 0o777), "directory")
       const files = (await readdir(join(root, directory))).filter((entry) => entry.endsWith(".json"))
       expect(files).toHaveLength(1)
-      expect((await stat(join(root, directory, files[0]!))).mode & 0o777).toBe(0o600)
+      expectPrivateMode(
+        await stat(join(root, directory, files[0]!)).then((value) => value.mode & 0o777),
+        "file",
+      )
     }
 
     const runFile = join(root, "runs", (await readdir(join(root, "runs")))[0]!)
@@ -279,8 +282,11 @@ describe("Role C mastery file persistence", () => {
     const reopened = new AtomicFileMasteryStateStore({ root_directory: root })
     expect(await reopened.load("learner-hash", "profile-v1", "O1")).toEqual(first)
     expect(await reopened.load("learner-hash", "profile-v1", "O2")).toEqual(second)
-    expect((await stat(root)).mode & 0o777).toBe(0o700)
-    expect((await stat(join(root, "mastery-state.json"))).mode & 0o777).toBe(0o600)
+    expectPrivateMode(await stat(root).then((value) => value.mode & 0o777), "directory")
+    expectPrivateMode(
+      await stat(join(root, "mastery-state.json")).then((value) => value.mode & 0o777),
+      "file",
+    )
   })
 
   test("a conflicting objective aborts the complete mastery batch", async () => {
@@ -368,6 +374,15 @@ describe("Role C mastery file persistence", () => {
       .toBe(false)
   })
 })
+
+
+function expectPrivateMode(mode: number, kind: "directory" | "file"): void {
+  if (process.platform === "win32") {
+    expect([0o700, 0o600, 0o666]).toContain(mode)
+    return
+  }
+  expect(mode).toBe(kind === "directory" ? 0o700 : 0o600)
+}
 
 function runRecord(): LearningRunRecord {
   const evidencePack: RagEvidencePack = {

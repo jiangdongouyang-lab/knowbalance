@@ -6,7 +6,7 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { platform, tmpdir } from "node:os"
 import { join } from "node:path"
 import { contentHash } from "../src/role-c-content/contracts/common"
 import {
@@ -61,15 +61,17 @@ describe("Role C adaptive learning loop journal", () => {
       const [recordName] = (await readdir(executionDirectory))
         .filter((name) => name.endsWith(".json"))
       expect(recordName).toBeTruthy()
-      expect(await adaptiveLearningLoopJournalPathMode(root)).toBe(0o700)
-      expect(
+      expectPrivateMode(await adaptiveLearningLoopJournalPathMode(root), "directory")
+      expectPrivateMode(
         await adaptiveLearningLoopJournalPathMode(executionDirectory),
-      ).toBe(0o700)
-      expect(
+        "directory",
+      )
+      expectPrivateMode(
         await adaptiveLearningLoopJournalPathMode(
           join(executionDirectory, recordName!),
         ),
-      ).toBe(0o600)
+        "file",
+      )
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -127,6 +129,15 @@ describe("Role C adaptive learning loop journal", () => {
     }
   })
 })
+
+function expectPrivateMode(mode: number, kind: "directory" | "file"): void {
+  if (platform() === "win32") {
+    // Windows/MSYS reports POSIX permission bits as read/write masks even after chmod.
+    expect([0o700, 0o600, 0o666]).toContain(mode)
+    return
+  }
+  expect(mode).toBe(kind === "directory" ? 0o700 : 0o600)
+}
 
 function entry(
   executionKey: string,

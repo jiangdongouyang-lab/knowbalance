@@ -5,6 +5,7 @@ import { generateRoleCForRoleD } from "../src/role-d-integration/role-c-service"
 import { adaptHandoff } from "../src/role-d-ui/src/domain/adapt-handoff"
 import { exportProgressJson } from "../src/role-d-ui/src/domain/progress-file"
 import { isValidRoleDSession } from "../src/role-d-ui/src/domain/session-store"
+import { unifiedBoundaryReport } from "../src/contracts/unified"
 
 interface LearnerProfile {
   learner_id: string
@@ -123,6 +124,14 @@ const handoff = {
       workflow_events: roleDSession.workflow.length,
       evidence_gaps: roleDSession.evidenceGaps,
     },
+  },
+  unified_contract: {
+    ...unifiedBoundaryReport(roleDSession),
+    schema_version: unifiedBoundaryReport(roleDSession).schemaVersion,
+    adapter: "normalizeUnifiedHandoff",
+    canonical_fields: unifiedBoundaryReport(roleDSession).canonicalFields,
+    evidence_gaps: unifiedBoundaryReport(roleDSession).evidenceGaps,
+    package: "src/contracts/unified",
   },
 }
 
