@@ -91,6 +91,9 @@ export function normalizeUnifiedHandoff(input: LooseRecord): UnifiedHandoff {
 export function normalizeUnifiedProfile(profile: LooseRecord): RoleDSession["profile"] {
   return {
     learnerId: profile.learner_id ?? profile.learnerId ?? "anonymous_learner",
+    ...(profile.profile_version || profile.profileVersion ? {
+      profileVersion: profile.profile_version ?? profile.profileVersion,
+    } : {}),
     level: normalizeUnifiedDifficulty(profile.level),
     knownConcepts: profile.known_concepts ?? profile.knownConcepts ?? [],
     weakConcepts: profile.weak_concepts ?? profile.weakConcepts ?? [],
@@ -168,8 +171,18 @@ export function normalizeUnifiedArtifact(artifact: LooseRecord, validCitationIds
       prompt: item.prompt ?? "",
       options: item.options ?? [],
       ...(item.optionIds || item.option_ids ? { optionIds: item.optionIds ?? item.option_ids } : {}),
+      ...(item.maxScore || item.max_score ? { maxScore: item.maxScore ?? item.max_score } : {}),
       ...(item.starterCode || item.starter_code ? { starterCode: item.starterCode ?? item.starter_code } : {}),
       citations: (item.citations ?? []).map((citation: LooseRecord) => normalizeUnifiedCitation(citation)),
+    })),
+    sections: (artifact.sections ?? []).map((section: LooseRecord) => ({
+      id: section.id ?? "",
+      title: section.title ?? "",
+      kind: section.kind ?? "paragraph",
+      ...(section.text ? { text: section.text } : {}),
+      ...(section.code ? { code: section.code } : {}),
+      ...(section.language ? { language: section.language } : {}),
+      citations: (section.citations ?? []).map((citation: LooseRecord) => normalizeUnifiedCitation(citation)),
     })),
     citations,
     evidenceStatus: citationsAreValid ? "grounded" : "gap",
@@ -274,6 +287,11 @@ function normalizeRoleCSession(value: LooseRecord) {
 
 function normalizeUnifiedDiagnosis(diagnosis: LooseRecord = {}): RoleDSession["diagnosis"] {
   return {
+    availability: diagnosis.availability
+      ?? (Array.isArray(diagnosis.items) && diagnosis.items.length === 0 ? "unavailable" : "available"),
+    ...(diagnosis.unavailableReason || diagnosis.unavailable_reason ? {
+      unavailableReason: diagnosis.unavailableReason ?? diagnosis.unavailable_reason,
+    } : {}),
     items: diagnosis.items?.map((item: LooseRecord, index: number) => ({
       id: item.id ?? `${item.sourceId ?? item.source_id ?? "UNKNOWN"}-${item.factId ?? item.fact_id ?? "UNKNOWN"}-${index + 1}`,
       sourceId: item.sourceId ?? item.source_id ?? "UNKNOWN",

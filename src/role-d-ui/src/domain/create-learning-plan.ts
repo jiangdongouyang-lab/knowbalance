@@ -55,6 +55,67 @@ export interface CreatedLearningPlan {
 
 export type RoleCRequester = (input: Parameters<typeof requestRoleCContent>[0]) => Promise<RoleCForRoleDResult>
 
+export function createLearningPlanDraft(input: NewLearningPlanInput): CreatedLearningPlan {
+  const sessionId = `session-${input.learnerId}-${Date.now()}`
+  const diagnosis: PlanDiagnosis = {
+    items: [],
+    availability: "unavailable",
+    sourceId: "UNKNOWN",
+    factId: "UNKNOWN",
+    concept: "等待 A 返回诊断题",
+    difficulty: input.selfRating,
+    question: "",
+    options: [],
+    answer: "",
+  }
+  const session = adaptHandoff({
+    eventMode: "live",
+    planSource: "real-ab",
+    planInput: input,
+    diagnosis,
+    session_id: sessionId,
+    updated_at: new Date().toISOString(),
+    b_profile: {
+      learner_id: input.learnerId,
+      level: input.selfRating,
+      known_concepts: input.knownConcepts,
+      weak_concepts: input.weakConcepts,
+      goal: input.goal,
+    },
+    a_rag_result: { query: "", topK: 0, results: [] },
+    learning_path: [],
+    workflow_events: [{
+      id: `${sessionId}-draft`,
+      agent: "role-d-ui",
+      stage: "计划草稿",
+      status: "pending",
+      summary: "计划已保存在本机，等待用户确认后运行 ABC。",
+      timestamp: "刚刚",
+    }],
+    c_artifacts: [],
+    assessmentGraded: false,
+    decision: { next: "remediate", reason: "等待运行 ABC 后生成学习路径。" },
+    view: {
+      currentStage: "onboarding",
+      maxUnlockedStage: "onboarding",
+      activeArtifactKind: "lesson",
+      selectedSourceId: "",
+      remediationStarted: false,
+      goalDraft: input.goal,
+      selfRatingDraft: input.selfRating,
+      diagnosisAnswer: "",
+      diagnosisAnswers: {},
+      diagnosisSubmitted: false,
+      assessmentAnswers: {},
+      assessmentSubmitted: false,
+      assessmentStatus: "idle",
+      assessmentMessage: "",
+      detailDrawer: "none",
+    },
+  })
+  return { source: "real-ab", input, diagnosis, session }
+}
+
 export async function createLearningPlan(input: NewLearningPlanInput, _requestRoleC: RoleCRequester = requestRoleCContent): Promise<CreatedLearningPlan> {
   const knowledgeBase = await loadKnowledgeBase()
   const evidence = buildEvidence(input, [])
@@ -63,7 +124,7 @@ export async function createLearningPlan(input: NewLearningPlanInput, _requestRo
   const diagnosisRagResult = expandDiagnosisEvidence(ragResult, knowledgeBase)
   const diagnosis = selectDiagnosis(diagnosisRagResult, knowledgeBase)
   const sessionId = `session-${input.learnerId}-${Date.now()}`
-  const session = buildSession(input, synthesis, diagnosisRagResult, diagnosis, undefined, sessionId)
+  const session = buildSession(input, synthesis, diagnosisRagResult, diagnosis, undefined, sessionId, knowledgeBase)
   return { source: "real-ab", input, diagnosis, session }
 }
 
@@ -115,7 +176,7 @@ export async function evaluatePlanDiagnosis(plan: CreatedLearningPlan, answers: 
         runId,
         reason: `${initialContext.code}: ${initialContext.reason}`,
       }
-  const session = buildSession(plan.input, synthesis, diagnosisRagResult, plan.diagnosis, roleC, plan.session.sessionId)
+  const session = buildSession(plan.input, synthesis, diagnosisRagResult, plan.diagnosis, roleC, plan.session.sessionId, knowledgeBase)
   session.view.diagnosisAnswers = answerMap
   session.view.diagnosisAnswer = answerMap[firstId] ?? ""
   session.view.diagnosisSubmitted = true
@@ -338,6 +399,7 @@ function buildSession(
   diagnosis: PlanDiagnosis,
   roleC: RoleCForRoleDResult | undefined,
   sessionId = `session-${input.learnerId}-${Date.now()}`,
+  knowledgeBase: KnowledgeBase,
 ): RoleDSession {
   const finalContext = roleC?.status === "ready" ? roleC.finalContext : undefined
   const displayEvidence = finalContext
@@ -346,7 +408,7 @@ function buildSession(
   const finalProfile = finalContext?.profileSnapshot
   const path = finalContext
     ? buildFinalPath(finalContext.pathNode, finalContext.evidencePack, finalContext.profileSnapshot)
-    : buildPath(ragResult, synthesis.provenance.concepts)
+    : buildPath(ragResult, synthesis.provenance.concepts, knowledgeBase)
   const artifacts = roleC?.artifacts ?? []
   const roleCWorkflow = !roleC
     ? []
@@ -451,20 +513,18 @@ function auditStatusToWorkflow(status: "pass" | "revise" | "reject"): RoleDSessi
 function buildPath(
   ragResult: RagResult,
   concepts: ReturnType<typeof synthesizeProfile>["provenance"]["concepts"],
-) {
-  let currentAssigned = false
-  const nodes = ragResult.results.slice(0, 5).map((item): RoleDSession["path"][number] => {
+  knowledgeBase: KnowledgeBase,
+): RoleDSession["path"] {
+  const nodes = ragResult.results.slice(0, 5).map((item) => {
     const conceptEvidence = concepts.find((concept) =>
       concept.matched_source_ids.includes(item.sourceId)
       && normalize(concept.concept) === normalize(item.title))
     const completed = conceptEvidence?.bucket === "known"
-    const status = completed ? "completed" : currentAssigned ? "upcoming" : "current"
-    if (status === "current") currentAssigned = true
     return {
       id: item.sourceId,
       title: item.title,
       difficulty: item.difficulty,
-      status,
+      completed,
       reason: completed
         ? "B 画像将其标记为已掌握。"
         : conceptEvidence?.bucket === "weak"
@@ -474,8 +534,46 @@ function buildPath(
           : item.reason,
     }
   })
-  const order: Record<RoleDSession["path"][number]["status"], number> = { completed: 0, current: 1, upcoming: 2 }
-  return nodes.sort((left, right) => order[left.status] - order[right.status])
+
+  const selectedIds = new Set(nodes.map((node) => node.id))
+  const prereqByNode = new Map(nodes.map((node) => {
+    const item = knowledgeBase.items.find((candidate) => candidate.sourceId === node.id)
+    return [node.id, (item?.prerequisites ?? []).filter((sourceId) => selectedIds.has(sourceId))]
+  }))
+
+  // 未完成节点按知识库前置关系稳定拓扑排序；已完成节点保持原顺序并排在最前
+  const completedNodes = nodes.filter((node) => node.completed)
+  const pendingNodes = nodes.filter((node) => !node.completed)
+  const pendingOrdered = topoSortPendingNodes(pendingNodes, prereqByNode)
+
+  return [...completedNodes, ...pendingOrdered].map((node, index) => ({
+    id: node.id,
+    title: node.title,
+    difficulty: node.difficulty,
+    status: node.completed ? "completed" as const : index === completedNodes.length ? "current" as const : "upcoming" as const,
+    reason: node.reason,
+  }))
+}
+
+function topoSortPendingNodes<T extends { id: string }>(
+  items: T[],
+  prereqByNode: Map<string, string[]>,
+): T[] {
+  const remaining = [...items]
+  const ordered: T[] = []
+  while (remaining.length > 0) {
+    const nextIndex = remaining.findIndex((item) =>
+      (prereqByNode.get(item.id) ?? []).every((prereqId) =>
+        ordered.some((done) => done.id === prereqId)
+        || !items.some((candidate) => candidate.id === prereqId)))
+    if (nextIndex < 0) {
+      // 存在环或未知引用时保持剩余原顺序，避免死循环
+      ordered.push(...remaining)
+      break
+    }
+    ordered.push(...remaining.splice(nextIndex, 1))
+  }
+  return ordered
 }
 
 function buildFinalPath(

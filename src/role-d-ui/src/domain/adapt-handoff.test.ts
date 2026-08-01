@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest"
 import { adaptHandoff } from "./adapt-handoff"
+import { normalizeUnifiedHandoff } from "../../../contracts/unified"
 
 const shared = {
   b_profile: {
@@ -24,6 +25,16 @@ describe("adaptHandoff", () => {
     })
 
     expect(session.profile.profileVersion).toBe("PROFILE-RECOVERED-V2")
+  })
+
+  test("is the Role D compatibility entrypoint for the unified contract normalizer", () => {
+    const payload = {
+      ...shared,
+      session_id: "session-unified-adapter",
+      a_rag_result: { query: "循环", topK: 0, results: [] },
+    }
+
+    expect(adaptHandoff(payload)).toEqual(normalizeUnifiedHandoff(payload))
   })
 
   test("does not invent the K007 demo diagnosis when a handoff omits diagnosis data", () => {

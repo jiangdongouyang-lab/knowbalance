@@ -34,6 +34,7 @@ export interface RoleDAssessmentItem {
   prompt: string
   options: string[]
   option_ids: string[]
+  maxScore?: number
   starter_code?: string
   citations: RoleDPublicCitation[]
 }
@@ -47,6 +48,17 @@ export interface RoleDGeneratedArtifact {
   options: string[]
   citations: RoleDPublicCitation[]
   items: RoleDAssessmentItem[]
+  sections?: RoleDLearningSection[]
+}
+
+export interface RoleDLearningSection {
+  id: string
+  title: string
+  kind: "heading" | "paragraph" | "code" | "callout" | "comparison"
+  text?: string
+  code?: string
+  language?: string
+  citations: RoleDPublicCitation[]
 }
 
 export interface RoleDWorkflowEvent {

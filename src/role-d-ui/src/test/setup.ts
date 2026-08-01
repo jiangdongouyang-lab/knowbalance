@@ -7,6 +7,9 @@ afterEach(() => cleanup())
 beforeEach(() => {
   vi.stubGlobal("scrollTo", vi.fn())
   vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    if (String(_input).includes("/api/role-c/status")) {
+      return new Response(JSON.stringify({ providerMode: "deterministic", docker: "not_required", modelId: null }), { status: 200, headers: { "content-type": "application/json" } })
+    }
     const request = JSON.parse(String(init?.body ?? "{}")) as { runId?: string; sessionId?: string; submissionId?: string }
     if (String(_input).includes("/api/role-c/submit")) {
       return new Response(JSON.stringify({

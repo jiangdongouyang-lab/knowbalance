@@ -47,16 +47,33 @@ export interface RoleCFeedbackPayload {
       item_results?: Array<{
         item_id: string
         objective_id: string
-        modality: "mcq" | "true_false" | "trace" | "short_answer" | "code"
-        status: string
         raw_score: number
         max_score: number
         evidence_score: number
+        grader_confidence?: number
+        hint_factor?: number
+        repeat_factor?: number
         misconception_tags: string[]
+        feedback_code: string
       }>
-      feedback?: { summary?: string }
+      score_frozen?: boolean
+      recommendation?: {
+        action: string
+        confidence: number
+        reason_codes: string[]
+      }
+      feedback?: {
+        generated_after_score_freeze?: boolean
+        mode?: string
+        summary?: string
+        item_feedback?: Array<{
+          item_id: string
+          feedback_code: string
+          message: string
+          next_step?: string
+        }>
+      }
     } | null
-    feedback_summary?: string
   }
 }
 
@@ -84,7 +101,9 @@ export function applyRoleCSubmissionOutcome(
         ...session.view,
         assessmentSubmitted: true,
         assessmentStatus: "blocked",
-        assessmentMessage: outcome.message,
+        assessmentMessage: outcome.code === "SESSION_ALREADY_COMPLETED"
+          ? "本轮已完成正式评分；请到反馈页进入下一学习阶段，C 会为下一轮重新生成内容并再次评分。"
+          : outcome.message,
       },
     }
   }
@@ -125,6 +144,7 @@ export function applyRoleCSubmissionOutcome(
       reason: feedback.feedbackSummary || feedback.finalDecision.reasonCodes.join("；"),
     },
     path: updatePath(session.path, feedback.finalDecision.action),
+    roleC: session.roleC ? { ...session.roleC, submissionId: expectedSubmissionId } : session.roleC,
     view: {
       ...session.view,
       assessmentSubmitted: true,
@@ -181,8 +201,7 @@ function normalizeFeedback(feedback: RoleCFeedbackPayload): RoleCFeedbackView {
     itemResults: (feedback.grade_result.payload?.item_results ?? []).map((result) => ({
       itemId: result.item_id,
       objectiveId: result.objective_id,
-      modality: result.modality,
-      status: result.status,
+      status: result.feedback_code,
       rawScore: result.raw_score,
       maxScore: result.max_score,
       evidenceScore: result.evidence_score,
@@ -204,12 +223,11 @@ function normalizeFeedback(feedback: RoleCFeedbackPayload): RoleCFeedbackView {
       policyRef: feedback.final_decision.policy_ref,
     },
     feedbackSummary: feedback.grade_result.payload?.feedback?.summary
-      ?? feedback.grade_result.feedback_summary
       ?? "C 已完成正式评分和动态决策。",
   }
 }
 
-function updatePath(path: RoleDSession["path"], decision: RoleCDecisionView): RoleDSession["path"] {
+export function updatePath(path: RoleDSession["path"], decision: RoleCDecisionView): RoleDSession["path"] {
   if (decision !== "advance") return path
   const currentIndex = path.findIndex((node) => node.status === "current")
   if (currentIndex < 0) return path

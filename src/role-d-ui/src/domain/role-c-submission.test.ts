@@ -89,7 +89,7 @@ describe("Role D formal C submission adapter", () => {
         },
         grade_result: {
           artifact_id: "GRADE-1",
-          feedback_summary: "本轮达到进阶标准。",
+          payload: { feedback: { summary: "本轮达到进阶标准。" } },
         },
       },
     })
@@ -139,7 +139,7 @@ describe("Role D formal C submission adapter", () => {
           target_objective_ids: [],
           policy_ref: "role-c-round-accuracy-v1",
         },
-        grade_result: { artifact_id: "GRADE-FOREIGN", feedback_summary: "伪造进阶" },
+        grade_result: { artifact_id: "GRADE-FOREIGN", payload: { feedback: { summary: "伪造进阶" } } },
       },
     })
 
@@ -174,7 +174,7 @@ describe("Role D formal C submission adapter", () => {
           target_objective_ids: [],
           policy_ref: "role-c-round-accuracy-v1",
         },
-        grade_result: { artifact_id: "GRADE-FOREIGN-LEARNER", feedback_summary: "错误身份" },
+        grade_result: { artifact_id: "GRADE-FOREIGN-LEARNER", payload: { feedback: { summary: "错误身份" } } },
       },
     })
 
