@@ -21,29 +21,56 @@ keywords: [参数, 返回值, return, 函数输入, 函数输出]
 
 ## 3. 示例
 
-### 参数与返回值 基础示例
+### 带参数和返回值的成绩处理函数
 
 ```python
-print("参数与返回值")
-print("source: K014")
+def calc_average(scores):
+    total = sum(scores)
+    count = len(scores)
+    return total / count
+
+def get_grade(score):
+    if score >= 90:
+        return "优秀"
+    elif score >= 60:
+        return "及格"
+    else:
+        return "不及格"
+
+avg = calc_average([85, 92, 78, 95])
+print("平均分：", avg)
+print("等级：", get_grade(avg))
 ```
 
-该示例用于帮助学习者识别“参数与返回值”的基本用途。
+calc_average 接收成绩列表作为参数，用 return 返回平均分；get_grade 根据分数返回等级。return 让调用者获得函数结果。
+
+### 无 return 的函数
+
+```python
+def show_info(name, score):
+    print(name + "的成绩是：" + str(score))
+
+result = show_info("小明", 92)
+print("返回值：", result)  # 输出 None
+```
+
+没有 return 语句的函数默认返回 None。
 
 ## 4. 常见错误
 
-- 把概念记成语法碎片，不结合实际任务使用。
-- 生成内容时不标注 source_id 与 fact_id，导致后续无法审核。
+- 定义函数时写了参数但调用时忘记传参，导致 TypeError。
+- 函数内处理了结果但忘记写 return，调用方得到 None 而非预期值。
+- return 之后的代码不会执行，误把代码写在 return 后。
 
 ## 5. 实操任务
 
-- 写一个带参数的平均值函数
-- 判断函数返回值
+- 写一个带参数的求平均值函数
+- 判断函数返回值类型
 
 ## 6. 分阶测试题
 
-- Level 1: 请说明“参数与返回值”的核心作用。
-- Level 2: 请完成一个与“参数与返回值”相关的小练习。
+- Level 1: 函数没有写 return 语句时，调用后得到什么？（A. None  B. 0  C. 报错  D. 最后一个表达式的值）
+- Level 2: 写一个函数 calc(scores)，接收成绩列表，返回最高分、最低分和平均分三个值。
 
 ## 7. 可引用事实
 

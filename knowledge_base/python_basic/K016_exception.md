@@ -21,29 +21,52 @@ try/except 用于捕获并处理运行时异常。
 
 ## 3. 示例
 
-### 异常处理 基础示例
+### 处理数字转换异常
 
 ```python
-print("异常处理")
-print("source: K016")
+user_input = input("请输入成绩：")
+try:
+    score = int(user_input)
+    if score >= 60:
+        print("及格")
+    else:
+        print("不及格")
+except ValueError:
+    print("输入无效，请输入数字。")
 ```
 
-该示例用于帮助学习者识别“异常处理”的基本用途。
+当用户输入非数字字符串时，int() 抛出 ValueError，被 except 捕获后给出友好提示而不是程序崩溃。
+
+### 处理文件操作异常
+
+```python
+filename = input("请输入文件名：")
+try:
+    with open(filename, "r", encoding="utf-8") as f:
+        print(f.read())
+except FileNotFoundError:
+    print("文件不存在，请检查文件名。")
+except PermissionError:
+    print("没有权限读取该文件。")
+```
+
+针对不同类型的异常分别处理，比捕获所有异常更精确。
 
 ## 4. 常见错误
 
-- 把概念记成语法碎片，不结合实际任务使用。
-- 生成内容时不标注 source_id 与 fact_id，导致后续无法审核。
+- except 后面不写具体异常类型（裸 except），会捕获所有异常包括 KeyboardInterrupt 和 SystemExit，导致程序无法正常中断。
+- try 块太大，把不相干可能出错的代码也包进去，难以定位问题来源。
+- 在 except 块中直接 pass 忽略异常，导致错误隐含不报难以调试。
 
 ## 5. 实操任务
 
-- 处理数字转换错误
-- 解释 try/except 执行流程
+- 读取用户输入的数字并做除法，捕获除零和类型错误
+- 处理文件读取时可能出现的各种异常
 
 ## 6. 分阶测试题
 
-- Level 1: 请说明“异常处理”的核心作用。
-- Level 2: 请完成一个与“异常处理”相关的小练习。
+- Level 1: 如果 try 块中没有抛出异常，except 块会执行吗？（A. 会  B. 不会  C. 看情况  D. 报错）
+- Level 2: 写一个 safe_divide(a, b) 函数，返回 a/b 的结果，如果 b 为 0 则返回"除数不能为0"。
 
 ## 7. 可引用事实
 

@@ -8,7 +8,7 @@ describe("Python basics knowledge base", () => {
     const knowledgeBase = await loadKnowledgeBase()
 
     expect(knowledgeBase.module).toBe("Python基础")
-    expect(knowledgeBase.version).toMatch(/^0\.1\./)
+    expect(knowledgeBase.version).toMatch(/^0\.\d+\./)
     expect(knowledgeBase.items.length).toBeGreaterThanOrEqual(15)
 
     const sourceIds = new Set(knowledgeBase.items.map((item) => item.sourceId))

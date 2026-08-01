@@ -1,5 +1,15 @@
 # 知识库更新日志
 
+## 2026-07-31 — v0.2.0 知识库质量增强
+
+- 修复 10 个知识点（K004/K005/K008/K010/K011/K012/K014/K015/K016/K017）的占位示例，替换为真实教学代码（input/运算符/while/字典/集合/字符串/函数/文件/异常/模块导入）
+- 每个知识点的"常见错误"从模板粘贴改为针对该知识点的真实易错点
+- 分阶测试题 Level 1 从开放式 short 改为带选项的 choice，Level 2 改为可判分的具体任务
+- 同步更新 `src/knowledge/python-basic.ts`（运行时真源）、`knowledge_base/python_basic/*.md`（展示源）和 `index.json`（版本 0.1.0 → 0.2.0）
+- RAG 同义词表从 4 组扩展至 13 组（新增：条件判断、变量、输入、输出、字典、字符串、异常、文件、模块等）
+- 外部知识检测列表从 5 个词扩展至 30+（覆盖深度学习、数据库、Web、并发、测试、工具链等领域术语）
+- 新增 Week3 离线评测框架：`src/evaluation/week3-evaluation.ts` 与 `scripts/week3-evaluation.ts`，生成 60 组用例并输出幻觉率、难度适配准确率、核心知识点覆盖率三项指标
+
 ## 2026-07-18 — 小组联调增强包 v1
 
 - GitHub 仓库已同步到：`https://github.com/jiangdongouyang-lab/knowbalance.git`
