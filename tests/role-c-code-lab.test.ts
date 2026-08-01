@@ -296,6 +296,46 @@ describe("role C phase-two trusted code-lab", () => {
     expect(pair.public_artifact.payload).toEqual(publicSnapshot)
   })
 
+  test("uses the bounded tool retry budget when the first executable repair still fails", async () => {
+    const { request, provider } = await buildContext()
+    const firstDraft = await provider.generateCodeLab(request)
+    const revisionRounds: number[] = []
+    const repairProvider: RoleCContentProvider = {
+      generateConceptLesson: provider.generateConceptLesson.bind(provider),
+      async generateCodeLab() {
+        return structuredClone(firstDraft)
+      },
+      async repairCodeLabAfterVerification(_request, draft, feedback) {
+        revisionRounds.push(feedback.revision_round)
+        return structuredClone(draft)
+      },
+      generateAssessment: provider.generateAssessment.bind(provider),
+    }
+    let verificationCalls = 0
+    const pair = await generateCodeLab(request, repairProvider, {
+      async verifyCodeLab() {
+        verificationCalls += 1
+        return verificationCalls < 3
+          ? {
+              execution_verified: false,
+              issues: ["reference_solution 未通过全部隐藏测试"],
+              reference_failed: true,
+              reference_failure_codes: ["HT-1:assertion_failed"],
+              starter_status: "failed" as const,
+            }
+          : {
+              execution_verified: true,
+              issues: [],
+              runner_image_digest: RUNNER_DIGEST,
+            }
+      },
+    })
+
+    expect(revisionRounds).toEqual([1, 2])
+    expect(verificationCalls).toBe(3)
+    expect(pair.public_artifact.status).toBe("ready")
+  })
+
   test("keeps surviving mutations as a nonblocking quality metric", async () => {
     const { request, provider } = await buildContext()
     const firstDraft = await provider.generateCodeLab(request)

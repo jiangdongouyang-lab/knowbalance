@@ -4,7 +4,7 @@
 |---|---|
 | 设计版本 | 3.5 |
 | Schema 版本 | 1.0 |
-| Prompt manifest | `c-prompts-1.15.0` |
+| Prompt manifest | `c-prompts-1.16.0` |
 | 实现目录 | `src/role-c-content/` |
 | Schema 目录 | `schemas/role-c-content/` |
 | 自动检查 | `bun run check` |
@@ -214,11 +214,14 @@ Python 代码统一使用 `DockerPythonCodeRunner`：
 | 路径 | 服务入口 |
 |---|---|
 | `/api/role-c/generate` | `generateRoleCForRoleDWithRuntime` |
+| `/api/role-c/run-code-lab` | `runRoleCCodeLab` |
 | `/api/role-c/submit` | `submitRoleCAssessment` |
 | `/api/role-c/continue` | `continueRoleCAfterSubmission` |
 | `/api/role-c/route-anchors` | `routeRoleCAssessmentAnchors` |
 
 `LearningRunRecord` 保存与 GenerationSpec 一致的可信画像快照，使下一轮在进程重启后仍能仅凭会话和提交标识恢复。继续执行和对外投递使用稳定身份记录，重复请求返回同一终局结果。
+
+`RoleDGeneratedArtifact.lab` 提供实验说明、执行约定、初始代码、公开测试、分层提示和反思题；原有 `content` 保留为初始代码，兼容只读取字符串的调用方。D 调用 `run-code-lab` 时提交 `executionId`、会话/run/学习者/实验标识和学习者代码。C 从安全存储读取当前实验的隐藏测试并在 Docker 中执行，只返回通过数量、得分比例和公开反馈，不返回隐藏测试、参考实现或安全存储引用。
 
 外层 `AdaptiveLearningLoopJournal` 记录恢复调用、生成结果、run/session 激活和对外投递阶段。`AtomicFileAdaptiveLearningLoopJournal` 使用完整性哈希、revision CAS、文件锁和私有文件权限支持跨进程、跨重启续跑。A/B 请求使用稳定请求标识；已成功响应、已发布结果和终态均可直接重放。
 
@@ -249,6 +252,7 @@ Python 代码统一使用 `DockerPythonCodeRunner`：
 | `LearningCycleService` | 会话、提交、评分、证据、掌握度和动态反馈 |
 | `LearningCycleService.openAnchorFirstSession` | 创建仅含锚点题的可信会话 |
 | `LearningCycleService.routeAssessmentAnchors` | 可信评分锚点题并冻结正式路线 |
+| `LearningCycleService.executePublishedCodeLab` | 校验会话身份并执行当前已发布代码实验 |
 | `LearningCycleService.prepareNextRoundFromCompletedSubmission` | 从冻结的已完成提交准备可信下一轮 |
 | `deliverDynamicFeedbackToD` | 原子投递统一动态反馈 |
 | `deliverRoleCToB` | 原子投递学习进展和画像漂移建议 |
@@ -257,6 +261,7 @@ Python 代码统一使用 `DockerPythonCodeRunner`：
 | `continueCompletedLearningCycle` | 完成下一轮恢复审核、run/session 注册和 D 发布 |
 | `continueRoleCAfterSubmission` | 服务端恢复已完成提交、刷新新路径证据并继续下一轮 |
 | `routeRoleCAssessmentAnchors` | 服务端接收锚点答案并返回冻结后的正式路线 |
+| `runRoleCCodeLab` | 向 D 提供公开、无答案泄漏的代码实验执行结果 |
 | `RoleBLearningProgressAdapter` | B 接收学习证据信封、幂等更新画像并生成新版本 |
 
 ## 12. 验证命令

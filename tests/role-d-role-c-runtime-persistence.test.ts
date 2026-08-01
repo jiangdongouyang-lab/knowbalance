@@ -8,6 +8,7 @@ import {
   continueRoleCAfterSubmission,
   generateRoleCForRoleDWithRuntime,
   routeRoleCAssessmentAnchors,
+  runRoleCCodeLab,
   submitRoleCAssessment,
 } from "../src/role-d-integration/role-c-service"
 import {
@@ -66,6 +67,79 @@ describe("Role D → Role C durable HTTP runtime boundary", () => {
 
       expect(generated.status).toBe("ready")
       if (generated.status !== "ready") throw new Error(generated.reason)
+
+      const publishedLab = generated.artifacts.find((artifact) =>
+        artifact.kind === "lab")
+      expect(publishedLab?.content).toBe(publishedLab?.lab?.starter_code)
+      expect(typeof publishedLab?.lab?.lab_id).toBe("string")
+      expect(publishedLab?.lab?.execution_contract.language).toBe("python")
+      expect(typeof publishedLab?.lab?.starter_code).toBe("string")
+      expect(Array.isArray(publishedLab?.lab?.instructions)).toBe(true)
+      expect(Array.isArray(publishedLab?.lab?.public_tests)).toBe(true)
+      expect(Array.isArray(publishedLab?.lab?.hint_ladders)).toBe(true)
+      expect(Array.isArray(publishedLab?.lab?.reflection_questions)).toBe(true)
+      expect(JSON.stringify(publishedLab?.lab)).not.toContain("hidden_tests")
+      expect(JSON.stringify(publishedLab?.lab)).not.toContain("reference_solution")
+      const labId = publishedLab?.lab?.lab_id
+      if (!publishedLab?.lab || typeof labId !== "string") {
+        throw new Error(`generated lab contract is missing: ${JSON.stringify(labId)}`)
+      }
+      const starterRun = await runRoleCCodeLab({
+        executionId: "LAB-EXEC-STARTER",
+        sessionId: generated.learningSession.sessionId,
+        runId: generated.runId,
+        learnerId: profile.learner_id,
+        labId,
+        code: publishedLab.lab.starter_code,
+      }, { dataDirectory })
+      expect(starterRun).toMatchObject({
+        status: "failed",
+        executionId: "LAB-EXEC-STARTER",
+        runId: generated.runId,
+        labId,
+        scoreRatio: 0,
+        feedback: [{ code: "assertion_failed" }],
+      })
+      expect(JSON.stringify(starterRun)).not.toContain("HT-")
+
+      const completedCode = [
+        "def average_score(scores):",
+        "    total = 0",
+        "    count = 0",
+        "    for score in scores:",
+        "        total += score",
+        "        count += 1",
+        "    return total / count",
+      ].join("\n")
+      const completedRun = await runRoleCCodeLab({
+        executionId: "LAB-EXEC-PASS",
+        sessionId: generated.learningSession.sessionId,
+        runId: generated.runId,
+        learnerId: profile.learner_id,
+        labId,
+        code: completedCode,
+      }, { dataDirectory })
+      expect(completedRun).toMatchObject({
+        status: "passed",
+        executionId: "LAB-EXEC-PASS",
+        passedChecks: expect.any(Number),
+        totalChecks: expect.any(Number),
+        scoreRatio: 1,
+        feedback: [],
+      })
+
+      const foreignLearnerRun = await runRoleCCodeLab({
+        executionId: "LAB-EXEC-FOREIGN",
+        sessionId: generated.learningSession.sessionId,
+        runId: generated.runId,
+        learnerId: "another-learner",
+        labId,
+        code: completedCode,
+      }, { dataDirectory })
+      expect(foreignLearnerRun).toMatchObject({
+        status: "blocked",
+        code: "LEARNER_IDENTITY_MISMATCH",
+      })
 
       const submission = {
         sessionId: generated.learningSession.sessionId,
@@ -170,6 +244,10 @@ describe("Role D → Role C durable HTTP runtime boundary", () => {
         throw new Error(JSON.stringify(continued))
       }
       expect(continued.reviewedRelease.artifacts).toHaveLength(3)
+      expect(continued.artifacts).toHaveLength(3)
+      expect(typeof continued.artifacts.find(
+        (artifact) => artifact.kind === "lab",
+      )?.lab?.starter_code).toBe("string")
       expect(continued.learningSession.session.phase).toBe("anchor_pending")
       expect(continued.finalContext.pathNode.target_source_ids)
         .toEqual(["K007", "K009", "K006"])

@@ -61,15 +61,23 @@ export function createTieredEvaluatorAgent(
               structuredClone(draft),
             )
           : { answer_key_verified: false, issues: ["未配置独立 assessment verifier"] }
-        if (!verification.answer_key_verified
-          && verifier
-          && provider.repairAssessmentAfterVerification
-          && request.generation_spec.policies.max_semantic_revision >= 1) {
-          draft = structuredClone(await provider.repairAssessmentAfterVerification(
+        const activeVerifier = verifier
+        const repairAfterVerification = provider.repairAssessmentAfterVerification
+        const verificationRepairLimit = activeVerifier
+          && repairAfterVerification
+          && request.generation_spec.policies.max_semantic_revision >= 1
+          ? request.generation_spec.policies.max_tool_retry
+          : 0
+        for (let revisionRound = 1;
+          !verification.answer_key_verified
+            && revisionRound <= verificationRepairLimit;
+          revisionRound += 1) {
+          if (!activeVerifier || !repairAfterVerification) break
+          draft = structuredClone(await repairAfterVerification(
             request,
             structuredClone(draft),
             {
-              revision_round: 1,
+              revision_round: revisionRound,
               issues: [...verification.issues],
             },
           ))
@@ -81,7 +89,7 @@ export function createTieredEvaluatorAgent(
               structural.issues.map((issue) => `${issue.path}: ${issue.message}`),
             )
           }
-          verification = await verifier.verifyAssessment(
+          verification = await activeVerifier.verifyAssessment(
             request,
             structuredClone(draft),
           )
@@ -128,7 +136,7 @@ export function createTieredEvaluatorAgent(
             common,
             `${error.stage} 未在有限修复次数内通过校验`,
             error.issues,
-            error.stage.endsWith(".public") ? error.issues : undefined,
+            error.stage.includes(".public") ? error.issues : undefined,
           )
         }
         if (error instanceof UnsupportedTargetError) {

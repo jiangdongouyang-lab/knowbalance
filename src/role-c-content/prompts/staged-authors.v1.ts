@@ -31,13 +31,14 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 要求：
 1. 输出只含 title、execution_contract、starter_code、objectives。objectives 数量、顺序必须与 staged_contract.objective_plan 一致；每项只含 instruction_text、public_test、hints、reflection_question。
 2. function 模式下每个 public_test.input 必须统一写成 {"args": [...], "kwargs": {...}}；即使只有一个参数也放入 args，不能用参数名直接组成普通对象。
-3. 不得出现参考解、隐藏测试输入或期望值、评分组、mutation、答案或 test_suite_id。
-4. 每个 objective 写一条 instruction、一个公开测试、恰好三级提示和一个反思问题；不得返回 lab_id、objective_id、block_id、test_id、citation、Claim、coverage 或 used_evidence。
-5. 教学文字只使用 evidence 中的事实；编排器会把冻结事实作为 Claim 附加到 instruction。
-6. starter 不得直接完成任务，不得使用网络、宿主文件、shell、包安装或环境变量。
-7. starter 不得动态访问双下划线属性，不得调用 eval/exec/compile/open/breakpoint/__import__/globals/locals/vars/getattr/setattr/delattr；普通类的 __init__ 定义可用；import 只能来自 execution_contract.allowed_imports。
-8. evidence 涉及文件读写时，公开实验须明确采用安全等价环境：把文件文本作为函数参数，或使用 io.StringIO 这类内存文件对象；不得调用 open、访问宿主路径或声称已改写真实文件。
-9. ${JSON_ONLY}`
+3. function 模式只会校验入口函数的返回值，必须返回可 JSON 序列化的结果；以 print/标准输出为结果的任务必须选用 stdin_stdout 模式。
+4. 不得出现参考解、隐藏测试输入或期望值、评分组、mutation、答案或 test_suite_id。
+5. 每个 objective 写一条 instruction、一个公开测试、恰好三级提示和一个反思问题；不得返回 lab_id、objective_id、block_id、test_id、citation、Claim、coverage 或 used_evidence。
+6. 教学文字只使用 evidence 中的事实；编排器会把冻结事实作为 Claim 附加到 instruction。
+7. starter 不得直接完成任务，不得使用网络、宿主文件、shell、包安装或环境变量。
+8. starter 不得动态访问双下划线属性，不得调用 eval/exec/compile/open/breakpoint/__import__/globals/locals/vars/getattr/setattr/delattr；普通类的 __init__ 定义可用；import 只能来自 execution_contract.allowed_imports。
+9. evidence 涉及文件读写时，公开实验须明确采用安全等价环境：把文件文本作为函数参数，或使用 io.StringIO 这类内存文件对象；不得调用 open、访问宿主路径或声称已改写真实文件。
+10. ${JSON_ONLY}`
 
 export const CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
 
@@ -48,12 +49,13 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 要求：
 1. 输出仅含 reference_solution、hidden_tests 和 mutation_variants。按 objective_plan 顺序创作；每个 hidden test 只返回 input、expected、comparison、misconception_tag。mutation_variants 默认返回空数组。
 2. reference_solution 必须实现公开合同；每个目标生成一个有区分力的 hidden test，有真实输入域时优先选择边界或反例。function 模式下每个 hidden_tests.input 必须统一写成 {"args": [...], "kwargs": {...}}，参数顺序与入口函数一致；不能用参数名直接组成普通对象。存在私有输入时必须与 public_payload.public_tests 中的全部 input 结构化不同，使用公开材料中未出现的新值并同步计算 expected。
-3. 每个 objective_plan 目标都要有对应隐藏测试；misconception_tag 要具体说明测试针对的常见错误。
-4. 不返回 lab_id、test_suite_id、execution_contract、test_id、objective_id、weight、scoring_groups、misconception_map、must_fail_test_ids 或 objective_coverage。
-5. reference 不得动态访问双下划线属性或使用 __name__ main guard；普通类的 __init__ 定义可用。function 模式只保留入口函数和必要辅助函数。也不得使用动态执行、内省、文件或进程能力；import 只能来自 execution_contract.allowed_imports。
-6. 不得声称代码已经运行或验证；不得请求网络、宿主文件、shell、包安装或环境变量。
-7. evidence 涉及文件读写时，reference 与 hidden tests 必须沿用 public_payload 的内存文本或内存文件合同，不得改回 open 或宿主路径。
-8. ${JSON_ONLY}`
+3. function 模式的 expected 只对应函数返回值；不能把 print/标准输出作为 expected，纯打印任务必须在公开合同中使用 stdin_stdout。
+4. 每个 objective_plan 目标都要有对应隐藏测试；misconception_tag 要具体说明测试针对的常见错误。
+5. 不返回 lab_id、test_suite_id、execution_contract、test_id、objective_id、weight、scoring_groups、misconception_map、must_fail_test_ids 或 objective_coverage。
+6. reference 不得动态访问双下划线属性或使用 __name__ main guard；普通类的 __init__ 定义可用。function 模式只保留入口函数和必要辅助函数。也不得使用动态执行、内省、文件或进程能力；import 只能来自 execution_contract.allowed_imports。
+7. 不得声称代码已经运行或验证；不得请求网络、宿主文件、shell、包安装或环境变量。
+8. evidence 涉及文件读写时，reference 与 hidden tests 必须沿用 public_payload 的内存文本或内存文件合同，不得改回 open 或宿主路径。
+9. ${JSON_ONLY}`
 
 export const CODE_LAB_EXECUTION_REPAIR_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
 
@@ -131,10 +133,11 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 3. trace/short_answer 使用可确定验证的 exact、numeric 或 concept_rubric；rubric 权重合计为 1。
 4. 非选择题的 correct_option_id 为 null、misconception_by_option 为空对象；代码题的 answer_spec 也为 null，并按公开代码题顺序在 code_test_suites 中返回 execution_contract、reference_solution 和至少一个只含 input/expected/comparison 的 hidden test。
 5. code 题的 reference 与隐藏测试遵守公开 starter 所定义的任务合同；function 模式下 hidden_tests.input 统一使用 {"args": [...], "kwargs": {...}}，不能用参数名直接组成普通对象；每个隐藏输入必须与公开题干、示例和 starter 中出现的输入值不同，并同步计算 expected。
-6. code suite 的 reference 不得动态访问双下划线属性或使用动态执行/内省/文件/进程能力；普通类的 __init__ 定义可用；import 只能来自 execution_contract.allowed_imports。
-7. evidence 涉及文件读写时，代码题必须使用文本参数或 io.StringIO 的内存文件合同，不能访问宿主文件。
-8. 不得把私有答案或测试材料复制到任何公开字段，不得声称已经验证。
-9. ${JSON_ONLY}`
+6. function 模式的 expected 与 output_contract 必须对应函数返回值，不能把 print/标准输出当作函数返回值；纯打印题使用 stdin_stdout。
+7. code suite 的 reference 不得动态访问双下划线属性或使用动态执行/内省/文件/进程能力；普通类的 __init__ 定义可用；import 只能来自 execution_contract.allowed_imports。
+8. evidence 涉及文件读写时，代码题必须使用文本参数或 io.StringIO 的内存文件合同，不能访问宿主文件。
+9. 不得把私有答案或测试材料复制到任何公开字段，不得声称已经验证。
+10. ${JSON_ONLY}`
 
 export const ASSESSMENT_EXECUTION_REPAIR_SYSTEM_PROMPT = `${ASSESSMENT_SECURE_STAGE_SYSTEM_PROMPT}
 

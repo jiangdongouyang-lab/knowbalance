@@ -8,6 +8,7 @@ import {
   adaptRagResult,
   buildGenerationSpec,
   buildAssessmentItemPlan,
+  buildCodeLabObjectivePlan,
   buildCodeLabSecurePlan,
   buildLabIdentity,
   defineLearningPathNode,
@@ -22,6 +23,7 @@ import {
   validateAssessmentDraftStructure,
   validateAssessmentSecureAgainstPublic,
   validateCodeLabDraftStructure,
+  validateCodeLabPublicAuthorAgainstPlan,
   validateConceptLesson,
   type AssessmentDraft,
   type AssessmentPublicPayload,
@@ -391,6 +393,43 @@ describe("role C staged model provider", () => {
     expect(validateCodeLabDraftStructure(request, repaired).ok).toBe(true)
   })
 
+  test("keeps assessment execution repair on the compact secure author contract", async () => {
+    const context = await buildContext()
+    const deterministic = new DeterministicCodeLabContentProvider()
+    const conceptArtifact = await generateConceptLesson(
+      context.conceptRequest,
+      deterministic,
+    )
+    if (conceptArtifact.status !== "ready") {
+      throw new Error("fixture concept 未 ready")
+    }
+    const request = {
+      ...context.conceptRequest,
+      concept_artifact: conceptArtifact,
+    }
+    const prior = await deterministic.generateAssessment(request)
+    const gateway = new AssessmentExecutionRepairGateway(prior)
+    const provider = new ModelBackedRoleCContentProvider(gateway, {
+      max_repair_attempts: 0,
+    })
+
+    const repaired = await provider.repairAssessmentAfterVerification(
+      request,
+      prior,
+      {
+        revision_round: 1,
+        issues: ["代码题参考实现未通过全部隐藏测试"],
+      },
+    )
+
+    expect(gateway.requests).toHaveLength(1)
+    expect(gateway.requests[0]!.output_schema_id)
+      .toBe("role_c_assessment_secure_author_payload_v1")
+    expect(validateAssessmentDraftStructure(request, repaired).ok).toBe(true)
+    expect(repaired.secure_draft.payload.code_test_suites[0]!
+      .hidden_tests[0]!.expected).toBe("normalized stdout\n")
+  })
+
   test("repairs an answer-complete public starter before trusted execution without exposing secure material", async () => {
     const context = await buildContext()
     const deterministic = new DeterministicCodeLabContentProvider()
@@ -428,6 +467,163 @@ describe("role C staged model provider", () => {
     expect(repairInput).not.toHaveProperty("prior_secure_payload")
     expect(JSON.stringify(repairInput)).not.toContain("hidden_tests")
     expect(JSON.stringify(repairInput)).not.toContain("mutation_variants")
+  })
+
+  test("uses a target-agnostic safe public draft when the model repeats a leaking repair", async () => {
+    const context = await buildContext()
+    const deterministic = new DeterministicCodeLabContentProvider()
+    const conceptArtifact = await generateConceptLesson(context.conceptRequest, deterministic)
+    if (conceptArtifact.status !== "ready") throw new Error("fixture concept 未 ready")
+    const request = { ...context.conceptRequest, concept_artifact: conceptArtifact }
+    const leaked = await deterministic.generateCodeLab(request)
+    leaked.public_draft.payload.starter_code = leaked.secure_draft.payload.reference_solution
+    const gateway = new StagedFixtureGateway(
+      new Map(),
+      leaked,
+      undefined,
+      false,
+      undefined,
+      true,
+    )
+    const provider = new ModelBackedRoleCContentProvider(gateway, {
+      max_repair_attempts: 0,
+    })
+
+    const draft = await provider.generateCodeLab(request)
+
+    expect(gateway.tasks).toContain("role-c.code-lab.public.safety-repair")
+    expect(draft.public_draft.payload.starter_code).toContain("NotImplementedError")
+    expect(validateCodeLabDraftStructure(request, draft).ok).toBe(true)
+  })
+
+  test("rejects function contracts that describe stdout as the graded result", async () => {
+    const context = await buildContext()
+    const deterministic = new DeterministicCodeLabContentProvider()
+    const conceptArtifact = await generateConceptLesson(context.conceptRequest, deterministic)
+    if (conceptArtifact.status !== "ready") throw new Error("fixture concept 未 ready")
+    const request = { ...context.conceptRequest, concept_artifact: conceptArtifact }
+    const draft = await deterministic.generateCodeLab(request)
+    const author = adaptCodeLabPublicAuthorFixture(draft.public_draft.payload)
+    author.execution_contract.execution_mode = "function"
+    author.execution_contract.output_contract = {
+      type: "None",
+      constraints: ["通过标准输出打印结果"],
+    }
+
+    const issues = validateCodeLabPublicAuthorAgainstPlan(
+      author,
+      buildCodeLabObjectivePlan(context.spec),
+    )
+
+    expect(issues.some((issue) => issue.includes("function 模式只校验")))
+      .toBe(true)
+  })
+
+  test("normalizes a model-authored stdout task to the executable stdin/stdout contract", async () => {
+    const context = await buildContext()
+    const deterministic = new DeterministicCodeLabContentProvider()
+    const conceptArtifact = await generateConceptLesson(context.conceptRequest, deterministic)
+    if (conceptArtifact.status !== "ready") throw new Error("fixture concept 未 ready")
+    const request = { ...context.conceptRequest, concept_artifact: conceptArtifact }
+    const fixture = await deterministic.generateCodeLab(request)
+    fixture.public_draft.payload.execution_contract.execution_mode = "function"
+    fixture.public_draft.payload.execution_contract.output_contract = {
+      type: "None",
+      constraints: ["通过标准输出打印结果"],
+    }
+    fixture.public_draft.payload.instructions.forEach((block) => {
+      if ("text" in block) block.text = `${block.text}，并打印结果。`
+    })
+    fixture.secure_draft.payload.execution_contract.execution_mode = "stdin_stdout"
+    delete fixture.secure_draft.payload.execution_contract.entry_point
+    fixture.secure_draft.payload.execution_contract.output_contract = {
+      type: "stdout text",
+      constraints: ["精确标准输出"],
+    }
+    fixture.secure_draft.payload.reference_solution = "def show_result():\n    return 3\n"
+    fixture.secure_draft.payload.hidden_tests.forEach((test) => {
+      test.input = ""
+      test.expected = "3"
+      test.comparison = { kind: "exact" }
+    })
+    fixture.secure_draft.payload.mutation_variants.forEach((mutation) => {
+      mutation.code = "print(4)\n"
+    })
+    const provider = new ModelBackedRoleCContentProvider(
+      new StagedFixtureGateway(new Map(), fixture),
+      { max_repair_attempts: 0 },
+    )
+
+    const draft = await provider.generateCodeLab(request)
+
+    expect(draft.public_draft.payload.execution_contract.execution_mode)
+      .toBe("stdin_stdout")
+    expect(draft.public_draft.payload.execution_contract.entry_point)
+      .toBeUndefined()
+    expect(draft.public_draft.payload.public_tests.every((test) =>
+      typeof test.input === "string")).toBe(true)
+    expect(draft.secure_draft.payload.hidden_tests.every((test) =>
+      test.expected === "3\n")).toBe(true)
+    expect(draft.secure_draft.payload.reference_solution)
+      .toContain("print(show_result())")
+    expect(validateCodeLabDraftStructure(request, draft).ok).toBe(true)
+  })
+
+  test("wraps a zero-input script in the declared function entry point", async () => {
+    const context = await buildContext()
+    const deterministic = new DeterministicCodeLabContentProvider()
+    const conceptArtifact = await generateConceptLesson(context.conceptRequest, deterministic)
+    if (conceptArtifact.status !== "ready") throw new Error("fixture concept 未 ready")
+    const request = { ...context.conceptRequest, concept_artifact: conceptArtifact }
+    const fixture = await deterministic.generateCodeLab(request)
+    const entryPoint = fixture.public_draft.payload.execution_contract.entry_point!
+    fixture.public_draft.payload.execution_contract.input_contract = {
+      type: "none",
+      constraints: [],
+    }
+    fixture.public_draft.payload.execution_contract.output_contract = {
+      type: "integer",
+      constraints: ["返回最终变量值"],
+    }
+    fixture.secure_draft.payload.reference_solution = "score = 10\nscore = score + 5\n"
+    fixture.secure_draft.payload.hidden_tests.forEach((test) => {
+      test.input = { args: [], kwargs: {} }
+      test.expected = 15
+      test.comparison = { kind: "exact" }
+    })
+    const provider = new ModelBackedRoleCContentProvider(
+      new StagedFixtureGateway(new Map(), fixture),
+      { max_repair_attempts: 0 },
+    )
+
+    const draft = await provider.generateCodeLab(request)
+
+    expect(draft.secure_draft.payload.reference_solution)
+      .toContain(`def ${entryPoint}():`)
+    expect(draft.secure_draft.payload.reference_solution)
+      .toContain("return score")
+    expect(validateCodeLabDraftStructure(request, draft).ok).toBe(true)
+  })
+
+  test("replaces an unsafe model-authored starter with a runnable TODO skeleton", async () => {
+    const context = await buildContext()
+    const deterministic = new DeterministicCodeLabContentProvider()
+    const conceptArtifact = await generateConceptLesson(context.conceptRequest, deterministic)
+    if (conceptArtifact.status !== "ready") throw new Error("fixture concept 未 ready")
+    const request = { ...context.conceptRequest, concept_artifact: conceptArtifact }
+    const fixture = await deterministic.generateCodeLab(request)
+    fixture.public_draft.payload.starter_code = "import sys\nprint(sys.stdin.read())\n"
+    fixture.public_draft.payload.execution_contract.allowed_imports = []
+    const provider = new ModelBackedRoleCContentProvider(
+      new StagedFixtureGateway(new Map(), fixture),
+      { max_repair_attempts: 0 },
+    )
+
+    const draft = await provider.generateCodeLab(request)
+
+    expect(draft.public_draft.payload.starter_code).toContain("NotImplementedError")
+    expect(draft.public_draft.payload.starter_code).not.toContain("import sys")
+    expect(validateCodeLabDraftStructure(request, draft).ok).toBe(true)
   })
 })
 
@@ -487,6 +683,7 @@ class StagedFixtureGateway implements ModelGateway {
     private readonly assessment?: AssessmentDraft,
     private readonly invalidateFirstConceptAttempt = false,
     private readonly starterRepairCode?: string,
+    private readonly unchangedSafetyRepair = false,
   ) {}
 
   async generateStructured<T>(request: Parameters<ModelGateway["generateStructured"]>[0]): Promise<T> {
@@ -551,12 +748,26 @@ class StagedFixtureGateway implements ModelGateway {
       return { starter_code: this.starterRepairCode } as T
     }
     if (request.task === "role-c.code-lab.public.safety-repair"
-      && this.starterRepairCode) {
+      && (this.starterRepairCode || this.unchangedSafetyRepair)) {
       const input = request.input as {
         public_payload: CodeLabDraft["public_draft"]["payload"]
       }
+      if (this.unchangedSafetyRepair) {
+        return {
+          starter_code: input.public_payload.starter_code,
+          instruction_texts: input.public_payload.instructions.map((block) =>
+            "text" in block ? block.text : block.block_type),
+          public_test_descriptions: input.public_payload.public_tests.map((test) =>
+            test.description),
+          public_test_expected_behaviors: input.public_payload.public_tests.map((test) =>
+            test.expected_behavior),
+          hint_texts: input.public_payload.hint_ladders.map((ladder) =>
+            ladder.hints.map((hint) => hint.text)),
+          reflection_questions: [...input.public_payload.reflection_questions],
+        } as T
+      }
       return {
-        starter_code: this.starterRepairCode,
+        starter_code: this.starterRepairCode!,
         instruction_texts: input.public_payload.instructions.map(() =>
           "按任务合同组织输入、处理中间状态并返回结果，核心实现留给学习者。"),
         public_test_descriptions: input.public_payload.public_tests.map(() =>
@@ -579,26 +790,7 @@ class StagedFixtureGateway implements ModelGateway {
     if (request.task === "role-c.tiered-evaluator.secure" && this.assessment) {
       const input = request.input as { public_payload: AssessmentPublicPayload }
       const secure = adaptAssessmentSecureFixture(this.assessment, input.public_payload)
-      return {
-        items: secure.items.map((item) => ({
-          answer_spec: item.modality === "mcq"
-            || item.modality === "true_false"
-            || item.modality === "code"
-            ? null
-            : structuredClone(item.answer_spec),
-          correct_option_id: item.correct_option_id ?? null,
-          misconception_by_option: structuredClone(item.misconception_by_option),
-        })),
-        code_test_suites: secure.code_test_suites.map((suite) => ({
-          execution_contract: structuredClone(suite.execution_contract),
-          reference_solution: suite.reference_solution,
-          hidden_tests: suite.hidden_tests.map((test) => ({
-            input: structuredClone(test.input),
-            expected: structuredClone(test.expected),
-            comparison: structuredClone(test.comparison),
-          })),
-        })),
-      } as T
+      return assessmentSecureAuthorFixture(secure) as T
     }
     throw new Error(`unexpected staged task ${request.task}`)
   }
@@ -716,6 +908,50 @@ class ExecutionRepairGateway implements ModelGateway {
   }
 }
 
+class AssessmentExecutionRepairGateway implements ModelGateway {
+  readonly model_id = "assessment-execution-repair-fixture"
+  readonly model_config_hash = MODEL_HASH
+  readonly requests: Array<Parameters<ModelGateway["generateStructured"]>[0]> = []
+
+  constructor(private readonly prior: AssessmentDraft) {}
+
+  async generateStructured<T>(request: Parameters<ModelGateway["generateStructured"]>[0]): Promise<T> {
+    this.requests.push(structuredClone(request))
+    if (request.task !== "role-c.tiered-evaluator.secure.execution-repair") {
+      throw new Error(`unexpected task ${request.task}`)
+    }
+    const input = request.input as { public_payload: AssessmentPublicPayload }
+    const secure = adaptAssessmentSecureFixture(
+      this.prior,
+      input.public_payload,
+    )
+    const authored = assessmentSecureAuthorFixture(secure)
+    const codeIndex = input.public_payload.items.findIndex((item) =>
+      item.modality === "code")
+    if (codeIndex >= 0) {
+      authored.items[codeIndex]!.answer_spec = {
+        kind: "code",
+        test_suite_id: "MODEL_OWNED_REDUNDANT_ID",
+      }
+      authored.code_test_suites.forEach((suite) => {
+        suite.execution_contract.execution_mode = "stdin_stdout"
+        delete suite.execution_contract.entry_point
+        suite.execution_contract.output_contract = {
+          type: "string",
+          constraints: ["精确标准输出"],
+        }
+        suite.reference_solution = "print(\"normalized stdout\")"
+        suite.hidden_tests.forEach((test) => {
+          test.input = ""
+          test.expected = "normalized stdout"
+          test.comparison = { kind: "exact" }
+        })
+      })
+    }
+    return authored as T
+  }
+}
+
 function adaptCodeLabSecureFixture(
   source: Awaited<ReturnType<DeterministicCodeLabContentProvider["generateCodeLab"]>>["secure_draft"]["payload"],
   plan: {
@@ -781,6 +1017,31 @@ function adaptAssessmentSecureFixture(
     }))
   })
   return secure
+}
+
+function assessmentSecureAuthorFixture(
+  secure: AssessmentDraft["secure_draft"]["payload"],
+) {
+  return {
+    items: secure.items.map((item) => ({
+      answer_spec: item.modality === "mcq"
+        || item.modality === "true_false"
+        || item.modality === "code"
+        ? null
+        : structuredClone(item.answer_spec),
+      correct_option_id: item.correct_option_id ?? null,
+      misconception_by_option: structuredClone(item.misconception_by_option),
+    })),
+    code_test_suites: secure.code_test_suites.map((suite) => ({
+      execution_contract: structuredClone(suite.execution_contract),
+      reference_solution: suite.reference_solution,
+      hidden_tests: suite.hidden_tests.map((test) => ({
+        input: structuredClone(test.input),
+        expected: structuredClone(test.expected),
+        comparison: structuredClone(test.comparison),
+      })),
+    })),
+  }
 }
 
 function asInvocationEnvelope(value: unknown): { args: unknown[]; kwargs?: Record<string, unknown> } {
