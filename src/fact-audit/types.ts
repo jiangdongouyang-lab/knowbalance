@@ -1,5 +1,6 @@
 import type { RagResult } from "../rag/retriever"
 import type { KnowledgeFact } from "../knowledge/types"
+import type { RagEvidencePack } from "../role-c-content/contracts/evidence-pack"
 
 export type Citation = {
   source_id: string
@@ -14,13 +15,15 @@ export type GeneratedContentBlock = {
 
 export type FactAuditInput = {
   artifactId: string
-  ragResult: RagResult
+  ragResult?: RagResult
+  evidencePack?: RagEvidencePack
+  expectedEvidenceContentHash?: string
   generatedContent: {
     blocks: GeneratedContentBlock[]
   }
 }
 
-export type FactAuditVerdict = "supported" | "missing_citation" | "unsupported" | "external_knowledge"
+export type FactAuditVerdict = "supported" | "missing_citation" | "unsupported" | "external_knowledge" | "semantic_unsupported"
 
 export type FactAuditStatus = "pass" | "revise" | "reject"
 
@@ -31,6 +34,11 @@ export type CheckedClaim = {
   verdict: FactAuditVerdict
   evidence?: string
   reason: string
+  semantic?: {
+    verdict: "supported" | "unsupported" | "uncertain"
+    confidence: number
+    reason: string
+  }
 }
 
 export type FactAuditConflict = {
@@ -45,6 +53,11 @@ export type FactAuditResult = {
   status: FactAuditStatus
   checkedClaims: CheckedClaim[]
   conflicts: FactAuditConflict[]
+  evidence?: {
+    kind: "rag_result" | "frozen_evidence_pack"
+    retrieval_id?: string
+    content_hash?: string
+  }
 }
 
 export type EvidenceIndex = Map<string, KnowledgeFact>

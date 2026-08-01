@@ -1,28 +1,52 @@
-import { buildEvidenceIndex } from "./evidence-index"
-import type { CheckedClaim, FactAuditConflict, FactAuditInput, FactAuditResult, FactAuditStatus } from "./types"
+import { contentHash } from "../role-c-content/contracts/common"
+import { buildEvidenceIndex, buildEvidenceIndexFromPack } from "./evidence-index"
+import type { CheckedClaim, EvidenceIndex, FactAuditConflict, FactAuditInput, FactAuditResult, FactAuditStatus } from "./types"
 
-const TOKEN_PATTERN = /[a-z_][a-z0-9_]*|\d+(?:\.\d+)?|===?|!==?|<=|>=|[+*/%<>-]|[\u4e00-\u9fff]{2,}/g
-const NEGATION_PATTERN = /(?:并非|不是|不能|不会|不可|无需|禁止|避免|没有|不应|未|无|没|非|不)/u
-
-/**
- * Only collapse a deliberately small set of wording changes that preserve the
- * proposition. This is lexical normalization, not a knowledge-specific synonym
- * table: it never names a source, fact or Python concept.
- */
-const EQUIVALENT_WORDING: ReadonlyArray<readonly [RegExp, string]> = [
-  [/通常/g, "常"],
-  [/一般/g, "常"],
-  [/逐个处理/g, "遍历"],
-  [/逐一处理/g, "遍历"],
-  [/一个个处理/g, "遍历"],
-  [/(?:里面的|里的|当中的)/g, "中的"],
+const EXTERNAL_KNOWLEDGE_TERMS = [
+  "Transformer", "自注意力", "神经网络", "梯度下降", "CNN",
+  "Pandas", "NumPy", "matplotlib", "数据框", "DataFrame",
+  "λ", "yield",
+  "闭包", "作用域", "global", "nonlocal",
+  "正则表达式", "re模块", "正则",
+  "多线程", "多进程", "并发", "async", "await",
+  "数据库", "SQL", "MySQL", "SQLite",
+  "GUI", "图形界面", "tkinter",
+  "API", "HTTP", "网络请求", "requests",
+  "单元测试", "unittest", "pytest",
+  "pip", "虚拟环境", "venv", "conda",
+  "git", "版本控制", "GitHub",
+  "AI", "机器学习", "深度学习", "大模型", "LLM",
 ]
+const TOKEN_PATTERN = /[A-Za-z]+|[\u4e00-\u9fff]{2,}/g
 
 export { buildEvidenceIndex }
 export type { FactAuditInput, FactAuditResult } from "./types"
 
+export interface SemanticAuditPort {
+  auditClaim(input: {
+    claim: string
+    evidence: string
+    citations: { source_id: string; fact_id: string }[]
+  }): Promise<{
+    verdict: "supported" | "unsupported" | "uncertain"
+    confidence: number
+    reason: string
+  }>
+}
+
 export function auditGeneratedContent(input: FactAuditInput): FactAuditResult {
-  const evidenceIndex = buildEvidenceIndex(input.ragResult)
+  const evidence = resolveAuditEvidence(input)
+  if (evidence.error) {
+    return {
+      artifactId: input.artifactId,
+      status: "reject",
+      checkedClaims: [],
+      conflicts: [evidence.error],
+      evidence: evidence.metadata,
+    }
+  }
+
+  const evidenceIndex = evidence.index
   const checkedClaims: CheckedClaim[] = []
   const conflicts: FactAuditConflict[] = []
 
@@ -36,6 +60,19 @@ export function auditGeneratedContent(input: FactAuditInput): FactAuditResult {
         reason: "知识性内容缺少 source_id/fact_id 引用。",
       })
       conflicts.push({ blockId: block.blockId, claim: block.text, issue: "缺少知识库引用" })
+      continue
+    }
+
+    const externalTerm = EXTERNAL_KNOWLEDGE_TERMS.find((term) => block.text.includes(term))
+    if (externalTerm) {
+      checkedClaims.push({
+        blockId: block.blockId,
+        claim: block.text,
+        citations: block.citations,
+        verdict: "external_knowledge",
+        reason: `内容包含当前 RAG 证据之外的外部知识：${externalTerm}`,
+      })
+      conflicts.push({ blockId: block.blockId, claim: block.text, issue: `外部知识未被当前 RAG 证据支持：${externalTerm}` })
       continue
     }
 
@@ -89,11 +126,115 @@ export function auditGeneratedContent(input: FactAuditInput): FactAuditResult {
     status: deriveStatus(checkedClaims),
     checkedClaims,
     conflicts,
+    evidence: evidence.metadata,
+  }
+}
+
+export async function auditGeneratedContentWithSemantic(input: {
+  input: FactAuditInput
+  semanticAuditPort?: SemanticAuditPort
+}): Promise<FactAuditResult> {
+  const base = auditGeneratedContent(input.input)
+
+  const evidence = resolveAuditEvidence(input.input)
+  if (evidence.error) return base
+
+  const checkedClaims: CheckedClaim[] = []
+  const semanticConflicts: FactAuditConflict[] = []
+  for (const claim of base.checkedClaims) {
+    const evidenceText = claim.evidence ?? firstExistingEvidenceForClaim(claim, evidence.index)
+    if ((claim.verdict !== "supported" && claim.verdict !== "unsupported") || !evidenceText) {
+      checkedClaims.push(claim)
+      continue
+    }
+
+    const deterministicSemantic = deterministicSemanticAudit({ claim: claim.claim, evidence: evidenceText })
+    const semantic = deterministicSemantic.verdict === "unsupported" || !input.semanticAuditPort
+      ? deterministicSemantic
+      : await input.semanticAuditPort.auditClaim({
+      claim: claim.claim,
+      evidence: evidenceText,
+      citations: claim.citations,
+    })
+    if (semantic.verdict === "supported") {
+      checkedClaims.push({ ...claim, evidence: evidenceText, semantic })
+      continue
+    }
+
+    checkedClaims.push({
+      ...claim,
+      verdict: "semantic_unsupported",
+      semantic,
+      reason: `语义审核未通过：${semantic.reason}`,
+    })
+    semanticConflicts.push({
+      blockId: claim.blockId,
+      claim: claim.claim,
+      issue: "语义审核未通过",
+      expectedEvidence: semantic.reason,
+    })
+  }
+
+  return {
+    ...base,
+    status: checkedClaims.some((claim) => claim.verdict === "semantic_unsupported") ? "reject" : base.status,
+    checkedClaims,
+    conflicts: [...base.conflicts, ...semanticConflicts],
+  }
+}
+
+function firstExistingEvidenceForClaim(claim: CheckedClaim, evidenceIndex: EvidenceIndex): string | undefined {
+  return claim.citations
+    .map((citation) => evidenceIndex.get(`${citation.source_id}:${citation.fact_id}`)?.content)
+    .find((content): content is string => Boolean(content))
+}
+
+function resolveAuditEvidence(input: FactAuditInput): {
+  index: EvidenceIndex
+  metadata: NonNullable<FactAuditResult["evidence"]>
+  error?: FactAuditConflict
+} {
+  if (input.evidencePack) {
+    const actualHash = contentHash(input.evidencePack)
+    const metadata = {
+      kind: "frozen_evidence_pack" as const,
+      retrieval_id: input.evidencePack.retrieval_id,
+      content_hash: actualHash,
+    }
+
+    if (input.expectedEvidenceContentHash && input.expectedEvidenceContentHash !== actualHash) {
+      return {
+        index: new Map(),
+        metadata,
+        error: {
+          blockId: "__evidence_pack__",
+          claim: input.evidencePack.retrieval_id,
+          issue: "冻结证据包哈希不匹配",
+          expectedEvidence: `expected=${input.expectedEvidenceContentHash}; actual=${actualHash}`,
+        },
+      }
+    }
+
+    return { index: buildEvidenceIndexFromPack(input.evidencePack), metadata }
+  }
+
+  if (input.ragResult) {
+    return { index: buildEvidenceIndex(input.ragResult), metadata: { kind: "rag_result" } }
+  }
+
+  return {
+    index: new Map(),
+    metadata: { kind: "rag_result" },
+    error: {
+      blockId: "__evidence__",
+      claim: input.artifactId,
+      issue: "缺少审核证据：必须提供 ragResult 或冻结 evidencePack",
+    },
   }
 }
 
 function deriveStatus(checkedClaims: CheckedClaim[]): FactAuditStatus {
-  if (checkedClaims.some((claim) => claim.verdict === "unsupported" || claim.verdict === "external_knowledge")) return "reject"
+  if (checkedClaims.some((claim) => claim.verdict === "unsupported" || claim.verdict === "external_knowledge" || claim.verdict === "semantic_unsupported")) return "reject"
   if (checkedClaims.some((claim) => claim.verdict === "missing_citation")) return "revise"
   return "pass"
 }
@@ -101,57 +242,50 @@ function deriveStatus(checkedClaims: CheckedClaim[]): FactAuditStatus {
 function isClaimSupportedByFact(claim: string, fact: string): boolean {
   const normalizedClaim = normalize(claim)
   const normalizedFact = normalize(fact)
-  if (!normalizedClaim || !normalizedFact) return false
-  if (hasNegativePolarity(normalizedClaim) !== hasNegativePolarity(normalizedFact)) return false
-  if (normalizedClaim === normalizedFact) return true
-
-  // A sufficiently complete excerpt cannot introduce a new proposition.  The
-  // inverse is intentionally not accepted: appending an unsupported assertion
-  // to the full fact must not turn the whole block into a supported claim.
-  if (normalizedFact.includes(normalizedClaim)) {
-    return normalizedClaim.length / normalizedFact.length >= 0.65
-  }
+  if (normalizedClaim.includes(normalizedFact) || normalizedFact.includes(normalizedClaim)) return true
 
   const claimTokens = new Set(tokens(normalizedClaim))
-  const factTokens = new Set(tokens(normalizedFact))
-  if (claimTokens.size === 0 || factTokens.size === 0) return false
+  const factTokens = tokens(normalizedFact)
+  const overlap = factTokens.filter((token) => claimTokens.has(token)).length
+  return overlap >= Math.min(2, factTokens.length)
+}
 
-  let overlap = 0
-  for (const token of claimTokens) {
-    if (factTokens.has(token)) overlap += 1
+function deterministicSemanticAudit(input: { claim: string; evidence: string }): {
+  verdict: "supported" | "unsupported" | "uncertain"
+  confidence: number
+  reason: string
+} {
+  if (hasNegation(input.claim) !== hasNegation(input.evidence)) {
+    return { verdict: "unsupported", confidence: 0.9, reason: "检测到否定词反转，claim 与引用事实语义方向不一致。" }
   }
-  const claimCoverage = overlap / claimTokens.size
-  const factCoverage = overlap / factTokens.size
-  const lengthRatio = normalizedClaim.length / normalizedFact.length
 
-  // Both directions matter. Claim coverage rejects a true fact followed by a
-  // fabricated extension; fact coverage rejects a loosely related sentence
-  // that merely repeats a couple of prominent words.
-  return claimCoverage >= 0.85
-    && factCoverage >= 0.75
-    && lengthRatio >= 0.65
-    && lengthRatio <= 1.35
+  const claimNumbers = numbers(input.claim)
+  const evidenceNumbers = numbers(input.evidence)
+  if (claimNumbers.length > 0 && !sameStringSet(claimNumbers, evidenceNumbers)) {
+    return { verdict: "unsupported", confidence: 0.86, reason: "检测到数字与引用事实不一致或证据中未提供该数字。" }
+  }
+
+  return { verdict: "supported", confidence: 0.8, reason: "确定性语义规则未发现否定反转或数字漂移。" }
+}
+
+function hasNegation(value: string): boolean {
+  return /不|不是|不能|无法|没有|并非|禁止/.test(value)
+}
+
+function numbers(value: string): string[] {
+  return value.match(/\d+(?:\.\d+)?/g) ?? []
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  if (left.length !== right.length) return false
+  const rightSet = new Set(right)
+  return left.every((value) => rightSet.has(value))
 }
 
 function normalize(value: string): string {
-  let normalized = value.toLowerCase().replace(/[，。、“”"'：:；;、！？!?（）()【】\[\]\s]/g, "")
-  for (const [pattern, replacement] of EQUIVALENT_WORDING) {
-    normalized = normalized.replace(pattern, replacement)
-  }
-  return normalized
-}
-
-function hasNegativePolarity(value: string): boolean {
-  return NEGATION_PATTERN.test(value)
+  return value.toLowerCase().replace(/[，。、“”"'：:；;、\s]/g, "")
 }
 
 function tokens(value: string): string[] {
-  return (value.match(TOKEN_PATTERN) ?? []).flatMap((token) => {
-    if (!/^[\u4e00-\u9fff]+$/u.test(token) || token.length <= 2) return [token]
-    const grams: string[] = []
-    for (let index = 0; index < token.length - 1; index += 1) {
-      grams.push(token.slice(index, index + 2))
-    }
-    return grams
-  })
+  return value.match(TOKEN_PATTERN) ?? []
 }

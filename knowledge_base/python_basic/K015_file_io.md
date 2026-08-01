@@ -21,19 +21,34 @@ open 可用于打开文件。
 
 ## 3. 示例
 
-### 文件读写 基础示例
+### 读取成绩文件
 
 ```python
-print("文件读写")
-print("source: K015")
+with open("scores.txt", "r", encoding="utf-8") as f:
+    content = f.read()
+    print("文件内容：")
+    print(content)
 ```
 
-该示例用于帮助学习者识别“文件读写”的基本用途。
+with 语句自动管理文件关闭，"r" 表示只读模式。read() 一次性读取全部内容。
+
+### 写入统计结果
+
+```python
+students = ["小明:92", "小红:85", "小刚:78"]
+with open("report.txt", "w", encoding="utf-8") as f:
+    for student in students:
+        f.write(student + "\n")
+print("报告已写入 report.txt")
+```
+
+"w" 写入模式会覆盖已有文件；每调用一次 write 写入一行，需要手动加换行符 \n。
 
 ## 4. 常见错误
 
-- 把概念记成语法碎片，不结合实际任务使用。
-- 生成内容时不标注 source_id 与 fact_id，导致后续无法审核。
+- 写文件时使用 "w" 模式忘记原有内容会被直接覆盖，应用 "a"（追加）模式保留已有内容。
+- 打开文件后忘记关闭导致资源泄漏——应始终使用 with 语句自动管理。
+- 读取中文文件时缺少 encoding="utf-8" 参数导致乱码或 UnicodeDecodeError。
 
 ## 5. 实操任务
 
@@ -42,8 +57,8 @@ print("source: K015")
 
 ## 6. 分阶测试题
 
-- Level 1: 请说明“文件读写”的核心作用。
-- Level 2: 请完成一个与“文件读写”相关的小练习。
+- Level 1: 使用 open 的 "w" 模式打开一个已有文件会？（A. 追加内容  B. 覆盖原文件  C. 报错  D. 只读打开）
+- Level 2: 写代码：把程序中的学生姓名和成绩逐行写入 score_report.txt，每行格式为"姓名：成绩"。
 
 ## 7. 可引用事实
 

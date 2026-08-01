@@ -21,29 +21,42 @@ while 会在条件为 True 时重复执行代码块。
 
 ## 3. 示例
 
-### while 循环 基础示例
+### 从 1 数到 5
 
 ```python
-print("while 循环")
-print("source: K008")
+count = 1
+while count <= 5:
+    print("第", count, "次")
+    count = count + 1
 ```
 
-该示例用于帮助学习者识别“while 循环”的基本用途。
+每次循环把 count 加 1，直到 count > 5 时条件为 False 退出。
+
+### 直到输入正确密码
+
+```python
+password = ""
+while password != "abc123":
+    password = input("请输入密码：")
+print("登录成功！")
+```
+
+循环持续要求输入，直到用户输入正确密码，属于"重复次数不确定但终止条件明确"的典型场景。
 
 ## 4. 常见错误
 
-- 把概念记成语法碎片，不结合实际任务使用。
-- 生成内容时不标注 source_id 与 fact_id，导致后续无法审核。
+- 忘记在循环体内更新循环变量（如漏写 count = count + 1），导致条件永远为 True 形成死循环。
+- 初始条件直接为 False 导致循环体一次都不执行，误以为 while 会至少执行一次。
 
 ## 5. 实操任务
 
 - 用 while 从 1 打印到 5
-- 说明死循环产生原因
+- 用 while 实现"猜数字"游戏：程序想一个 1-100 的数，用户猜直到猜对
 
 ## 6. 分阶测试题
 
-- Level 1: 请说明“while 循环”的核心作用。
-- Level 2: 请完成一个与“while 循环”相关的小练习。
+- Level 1: 以下哪段代码会导致死循环？（A. while False: print(1)  B. while True: break  C. x=0; while x<5: x+=1  D. x=5; while x>0: print(x)）
+- Level 2: 用 while 循环计算 1 到 100 的和。
 
 ## 7. 可引用事实
 
