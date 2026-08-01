@@ -2,12 +2,13 @@ import type {
   GenerateRoleCForRoleDInput,
   RoleCForRoleDResult,
 } from "../../../role-d-integration/contracts"
+import { ROLE_C_API_PATHS } from "../../../role-d-integration/contracts"
 
 export type RoleCContentRequest = GenerateRoleCForRoleDInput
 
 export async function requestRoleCContent(input: RoleCContentRequest): Promise<RoleCForRoleDResult> {
   try {
-    const response = await fetch("/api/role-c/generate", {
+    const response = await fetch(ROLE_C_API_PATHS.generate, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(input),

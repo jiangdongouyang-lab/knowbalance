@@ -160,7 +160,16 @@ copy .env.role-c.example .env.role-c.local
 
 联调记录包含运行环境、Provider 模式、runId 和页面终局 reason。模型 Provider + Docker 是通用目标的端到端验收路径。
 
-生产构建位于 `dist/role-d-ui/`。当前 Vite 开发/预览服务提供 `/api/role-c/generate` 与 `/api/role-c/submit`；部署纯静态 `dist` 时需要由 C/后端部署等价 API、可信 runner 和持久化存储，不能把 C 的安全逻辑打包进浏览器。
+生产构建位于 `dist/role-d-ui/`。当前 Vite 开发/预览服务提供以下 C 接口，路径常量和数据类型统一定义在 `src/role-d-integration/contracts.ts`：
+
+| 接口 | 用途 |
+|---|---|
+| `POST /api/role-c/generate` | 生成首轮讲义、编程练习和测评 |
+| `POST /api/role-c/submit` | 提交正式测评并取得可信评分和下一步动作 |
+| `POST /api/role-c/continue` | 从已完成提交继续下一轮；需要新路径时返回 `awaiting_input` |
+| `POST /api/role-c/route-anchors` | 提交下一轮锚点题并冻结正式测评路线 |
+
+`continue` 只接收会话、提交、学习者身份，以及可选的 B 新路径/新画像；当前画像、反馈和历史证据由 C 从持久化记录读取，新路径证据由 C 在服务端向 A 刷新。部署纯静态 `dist` 时需要由 C/后端部署等价 API、可信 runner 和持久化存储，不能把 C 的安全逻辑打包进浏览器。
 
 ## 主要目录
 

@@ -169,10 +169,12 @@ export interface ProcessSubmissionInput {
  */
 export type PrepareNextRoundFromCompletedSubmissionInput = Omit<
   PrepareNextRoundInput,
-  "feedback" | "parent_spec" | "current_evidence_pack"
+  "feedback" | "parent_spec" | "current_evidence_pack" | "profile_snapshot"
 > & {
   session_id: string
   submission_id: string
+  /** Compatibility assertion only; the authoritative snapshot is loaded from the run. */
+  profile_snapshot?: LearnerProfileSnapshot
 }
 
 export interface LearningCycleCompletion {
@@ -355,6 +357,7 @@ export class LearningCycleService {
       schema_version: "1.0",
       run_id: input.pipeline_input.generation_spec.run_id,
       learner_id_hash: input.learner_id_hash,
+      profile_snapshot: structuredClone(input.profile_snapshot),
       pipeline_input: structuredClone(input.pipeline_input),
       pipeline_result: structuredClone(input.pipeline_result),
       secure_artifact_refs: {
@@ -996,12 +999,25 @@ export class LearningCycleService {
         "已完成提交对应的可信 run 不存在或身份不一致",
       )
     }
+    if (!run.profile_snapshot) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        "当前学习 run 缺少可信画像；请重新生成本轮内容后再继续",
+      )
+    }
+    if (input.profile_snapshot
+      && contentHash(input.profile_snapshot) !== contentHash(run.profile_snapshot)) {
+      throw new LearningCycleServiceError(
+        "INVALID_SESSION",
+        "调用方画像与 run 中冻结的画像快照不一致",
+      )
+    }
 
     return prepareNextRound({
       authenticated_learner_id_hash: input.authenticated_learner_id_hash,
       feedback: structuredClone(record.feedback),
       parent_spec: structuredClone(run.pipeline_input.generation_spec),
-      profile_snapshot: structuredClone(input.profile_snapshot),
+      profile_snapshot: structuredClone(run.profile_snapshot),
       current_evidence_pack: structuredClone(run.pipeline_input.evidence_pack),
       ...(input.next_path_node
         ? { next_path_node: structuredClone(input.next_path_node) }

@@ -23,8 +23,18 @@ async function createPlan(title = "循环专项", goal = "完成成绩统计程�
   await screen.findByRole("heading", { name: "用真实知识库题目确认基础" })
 }
 
-async function answerDynamicDiagnosis(options = ["遍历序列", "append", "def", "=", "str"]) {
+async function answerDynamicDiagnosis(options = [
+  "遍历序列",
+  "append",
+  "x=5; while x>0: print(x)",
+  "def",
+  "=",
+  "str",
+]) {
   const radios = screen.getAllByRole("radio")
+  const itemCount = new Set(
+    radios.map((radio) => (radio as HTMLInputElement).name),
+  ).size
   const selected = new Set<string>()
   for (const option of options) {
     const matches = screen.queryAllByLabelText(option)
@@ -41,8 +51,8 @@ async function answerDynamicDiagnosis(options = ["遍历序列", "append", "def"
       selected.add(input.name)
     }
   }
-  await userEvent.click(screen.getByRole("button", { name: `提交 ${options.length} 道诊断题` }))
-  expect(await screen.findByRole("status")).toHaveTextContent(`客观诊断已完成 · ${options.length} / ${options.length} 题`)
+  await userEvent.click(screen.getByRole("button", { name: `提交 ${itemCount} 道诊断题` }))
+  expect(await screen.findByRole("status")).toHaveTextContent(`客观诊断已完成 · ${itemCount} / ${itemCount} 题`)
 }
 
 async function enterLearning() {
@@ -198,9 +208,9 @@ describe("Role D dynamic diagnosis and official C resources", () => {
     expect(screen.getByText("5 / 5 题")).toBeInTheDocument()
     expect(screen.getByText("从基础应用开始")).toBeInTheDocument()
     expect(screen.getByText("for 循环")).toBeInTheDocument()
-    expect(screen.queryByText("循环", { exact: true })).not.toBeInTheDocument()
-    expect(screen.getByText("本轮诊断未发现需要优先补强的知识点")).toBeInTheDocument()
-    expect(screen.getByText(/客观测试答对覆盖自评薄弱/)).toBeInTheDocument()
+    expect(screen.getByText("循环", { exact: true })).toBeInTheDocument()
+    expect(screen.queryByText("本轮诊断未发现需要优先补强的知识点")).not.toBeInTheDocument()
+    expect(screen.queryByText(/客观测试答对覆盖自评薄弱/)).not.toBeInTheDocument()
   })
 
   test("raises an under-confident beginner teaching start after five fully correct objective answers", async () => {

@@ -207,7 +207,18 @@ Python 代码统一使用 `DockerPythonCodeRunner`：
 
 相同执行身份由 single-flight 合并并发调用。审核通过的 `READY` 结果写入 `NextRoundExecutionJournal`，后续调用先校验中央审核门禁和两条 secure 引用，再顺序重放。失效的 secure 引用通过结果哈希 CAS 清除后重新生成；journal 提交结果不确定时清理本次安全批次并撤销同一记录。注入式 journal 的原子提交保留 winner，并清理 loser 的安全存储批次。
 
-`continueCompletedLearningCycle` 将 B 的新版画像、路径和 A 的对应证据送入可恢复审核流水线。最终通过后按顺序注册 run、创建稳定的锚点会话，再发布 reviewed release 与学习会话。锚点得分产生后由 `routeAssessmentAnchors` 冻结正式测评路线。
+`continueCompletedLearningCycle` 将 B 的新版画像、路径和 A 的对应证据送入可恢复审核流水线。服务端入口 `continueRoleCAfterSubmission` 从持久化记录读取当前画像、冻结反馈和历史证据；D 提供 B 的新路径后，C 在服务端刷新 A 证据并绑定目标事实。最终通过后按顺序注册 run、创建稳定的锚点会话，再发布 reviewed release 与学习会话。锚点得分产生后由 `routeRoleCAssessmentAnchors` 调用可信评分并冻结正式测评路线。
+
+本地开发/预览服务公开四个统一入口：
+
+| 路径 | 服务入口 |
+|---|---|
+| `/api/role-c/generate` | `generateRoleCForRoleDWithRuntime` |
+| `/api/role-c/submit` | `submitRoleCAssessment` |
+| `/api/role-c/continue` | `continueRoleCAfterSubmission` |
+| `/api/role-c/route-anchors` | `routeRoleCAssessmentAnchors` |
+
+`LearningRunRecord` 保存与 GenerationSpec 一致的可信画像快照，使下一轮在进程重启后仍能仅凭会话和提交标识恢复。继续执行和对外投递使用稳定身份记录，重复请求返回同一终局结果。
 
 外层 `AdaptiveLearningLoopJournal` 记录恢复调用、生成结果、run/session 激活和对外投递阶段。`AtomicFileAdaptiveLearningLoopJournal` 使用完整性哈希、revision CAS、文件锁和私有文件权限支持跨进程、跨重启续跑。A/B 请求使用稳定请求标识；已成功响应、已发布结果和终态均可直接重放。
 
@@ -244,6 +255,8 @@ Python 代码统一使用 `DockerPythonCodeRunner`：
 | `prepareNextRound` | 对可信冻结输入执行确定性下一轮规划 |
 | `executePreparedNextRound` | 审核执行、并发合并和成功结果重放 |
 | `continueCompletedLearningCycle` | 完成下一轮恢复审核、run/session 注册和 D 发布 |
+| `continueRoleCAfterSubmission` | 服务端恢复已完成提交、刷新新路径证据并继续下一轮 |
+| `routeRoleCAssessmentAnchors` | 服务端接收锚点答案并返回冻结后的正式路线 |
 | `RoleBLearningProgressAdapter` | B 接收学习证据信封、幂等更新画像并生成新版本 |
 
 ## 12. 验证命令

@@ -1,5 +1,6 @@
 import type { RoleDSession } from "./types"
 import { buildRoleCSubmissionAnswers, type RoleCSubmissionOutcome } from "./role-c-submission"
+import { ROLE_C_API_PATHS } from "../../../role-d-integration/contracts"
 
 export interface RoleCSubmissionRequest {
   sessionId: string
@@ -34,7 +35,7 @@ export async function submitRoleCAssessment(session: RoleDSession): Promise<Role
     answers: buildRoleCSubmissionAnswers(session),
   }
   try {
-    const response = await fetch("/api/role-c/submit", {
+    const response = await fetch(ROLE_C_API_PATHS.submit, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(request),

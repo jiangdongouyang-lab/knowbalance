@@ -287,12 +287,9 @@ export async function deliverRoleCToD(
   port: RoleDPublicDeliveryPort,
   pipeline: ReviewedCPipelineResult,
 ): Promise<RoleCDeliveryAck> {
-  const release = reviewedRelease(pipeline)
-  return publishReviewedReleaseToD(
-    port,
-    pipeline,
-    release,
-  )
+  const delivery = createReviewedReleaseDelivery(pipeline)
+  const ack = await port.publishReviewedRelease(structuredClone(delivery))
+  return assertDeliveryAck(ack, delivery, "ROLE_C_D")
 }
 
 function reviewedRelease(pipeline: ReviewedCPipelineResult): {
@@ -304,18 +301,11 @@ function reviewedRelease(pipeline: ReviewedCPipelineResult): {
   })
 }
 
-/**
- * Low-level transport primitive. It is deliberately private so public callers cannot
- * publish an arbitrary artifact array without passing the reviewed release gate.
- */
-async function publishReviewedReleaseToD(
-  port: RoleDPublicDeliveryPort,
+/** Builds the exact validated public envelope used by HTTP and delivery ports. */
+export function createReviewedReleaseDelivery(
   pipeline: ReviewedCPipelineResult,
-  reviewed: {
-    run_id: string
-    artifacts: [ConceptLessonArtifact, CodeLabPublicArtifact, AssessmentPublicArtifact]
-  },
-): Promise<RoleCDeliveryAck> {
+): RoleCReviewedReleaseDelivery {
+  const reviewed = reviewedRelease(pipeline)
   const runId = reviewed.run_id
   const artifacts = reviewed.artifacts
   const trace = pipeline.trace_events
@@ -355,8 +345,7 @@ async function publishReviewedReleaseToD(
     delivery_id: contentHash(reviewedReleaseDeliveryIdentity(body)),
   }
   assertOutboundSchema("reviewed_release_delivery.schema.json", delivery)
-  const ack = await port.publishReviewedRelease(structuredClone(delivery))
-  return assertDeliveryAck(ack, delivery, "ROLE_C_D")
+  return delivery
 }
 
 function reviewedReleaseDeliveryIdentity(
@@ -400,6 +389,16 @@ export async function deliverReviewRecoveryStatusToD(
   port: RoleDReviewRecoveryStatusPort,
   result: ReviewRecoveryPublicResult,
 ): Promise<RoleCDeliveryAck> {
+  const delivery = createReviewRecoveryStatusDelivery(result)
+  const ack = await port.publishReviewRecoveryStatus(
+    structuredClone(delivery),
+  )
+  return assertDeliveryAck(ack, delivery, "ROLE_C_D")
+}
+
+export function createReviewRecoveryStatusDelivery(
+  result: ReviewRecoveryPublicResult,
+): RoleCReviewRecoveryStatusDelivery {
   assertOutboundSchema("review_recovery_result.schema.json", result)
   if (!isTerminalReviewRecoveryResult(result)) {
     throw new Error("ROLE_C_D_RECOVERY_STATUS_NOT_TERMINAL")
@@ -419,10 +418,7 @@ export async function deliverReviewRecoveryStatusToD(
     delivery,
   )
   assertNoOutboundSecrets("ROLE_C_D_RECOVERY_STATUS_SECRET_LEAK", delivery)
-  const ack = await port.publishReviewRecoveryStatus(
-    structuredClone(delivery),
-  )
-  return assertDeliveryAck(ack, delivery, "ROLE_C_D")
+  return delivery
 }
 
 export async function deliverLearningSessionToD(
@@ -430,6 +426,15 @@ export async function deliverLearningSessionToD(
   pipeline: ReviewedCPipelineResult,
   learningSession: RoleCLearningSessionHandoff,
 ): Promise<RoleCDeliveryAck> {
+  const delivery = createLearningSessionDelivery(pipeline, learningSession)
+  const ack = await port.publishLearningSession(structuredClone(delivery))
+  return assertDeliveryAck(ack, delivery, "ROLE_C_D")
+}
+
+export function createLearningSessionDelivery(
+  pipeline: ReviewedCPipelineResult,
+  learningSession: RoleCLearningSessionHandoff,
+): RoleCLearningSessionDelivery {
   const release = reviewedRelease(pipeline)
   const normalizedSession = validateLearningSessionHandoff(
     learningSession,
@@ -446,8 +451,7 @@ export async function deliverLearningSessionToD(
   }
   assertOutboundSchema("learning_session_delivery.schema.json", delivery)
   assertNoOutboundSecrets("ROLE_C_D_SESSION_SECRET_LEAK", delivery)
-  const ack = await port.publishLearningSession(structuredClone(delivery))
-  return assertDeliveryAck(ack, delivery, "ROLE_C_D")
+  return delivery
 }
 
 export function validateLearningSessionHandoff(

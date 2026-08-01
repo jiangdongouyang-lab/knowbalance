@@ -26,6 +26,7 @@ import type {
 import type {
   CPipelineInput,
 } from "../orchestrator/content-pipeline"
+import type { LearnerProfileSnapshot } from "../contracts/profile-adapter"
 import type { ReviewedCPipelineResult } from "../review/types"
 import { assertReviewedReadyPipeline } from "../review/validate-reviewed-release"
 import { validatePublicArtifactNoSecrets } from "../validators/public-secure-leak-validator"
@@ -45,6 +46,8 @@ export interface LearningRunRecord {
   run_id: string
   /** Backend-only learner subject bound when the reviewed run is registered. */
   learner_id_hash: string
+  /** Exact backend-owned snapshot used for continuation; absent on legacy runs. */
+  profile_snapshot?: LearnerProfileSnapshot
   pipeline_input: CPipelineInput
   pipeline_result: ReviewedCPipelineResult
   /** Named opaque references remove the positional coupling of CPipelineResult.secure_refs. */
@@ -529,6 +532,18 @@ function normalizeRun(record: LearningRunRecord, creating: boolean): LearningRun
   assertBaseRecord(normalized, creating)
   assertIdentifier(normalized.run_id, "run_id")
   assertIdentifier(normalized.learner_id_hash, "learner_id_hash")
+  if (normalized.profile_snapshot
+    && (normalized.profile_snapshot.profile_id
+      !== normalized.pipeline_input.generation_spec.profile_ref.profile_id
+    || normalized.profile_snapshot.profile_version
+      !== normalized.pipeline_input.generation_spec.profile_ref.profile_version
+    || contentHash(normalized.profile_snapshot)
+      !== normalized.pipeline_input.generation_spec.profile_ref.profile_content_hash)) {
+    throw new LearningCycleStoreError(
+      "INVALID_RECORD",
+      "run record 的画像快照与 GenerationSpec 不一致",
+    )
+  }
   if (normalized.pipeline_input.generation_spec.run_id !== normalized.run_id
     || normalized.pipeline_result.generation_spec.run_id !== normalized.run_id) {
     throw new LearningCycleStoreError("INVALID_RECORD", "run record 的 pipeline run_id 不一致")

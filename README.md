@@ -123,7 +123,7 @@ bun run role-d:dev -- --host 127.0.0.1 --port 5174
 
 Open `http://127.0.0.1:5174/` in a browser. The page shell opens without Docker or a model key; content generation fails closed until a Provider is configured. For the normal model-backed path, copy `.env.role-c.example` to `.env.role-c.local`, fill the model endpoint/model/key, build the Role C Docker image, and restart the command. The fixed deterministic templates are available only when `ROLE_C_PROVIDER_MODE=deterministic` is selected explicitly for offline regression. `.env.role-c.local` is ignored and must never be committed.
 
-The local Vite middleware exposes `/api/role-c/generate` and `/api/role-c/submit` for this demo. It is a development/integration harness, not a production backend; do not expose it publicly or use it as a substitute for C's persistent service.
+The local Vite middleware exposes the complete C lifecycle through `/api/role-c/generate`, `/api/role-c/submit`, `/api/role-c/continue`, and `/api/role-c/route-anchors`. The shared route names and request/response types live in `src/role-d-integration/contracts.ts`. It is a development/integration harness, not a production backend; do not expose it publicly or use it as a substitute for C's persistent service.
 
 Repository tests use `bun test --isolate ./tests` so Role C's schema and frozen-fixture tests run in separate globals on Windows/Bun.
 
