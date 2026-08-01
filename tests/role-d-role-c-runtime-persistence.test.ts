@@ -5,7 +5,9 @@ import { join } from "node:path"
 import { loadKnowledgeBase } from "../src/knowledge/loader"
 import { retrieveKnowledge } from "../src/rag/retriever"
 import {
+  continueRoleCAfterSubmission,
   generateRoleCForRoleDWithRuntime,
+  routeRoleCAssessmentAnchors,
   submitRoleCAssessment,
 } from "../src/role-d-integration/role-c-service"
 import {
@@ -111,6 +113,93 @@ describe("Role D → Role C durable HTTP runtime boundary", () => {
         expect(first.feedback.submission_id).toBe(submission.submissionId)
         expect(first.feedback.session_id).toBe(submission.sessionId)
         expect(first.feedback.run_id).toBe(submission.runId)
+        expect(first.feedback.final_decision.action).toBe("advance")
+      }
+
+      const nextPathNode = defineLearningPathNode({
+        node_id: "B-PATH-RUNTIME-NEXT-PASSING-COUNT",
+        target_source_ids: ["K007", "K009", "K006"],
+        prerequisite_source_ids: ["K002", "K003", "K005"],
+        goal: "使用循环、列表和条件判断统计及格人数",
+        objectives: [
+          { objective_id: "NEXT-O1", source_id: "K007", required_fact_ids: [], observable_behavior: "trace", importance: "core" },
+          { objective_id: "NEXT-O2", source_id: "K009", required_fact_ids: [], observable_behavior: "apply", importance: "core" },
+          { objective_id: "NEXT-O3", source_id: "K006", required_fact_ids: [], observable_behavior: "create", importance: "core" },
+        ],
+        assessment_blueprint: {
+          tier_1_count: 2,
+          tier_2_count: 2,
+          tier_3_count: 1,
+          required_modalities: ["mcq", "trace", "code"],
+        },
+      })
+      const continuationRuntime = {
+        providerMode: "deterministic" as const,
+        allowDeterministicFallback: true,
+        dataDirectory,
+        reviewPort: alwaysPassReviewPort(),
+      }
+      const awaitingPath = await continueRoleCAfterSubmission({
+        sessionId: submission.sessionId,
+        submissionId: submission.submissionId,
+        learnerId: profile.learner_id,
+      }, continuationRuntime)
+      expect(awaitingPath).toEqual({
+        status: "awaiting_input",
+        action: "advance",
+        requestId: expect.any(String),
+        requiredInputs: ["nextPathNode"],
+      })
+
+      const continued = await continueRoleCAfterSubmission({
+        sessionId: submission.sessionId,
+        submissionId: submission.submissionId,
+        learnerId: profile.learner_id,
+        nextPathNode,
+      }, continuationRuntime)
+      const continuedReplay = await continueRoleCAfterSubmission({
+        sessionId: submission.sessionId,
+        submissionId: submission.submissionId,
+        learnerId: profile.learner_id,
+        nextPathNode: structuredClone(nextPathNode),
+      }, continuationRuntime)
+
+      expect(continued.status).toBe("published")
+      expect(continuedReplay).toEqual(continued)
+      if (continued.status !== "published") {
+        throw new Error(JSON.stringify(continued))
+      }
+      expect(continued.reviewedRelease.artifacts).toHaveLength(3)
+      expect(continued.learningSession.session.phase).toBe("anchor_pending")
+      expect(continued.finalContext.pathNode.target_source_ids)
+        .toEqual(["K007", "K009", "K006"])
+      expect(continued.finalContext.pathNode.objectives.every(
+        (objective) => objective.required_fact_ids.length > 0,
+      )).toBe(true)
+      expect(JSON.stringify(continued)).not.toContain("quiz_seeds")
+
+      const anchorSession = continued.learningSession.session
+      if (anchorSession.phase !== "anchor_pending") {
+        throw new Error("expected anchor-pending continuation")
+      }
+      const routed = await routeRoleCAssessmentAnchors({
+        routingRequestId: anchorSession.routing_request_id,
+        sessionId: anchorSession.session_id,
+        runId: anchorSession.run_id,
+        learnerId: profile.learner_id,
+        formId: anchorSession.form_id,
+        attemptNo: anchorSession.attempt_no,
+        submissionId: "SUB-DURABLE-RUNTIME-ANCHORS-1",
+        answers: [
+          { item_id: "ITEM-O1-T1-MCQ", selected_option_id: "opt_iterate", hint_level_used: 0 },
+          { item_id: "ITEM-O2-T1-TF", selected_option_id: "opt_true", hint_level_used: 0 },
+          { item_id: "ITEM-O1-T2-TRACE", text_response: "8", hint_level_used: 0 },
+        ],
+      }, { dataDirectory })
+      expect(routed.status).toBe("routed")
+      if (routed.status === "routed") {
+        expect(routed.learning_session.phase).toBe("route_locked")
+        expect(routed.learning_session.run_id).toBe(anchorSession.run_id)
       }
     } finally {
       await rm(temporary, { recursive: true, force: true })

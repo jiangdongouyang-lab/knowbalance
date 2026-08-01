@@ -4,9 +4,20 @@ import { resolve, join } from "node:path"
 import { readFileSync } from "node:fs"
 import type { IncomingMessage, ServerResponse } from "node:http"
 import type { Plugin } from "vite"
-import { generateRoleCForRoleDWithRuntime, submitRoleCAssessment } from "../role-d-integration/role-c-service"
-import type { GenerateRoleCForRoleDInput } from "../role-d-integration/contracts"
-import type { SubmitRoleCAssessmentInput } from "../role-d-integration/role-c-service"
+import {
+  continueRoleCAfterSubmission,
+  generateRoleCForRoleDWithRuntime,
+  routeRoleCAssessmentAnchors,
+  submitRoleCAssessment,
+} from "../role-d-integration/role-c-service"
+import {
+  ROLE_C_API_PATHS,
+  type ContinueRoleCAfterSubmissionInput,
+  type GenerateRoleCForRoleDInput,
+  type RoleCApiPath,
+  type RouteRoleCAssessmentAnchorsInput,
+  type SubmitRoleCAssessmentInput,
+} from "../role-d-integration/contracts"
 import {
   resolveRoleCProviderMode,
   resolveRoleCRuntimeDataDirectory,
@@ -35,29 +46,45 @@ export default defineConfig({
 
 function roleCApiPlugin(): Plugin {
   const middleware = async (request: IncomingMessage, response: ServerResponse, next: () => void) => {
-    if (request.url !== "/api/role-c/generate" && request.url !== "/api/role-c/submit") return next()
+    const path = request.url?.split("?", 1)[0]
+    if (!isRoleCApiPath(path)) return next()
     if (request.method !== "POST") {
       response.statusCode = 405
       return response.end(JSON.stringify({ error: "METHOD_NOT_ALLOWED" }))
     }
     try {
       const body = await readJsonBody(request)
-      if (request.url === "/api/role-c/submit" && !isRoleCSubmissionRequest(body)) {
-        return sendError(response, 400, "ROLE_C_SUBMISSION_INVALID")
+      const runtime = roleCRuntimeOptions()
+      let result
+      switch (path) {
+        case ROLE_C_API_PATHS.generate:
+          if (!isRoleCRequest(body)) {
+            return sendError(response, 400, "ROLE_C_REQUEST_INVALID")
+          }
+          result = await generateRoleCForRoleDWithRuntime(body, runtime)
+          break
+        case ROLE_C_API_PATHS.submit:
+          if (!isRoleCSubmissionRequest(body)) {
+            return sendError(response, 400, "ROLE_C_SUBMISSION_INVALID")
+          }
+          result = await submitRoleCAssessment(body, runtime)
+          break
+        case ROLE_C_API_PATHS.continue:
+          if (!isRoleCContinuationRequest(body)) {
+            return sendError(response, 400, "ROLE_C_CONTINUATION_INVALID")
+          }
+          result = await continueRoleCAfterSubmission(body, runtime)
+          break
+        case ROLE_C_API_PATHS.routeAnchors:
+          if (!isRoleCAnchorRoutingRequest(body)) {
+            return sendError(response, 400, "ROLE_C_ANCHOR_ROUTING_INVALID")
+          }
+          result = await routeRoleCAssessmentAnchors(body, runtime)
+          break
+        default:
+          return assertNeverRoleCApiPath(path)
       }
-      if (request.url === "/api/role-c/generate" && !isRoleCRequest(body)) {
-        return sendError(response, 400, "ROLE_C_REQUEST_INVALID")
-      }
-      const result = request.url === "/api/role-c/submit"
-        ? await submitRoleCAssessment(
-            body as SubmitRoleCAssessmentInput,
-            roleCRuntimeOptions(),
-          )
-        : await generateRoleCForRoleDWithRuntime(
-            body as GenerateRoleCForRoleDInput,
-            roleCRuntimeOptions(),
-          )
-      response.statusCode = result.status === "ready" || result.status === "completed" || result.status === "needs_review" ? 200 : 422
+      response.statusCode = isSuccessfulRoleCApiStatus(result.status) ? 200 : 422
       response.setHeader("content-type", "application/json; charset=utf-8")
       response.end(JSON.stringify(result))
     } catch (error) {
@@ -77,6 +104,26 @@ function roleCApiPlugin(): Plugin {
       server.middlewares.use(middleware)
     },
   }
+}
+
+function isRoleCApiPath(value: string | undefined): value is RoleCApiPath {
+  return typeof value === "string"
+    && Object.values(ROLE_C_API_PATHS).includes(value as RoleCApiPath)
+}
+
+function assertNeverRoleCApiPath(value: never): never {
+  throw new Error(`ROLE_C_API_PATH_UNHANDLED:${String(value)}`)
+}
+
+function isSuccessfulRoleCApiStatus(status: string): boolean {
+  return [
+    "ready",
+    "completed",
+    "needs_review",
+    "published",
+    "awaiting_input",
+    "routed",
+  ].includes(status)
 }
 
 function sendError(
@@ -137,6 +184,40 @@ function isRoleCSubmissionRequest(value: unknown): value is SubmitRoleCAssessmen
     && record.answers.every(isSubmissionAnswer)
 }
 
+function isRoleCContinuationRequest(
+  value: unknown,
+): value is ContinueRoleCAfterSubmissionInput {
+  if (!isRecord(value)
+    || !nonEmptyString(value.sessionId)
+    || !nonEmptyString(value.submissionId)
+    || !nonEmptyString(value.learnerId)) return false
+  if (value.nextPathNode !== undefined
+    && !isLearningPathNode(value.nextPathNode)) return false
+  if (value.nextProfileSnapshot !== undefined
+    && !isLearnerProfileSnapshot(value.nextProfileSnapshot)) return false
+  return value.nextGenerationAction === undefined
+    || ["remediate", "reinforce", "advance"].includes(
+      String(value.nextGenerationAction),
+    )
+}
+
+function isRoleCAnchorRoutingRequest(
+  value: unknown,
+): value is RouteRoleCAssessmentAnchorsInput {
+  if (!isRecord(value)) return false
+  return nonEmptyString(value.routingRequestId)
+    && nonEmptyString(value.sessionId)
+    && nonEmptyString(value.runId)
+    && nonEmptyString(value.learnerId)
+    && nonEmptyString(value.formId)
+    && Number.isSafeInteger(value.attemptNo)
+    && Number(value.attemptNo) > 0
+    && nonEmptyString(value.submissionId)
+    && Array.isArray(value.answers)
+    && value.answers.length > 0
+    && value.answers.every(isSubmissionAnswer)
+}
+
 function isSubmissionAnswer(value: unknown): boolean {
   if (!value || typeof value !== "object") return false
   const answer = value as Record<string, unknown>
@@ -168,6 +249,22 @@ function isLearnerProfile(value: unknown): boolean {
     && isStringArray(value.known_concepts)
     && isStringArray(value.weak_concepts)
     && typeof value.goal === "string"
+}
+
+function isLearnerProfileSnapshot(value: unknown): boolean {
+  return isRecord(value)
+    && value.schema_version === "1.0"
+    && nonEmptyString(value.profile_id)
+    && nonEmptyString(value.profile_version)
+    && nonEmptyString(value.learner_id)
+    && ["beginner", "basic", "intermediate", "integrated"].includes(
+      String(value.level),
+    )
+    && isStringArray(value.known_concepts)
+    && isStringArray(value.weak_concepts)
+    && typeof value.goal === "string"
+    && isStringArray(value.preferred_contexts)
+    && isStringArray(value.accommodations)
 }
 
 function isRagResult(value: unknown): boolean {
@@ -239,4 +336,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string")
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0
 }

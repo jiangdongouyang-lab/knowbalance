@@ -1,4 +1,6 @@
 import type {
+  ContinueRoleCAfterSubmissionInput,
+  ContinueRoleCForRoleDResult,
   GenerateRoleCForRoleDInput,
   RoleDContentAuditSummary,
   RoleCForRoleDResult,
@@ -6,6 +8,9 @@ import type {
   RoleDGeneratedArtifact,
   RoleDPublicCitation,
   RoleDWorkflowEvent,
+  RouteRoleCAssessmentAnchorsInput,
+  RouteRoleCAssessmentAnchorsResult,
+  SubmitRoleCAssessmentInput,
 } from "./contracts"
 import { loadKnowledgeBase } from "../knowledge/loader"
 import type { KnowledgeBase } from "../knowledge/types"
@@ -22,13 +27,18 @@ import { join, resolve } from "node:path"
 import {
   adaptLearnerProfile,
   adaptRagResult,
+  AtomicFileAdaptiveLearningLoopJournal,
   AtomicFileLearningCycleStore,
   AtomicFileMasteryStateStore,
   AtomicFileSecureArtifactStore,
   buildGenerationSpec,
+  continueCompletedLearningCycle,
   contentHash,
   createLocalABContentReviewPort,
   createLocalBPathPlanningPort,
+  createLearningSessionDelivery,
+  createReviewedReleaseDelivery,
+  createReviewRecoveryStatusDelivery,
   createRoleCAgents,
   defineLearningPathNode,
   DeterministicCodeLabContentProvider,
@@ -60,11 +70,17 @@ import {
   type LearningCyclePublicOutcome,
   type LearningCycleStore,
   type MasteryStateStore,
+  type AdaptiveLearningLoopJournal,
   type EvidenceRefreshPort,
+  type LearnerProfileSnapshot,
+  type LearningPathNode,
+  type RagEvidencePack,
   type RecoverableReviewedReadyContext,
   type ReviewRecoveryAttempt,
   type ReviewRecoverySummary,
   type RoleCContentProvider,
+  type RoleBPathPlanningPort,
+  type RoleDAdaptiveLearningLoopPort,
   type SecureArtifactStore,
   type SubmissionEnvelope,
 } from "../role-c-content"
@@ -103,6 +119,16 @@ export interface RoleCForRoleDRuntimeOptions {
   dataDirectory?: string
   /** Test/backend seam for callers that own equivalent durable stores. */
   learningPersistence?: RoleCLearningPersistence
+  /** A identity-based evidence adapter used by recovery and next-path activation. */
+  evidenceRefreshPort?: EvidenceRefreshPort
+  /** B path adapter used when a generated candidate needs formal replanning. */
+  pathPlanningPort?: RoleBPathPlanningPort
+  /** External D receiver. HTTP/local use an acknowledgement-only adapter. */
+  roleDPort?: RoleDAdaptiveLearningLoopPort
+  /** Durable outer continuation journal; dataDirectory selects the file adapter by default. */
+  adaptiveExecutionJournal?: AdaptiveLearningLoopJournal
+  /** Stable receiver identity included in continuation idempotency. */
+  deliveryTargetNamespace?: string
 }
 
 export interface RoleCLearningPersistence {
@@ -145,12 +171,9 @@ export async function generateRoleCForRoleDWithRuntime(
   input: GenerateRoleCForRoleDInput,
   runtime: RoleCForRoleDRuntimeOptions,
 ): Promise<RoleCForRoleDResult> {
-  const explicitOfflineMode = runtime.providerMode === "deterministic"
-    && runtime.allowDeterministicFallback === true
-  if (!runtime.provider
-    && runtime.providerMode !== "model"
-    && !explicitOfflineMode) {
-    const reason = "C 的通用内容生成模型尚未配置。请设置 ROLE_C_PROVIDER_MODE=model、模型接口地址和模型名称；离线金标模式需显式设置 ROLE_C_PROVIDER_MODE=deterministic。"
+  const configurationIssue = roleCProviderConfigurationIssue(runtime)
+  if (configurationIssue) {
+    const reason = configurationIssue
     return {
       status: "blocked",
       artifacts: [],
@@ -527,15 +550,7 @@ function recoveryWorkflowEvents(
   }]
 }
 
-export interface SubmitRoleCAssessmentInput {
-  sessionId: string
-  runId: string
-  learnerId: string
-  formId: string
-  attemptNo: number
-  submissionId: string
-  answers: SubmissionEnvelope["answers"]
-}
+export type { SubmitRoleCAssessmentInput } from "./contracts"
 
 export async function submitRoleCAssessment(
   input: SubmitRoleCAssessmentInput,
@@ -562,6 +577,488 @@ export async function submitRoleCAssessment(
       answers: input.answers,
     },
   })
+}
+
+/**
+ * Completes the backend-owned post-submission loop. The current run, profile,
+ * evidence and feedback are reloaded from C storage; a new B path is refreshed
+ * through A before it can enter generation.
+ */
+export async function continueRoleCAfterSubmission(
+  input: ContinueRoleCAfterSubmissionInput,
+  runtime: RoleCForRoleDRuntimeOptions = {},
+): Promise<ContinueRoleCForRoleDResult> {
+  const configurationIssue = roleCProviderConfigurationIssue(runtime)
+  if (configurationIssue) {
+    return {
+      status: "blocked",
+      stage: "configuration",
+      reason: configurationIssue,
+    }
+  }
+
+  const persistence = resolveRoleCLearningPersistence(runtime)
+  let session: Awaited<ReturnType<LearningCycleStore["loadSession"]>>
+  let knowledgeBase: KnowledgeBase
+  try {
+    const loaded = await Promise.all([
+      persistence.cycleStore.loadSession(input.sessionId),
+      loadKnowledgeBase(),
+    ])
+    session = loaded[0]
+    knowledgeBase = loaded[1]
+  } catch (error) {
+    return continuationPreparationBlocked(
+      `学习会话读取失败：${errorMessage(error)}`,
+    )
+  }
+  if (!session
+    || session.session_state.learner_id_hash !== input.learnerId) {
+    return continuationPreparationBlocked("学习会话不存在或学习者身份不一致")
+  }
+  let currentRun: Awaited<ReturnType<LearningCycleStore["loadRun"]>>
+  try {
+    currentRun = await persistence.cycleStore.loadRun(session.run_id)
+  } catch (error) {
+    return continuationPreparationBlocked(
+      `当前学习 run 读取失败：${errorMessage(error)}`,
+    )
+  }
+  if (!currentRun
+    || currentRun.learner_id_hash !== input.learnerId
+    || !currentRun.profile_snapshot) {
+    return continuationPreparationBlocked(
+      "当前学习 run 缺少可信画像；请重新生成本轮内容后再继续",
+    )
+  }
+
+  const runtimeEnv = runtime.env ?? process.env
+  let modelGateway: ReturnType<typeof createRoleCModelGatewayFromEnv> | undefined
+  let runner: CodeRunner
+  try {
+    modelGateway = runtime.providerMode === "model"
+      ? createRoleCModelGatewayFromEnv(runtimeEnv)
+      : undefined
+    runner = await resolveRoleCCodeRunner(runtime)
+  } catch (error) {
+    return {
+      status: "blocked",
+      stage: "configuration",
+      reason: error instanceof Error
+        ? error.message
+        : "C 的模型 Provider 或 Docker CodeRunner 不可用",
+    }
+  }
+  const provider = runtime.provider ?? (modelGateway
+    ? new ModelBackedRoleCContentProvider(
+        modelGateway,
+        modelBackedProviderOptionsFromEnv(runtimeEnv),
+      )
+    : new DeterministicCodeLabContentProvider())
+  const agents = createRoleCAgents(provider, {
+    code_lab: new TrustedCodeLabVerifier(runner),
+    assessment: new TrustedAssessmentVerifier(runner),
+  })
+  const cycleService = new LearningCycleService({
+    cycle_store: persistence.cycleStore,
+    secure_store: persistence.secureStore,
+    mastery_store: persistence.masteryStore,
+    code_runner: runner,
+  })
+  const evidenceRefreshPort = runtime.evidenceRefreshPort
+    ?? createRoleCRecoveryEvidenceRefreshPort({
+      kbVersion: knowledgeBase.version,
+      knowledgeBase,
+    })
+  const pathPlanningPort = runtime.pathPlanningPort
+    ?? createLocalBPathPlanningPort(knowledgeBase)
+
+  let nextPathNode = input.nextPathNode
+    ? structuredClone(input.nextPathNode)
+    : undefined
+  let nextEvidencePack: RagEvidencePack | undefined
+  if (nextPathNode) {
+    const nextProfile = input.nextProfileSnapshot
+      ?? currentRun.profile_snapshot
+    if (nextProfile.learner_id !== currentRun.profile_snapshot.learner_id) {
+      return continuationPreparationBlocked("B 返回的新画像属于另一名学习者")
+    }
+    const refreshed = await refreshNextPathEvidence(
+      nextPathNode,
+      nextProfile,
+      currentRun.run_id,
+      evidenceRefreshPort,
+    )
+    if (!refreshed.ok) {
+      return continuationPreparationBlocked(refreshed.reason)
+    }
+    nextPathNode = refreshed.pathNode
+    nextEvidencePack = refreshed.evidencePack
+  }
+
+  const adaptiveExecutionJournal = resolveAdaptiveJournal(runtime)
+  let continuation: Awaited<ReturnType<typeof continueCompletedLearningCycle>>
+  try {
+    continuation = await continueCompletedLearningCycle(
+      {
+        session_id: input.sessionId,
+        submission_id: input.submissionId,
+        authenticated_learner_id_hash: input.learnerId,
+        ...(nextPathNode ? { next_path_node: nextPathNode } : {}),
+        ...(nextEvidencePack ? { next_evidence_pack: nextEvidencePack } : {}),
+        ...(input.nextProfileSnapshot
+          ? { next_profile_snapshot: structuredClone(input.nextProfileSnapshot) }
+          : {}),
+        ...(input.nextGenerationAction
+          ? { next_generation_action: input.nextGenerationAction }
+          : {}),
+        current_generation_versions: {
+          prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+          model_config_hash: modelGateway
+            ? modelGateway.model_config_hash
+            : "deterministic-role-d-local-reference-v1",
+          runner_image_digest: runner.runner_image_digest,
+        },
+      },
+      {
+        learning_cycle: cycleService,
+        agents,
+        secure_store: persistence.secureStore,
+        review_options: {
+          review_port: runtime.reviewPort
+            ?? createLocalABContentReviewPort({ knowledge_base: knowledgeBase }),
+          ...(runtime.critic ? { critic: runtime.critic } : {}),
+          max_external_revisions: 2,
+        },
+        review_execution_config_version: "role-c-role-d-review-v1",
+        evidence_refresh_port: evidenceRefreshPort,
+        path_planning_port: pathPlanningPort,
+        max_recovery_attempts: 2,
+        recovery_policy_version: "role-c-review-recovery-v1",
+        recovery_port_version: "role-c-a-b-runtime-v1",
+        role_d_port: runtime.roleDPort ?? acknowledgementOnlyRoleDPort,
+        delivery_target_namespace:
+          runtime.deliveryTargetNamespace ?? "role-d-http-facade-v1",
+        ...(adaptiveExecutionJournal
+          ? { adaptive_execution_journal: adaptiveExecutionJournal }
+          : {}),
+      },
+    )
+  } catch (error) {
+    return continuationPreparationBlocked(
+      `下一轮学习准备失败：${errorMessage(error)}`,
+    )
+  }
+
+  if (continuation.status === "awaiting_input") {
+    const preparation = continuation.preparation
+    return preparation.status === "awaiting_path_node"
+      ? {
+          status: "awaiting_input",
+          action: "advance",
+          requestId: preparation.request_id,
+          requiredInputs: ["nextPathNode"],
+        }
+      : {
+          status: "awaiting_input",
+          action: "reprofile",
+          requestId: preparation.request_id,
+          requiredInputs: [
+            "nextProfileSnapshot",
+            "nextPathNode",
+            "nextGenerationAction",
+          ],
+          profileDriftSuggestion: structuredClone(preparation.suggestion),
+        }
+  }
+  if (continuation.status !== "published") {
+    const stage = continuation.stage
+    const reason = continuationFailureReason(continuation)
+    return {
+      status: continuation.status,
+      stage,
+      reason,
+      continuation,
+      ...(stage === "generation_review"
+        ? {
+            recoveryStatus: createReviewRecoveryStatusDelivery(
+              continuation.generation,
+            ),
+          }
+        : {}),
+    }
+  }
+
+  let publishedRun: Awaited<ReturnType<LearningCycleStore["loadRun"]>>
+  try {
+    publishedRun = await persistence.cycleStore.loadRun(
+      continuation.generation.run_id,
+    )
+  } catch (error) {
+    return continuationPreparationBlocked(
+      `下一轮公开上下文读取失败：${errorMessage(error)}`,
+    )
+  }
+  if (!publishedRun?.profile_snapshot) {
+    return continuationPreparationBlocked(
+      "下一轮已生成，但持久化 run 缺少公开交接上下文",
+    )
+  }
+  return {
+    status: "published",
+    continuation,
+    reviewedRelease: createReviewedReleaseDelivery(
+      publishedRun.pipeline_result,
+    ),
+    learningSession: createLearningSessionDelivery(
+      publishedRun.pipeline_result,
+      continuation.learning_session,
+    ),
+    finalContext: {
+      profileSnapshot: structuredClone(publishedRun.profile_snapshot),
+      profileVersion: publishedRun.profile_snapshot.profile_version,
+      pathNode: defineLearningPathNode({
+        ...structuredClone(publishedRun.pipeline_input.generation_spec.path_node),
+        objectives: structuredClone(
+          publishedRun.pipeline_input.generation_spec.targets,
+        ),
+        assessment_blueprint: structuredClone(
+          publishedRun.pipeline_input.generation_spec.assessment_blueprint,
+        ),
+      }),
+      evidencePack: projectPublicRagEvidencePack(
+        publishedRun.pipeline_input.evidence_pack,
+      ),
+    },
+  }
+}
+
+/** Trusted anchor routing for the anchor-first sessions returned by continuation. */
+export async function routeRoleCAssessmentAnchors(
+  input: RouteRoleCAssessmentAnchorsInput,
+  runtime: RoleCForRoleDRuntimeOptions = {},
+): Promise<RouteRoleCAssessmentAnchorsResult> {
+  const persistence = resolveRoleCLearningPersistence(runtime)
+  const runner = await resolveRoleCCodeRunner(runtime)
+  const service = new LearningCycleService({
+    cycle_store: persistence.cycleStore,
+    secure_store: persistence.secureStore,
+    mastery_store: persistence.masteryStore,
+    code_runner: runner,
+  })
+  try {
+    return await service.routeAssessmentAnchors({
+      routing_request_id: input.routingRequestId,
+      session_id: input.sessionId,
+      run_id: input.runId,
+      authenticated_learner_id_hash: input.learnerId,
+      attempt_no: input.attemptNo,
+      anchor_submission: {
+        schema_version: "1.0",
+        submission_id: input.submissionId,
+        run_id: input.runId,
+        learner_id_hash: input.learnerId,
+        form_id: input.formId,
+        attempt_no: input.attemptNo,
+        answers: structuredClone(input.answers),
+      },
+      revealed_anchor_hint_levels: Object.fromEntries(
+        input.answers.map((answer) => [answer.item_id, answer.hint_level_used]),
+      ),
+    })
+  } catch (error) {
+    return {
+      status: "blocked",
+      routing_request_id: input.routingRequestId,
+      issues: [`锚点路由失败：${errorMessage(error)}`],
+    }
+  }
+}
+
+function roleCProviderConfigurationIssue(
+  runtime: RoleCForRoleDRuntimeOptions,
+): string | undefined {
+  const explicitOfflineMode = runtime.providerMode === "deterministic"
+    && runtime.allowDeterministicFallback === true
+  return !runtime.provider
+    && runtime.providerMode !== "model"
+    && !explicitOfflineMode
+    ? "C 的通用内容生成模型尚未配置。请设置 ROLE_C_PROVIDER_MODE=model、模型接口地址和模型名称；离线金标模式需显式设置 ROLE_C_PROVIDER_MODE=deterministic。"
+    : undefined
+}
+
+function resolveAdaptiveJournal(
+  runtime: RoleCForRoleDRuntimeOptions,
+): AdaptiveLearningLoopJournal | undefined {
+  if (runtime.adaptiveExecutionJournal) {
+    return runtime.adaptiveExecutionJournal
+  }
+  return runtime.dataDirectory
+    ? new AtomicFileAdaptiveLearningLoopJournal({
+        root_directory: join(
+          resolve(runtime.dataDirectory),
+          "adaptive-learning-loop",
+        ),
+      })
+    : undefined
+}
+
+const acknowledgementOnlyRoleDPort: RoleDAdaptiveLearningLoopPort = {
+  async publishReviewedRelease(delivery) {
+    return {
+      schema_version: "1.0",
+      delivery_kind: delivery.delivery_kind,
+      delivery_id: delivery.delivery_id,
+      status: "accepted",
+    }
+  },
+  async publishLearningSession(delivery) {
+    return {
+      schema_version: "1.0",
+      delivery_kind: delivery.delivery_kind,
+      delivery_id: delivery.delivery_id,
+      status: "accepted",
+    }
+  },
+  async publishReviewRecoveryStatus(delivery) {
+    return {
+      schema_version: "1.0",
+      delivery_kind: delivery.delivery_kind,
+      delivery_id: delivery.delivery_id,
+      status: "accepted",
+    }
+  },
+}
+
+type NextPathEvidenceRefreshResult =
+  | {
+      ok: true
+      pathNode: LearningPathNode
+      evidencePack: RagEvidencePack
+    }
+  | { ok: false; reason: string }
+
+async function refreshNextPathEvidence(
+  pathNode: LearningPathNode,
+  profile: LearnerProfileSnapshot,
+  parentRunId: string,
+  port: EvidenceRefreshPort,
+): Promise<NextPathEvidenceRefreshResult> {
+  const sourceIds = [...new Set([
+    ...pathNode.target_source_ids,
+    ...pathNode.prerequisite_source_ids,
+  ])]
+  if (sourceIds.length === 0) {
+    return { ok: false, reason: "B 返回的新路径没有目标或先修知识点" }
+  }
+  let evidence: RagEvidencePack
+  try {
+    evidence = await port.refreshEvidence({
+      schema_version: "1.0",
+      request_id: stableId("RAG-NEXT", {
+        parent_run_id: parentRunId,
+        path_node_id: pathNode.node_id,
+        profile_version: profile.profile_version,
+      }),
+      run_id: parentRunId,
+      target_source_ids: sourceIds,
+      missing_type: "knowledge_item",
+      reason: "为 B 确认的下一学习节点刷新完整目标与先修证据",
+      learner_level: profile.level,
+      required_facts: pathNode.objectives.flatMap((objective) =>
+        objective.required_fact_ids.map((factId) => ({
+          source_id: objective.source_id,
+          fact_id: factId,
+        }))),
+    })
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `A 下一路径证据刷新失败：${error instanceof Error ? error.message : "未知错误"}`,
+    }
+  }
+
+  const evidenceBySource = new Map(
+    evidence.results.map((result) => [result.source_id, result]),
+  )
+  const missingSources = sourceIds.filter((sourceId) =>
+    !evidenceBySource.has(sourceId))
+  if (missingSources.length > 0) {
+    return {
+      ok: false,
+      reason: `A 未返回下一路径所需证据：${missingSources.join("、")}`,
+    }
+  }
+
+  const resolvedPath = structuredClone(pathNode)
+  let boundFacts = false
+  for (const objective of resolvedPath.objectives) {
+    const item = evidenceBySource.get(objective.source_id)
+    if (!item) {
+      return {
+        ok: false,
+        reason: `A 未返回目标 ${objective.objective_id} 对应的 ${objective.source_id}`,
+      }
+    }
+    const availableFacts = new Set(item.facts.map((fact) => fact.fact_id))
+    if (objective.required_fact_ids.length === 0) {
+      objective.required_fact_ids = [...availableFacts].sort().slice(0, 3)
+      boundFacts = true
+    }
+    const missingFacts = objective.required_fact_ids.filter((factId) =>
+      !availableFacts.has(factId))
+    if (objective.required_fact_ids.length === 0 || missingFacts.length > 0) {
+      return {
+        ok: false,
+        reason: missingFacts.length > 0
+          ? `A 未返回目标 ${objective.objective_id} 的必要事实：${missingFacts.join("、")}`
+          : `目标 ${objective.objective_id} 没有可绑定事实`,
+      }
+    }
+  }
+  if (boundFacts) {
+    resolvedPath.node_id = stableId("PATH-C-NEXT", {
+      upstream_path_node_id: pathNode.node_id,
+      profile_version: profile.profile_version,
+      objectives: resolvedPath.objectives,
+    })
+  }
+  return {
+    ok: true,
+    pathNode: defineLearningPathNode(resolvedPath),
+    evidencePack: evidence,
+  }
+}
+
+function continuationPreparationBlocked(
+  reason: string,
+): ContinueRoleCForRoleDResult {
+  return {
+    status: "blocked",
+    stage: "preparation",
+    reason,
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message.trim()
+    ? error.message
+    : "未知错误"
+}
+
+function continuationFailureReason(
+  continuation: Extract<
+    import("../role-c-content").ContinueCompletedLearningCycleResult,
+    { status: "blocked" | "failed" }
+  >,
+): string {
+  if (continuation.stage === "generation_review") {
+    return continuation.generation.recovery.message
+  }
+  const preparation = continuation.preparation
+  return "errors" in preparation && Array.isArray(preparation.errors)
+    ? preparation.errors.join("；")
+    : "下一轮准备未通过"
 }
 
 function resolveRoleCLearningPersistence(

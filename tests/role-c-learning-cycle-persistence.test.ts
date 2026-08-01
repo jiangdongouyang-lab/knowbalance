@@ -588,6 +588,18 @@ function runRecord(): LearningRunRecord {
     schema_version: "1.0",
     run_id: generationSpec.run_id,
     learner_id_hash: "learner-hash",
+    profile_snapshot: {
+      schema_version: "1.0",
+      profile_id: "PROFILE-CYCLE-1",
+      profile_version: "profile-cycle-v1",
+      learner_id: "learner-cycle",
+      level: "basic",
+      known_concepts: [],
+      weak_concepts: ["循环"],
+      goal: "掌握循环",
+      preferred_contexts: [],
+      accommodations: [],
+    },
     pipeline_input: pipelineInput,
     pipeline_result: pipelineResult,
     secure_artifact_refs: {
