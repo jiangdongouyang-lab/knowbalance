@@ -4,7 +4,7 @@ import type {
   ConceptLessonArtifact,
 } from "../contracts/artifacts"
 import type { CitationRef, RoleCAgentName } from "../contracts/common"
-import type { RagEvidenceItem, RagEvidencePack } from "../contracts/evidence-pack"
+import type { PublicRagEvidencePack } from "../contracts/evidence-pack"
 import type { GenerationSpec } from "../contracts/generation-spec"
 import type {
   CPipelineInput,
@@ -44,8 +44,12 @@ export interface ReviewContentBlock {
   review_block_id: string
   text: string
   citations: CitationRef[]
-  /** Natural-language knowledge content is checked as a claim; code is citation-bound. */
-  fact_audit_mode: "claim" | "citation_only"
+  /**
+   * Claims are checked for proposition-level grounding. Rendered teaching text
+   * is evidence-anchored and must visibly contain every cited frozen fact;
+   * questions, code and scaffolding remain citation-bound.
+   */
+  fact_audit_mode: "claim" | "evidence_anchored" | "citation_only"
   locator: ReviewBlockLocator
 }
 
@@ -55,9 +59,7 @@ export type ReviewablePublicArtifact =
   | { kind: "assessment"; artifact: AssessmentPublicArtifact }
 
 /** Review transport view. Answer-bearing quiz seeds remain inside C's trust boundary. */
-export interface ReviewEvidencePack extends Omit<RagEvidencePack, "results"> {
-  results: Array<Omit<RagEvidenceItem, "quiz_seeds">>
-}
+export type ReviewEvidencePack = PublicRagEvidencePack
 
 export interface ContentReviewRequest {
   run_id: string

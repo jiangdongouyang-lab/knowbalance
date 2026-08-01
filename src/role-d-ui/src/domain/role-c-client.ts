@@ -1,13 +1,9 @@
-import type { RagResult } from "../../../rag/retriever"
-import type { LearnerProfile } from "../../../role-b-profile/types"
-import type { RoleCForRoleDResult } from "../../../role-d-integration/contracts"
+import type {
+  GenerateRoleCForRoleDInput,
+  RoleCForRoleDResult,
+} from "../../../role-d-integration/contracts"
 
-export interface RoleCContentRequest {
-  profile: LearnerProfile
-  ragResult: RagResult
-  kbVersion: string
-  runId: string
-}
+export type RoleCContentRequest = GenerateRoleCForRoleDInput
 
 export async function requestRoleCContent(input: RoleCContentRequest): Promise<RoleCForRoleDResult> {
   try {

@@ -33,6 +33,7 @@ export interface AssessmentAuthorModelInput {
     next_round_context?: TieredEvaluatorRequest["next_round_context"]
   }
   revision_objections?: TieredEvaluatorRequest["revision_objections"]
+  external_revision_round?: TieredEvaluatorRequest["external_revision_round"]
 }
 
 /** Keeps authoring context high-signal and excludes learner identity and quiz answers. */
@@ -105,6 +106,7 @@ export function buildAssessmentAuthorModelInput(
     revision_objections: request.revision_objections
       ? structuredClone(request.revision_objections)
       : undefined,
+    external_revision_round: request.external_revision_round,
   }
 }
 

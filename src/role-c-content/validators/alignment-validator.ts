@@ -8,6 +8,7 @@ import type {
 } from "../contracts/artifacts"
 import { stableId } from "../contracts/common"
 import type { GenerationSpec } from "../contracts/generation-spec"
+import { modalityMeasuresBehavior } from "../contracts/assessment-measurement"
 
 export interface AlignmentObjection {
   objection_id: string
@@ -116,7 +117,8 @@ function inspectAlignment(input: CrossArtifactAlignmentInput): AlignmentObjectio
       artifactId: input.assessment.artifact_id, objectiveId: target.objective_id, type: "missing_assessment",
       evidence: assessmentMap?.item_ids ?? [], action: "为该目标补充可评分题目并更新 coverage",
     }))
-    else if (!validItems.some((item) => modalityMeasures(target.observable_behavior, item.modality))) {
+    else if (!validItems.some((item) =>
+      modalityMeasuresBehavior(target.observable_behavior, item.modality))) {
       objections.push(makeObjection({
         artifactId: input.assessment.artifact_id, objectiveId: target.objective_id, type: "unmeasurable_objective",
         evidence: validItems.map((item) => `${item.item_id}:${item.modality}`),
@@ -144,15 +146,6 @@ function inspectAlignment(input: CrossArtifactAlignmentInput): AlignmentObjectio
     }))
   }
 
-  const needsHigherOrder = input.spec.difficulty.cognitive_demand >= 2 || input.spec.targets.some((target) =>
-    ["apply", "debug", "create"].includes(target.observable_behavior),
-  )
-  if (needsHigherOrder && !assessmentPayload.items.some((item) => item.tier >= 2 && ["trace", "short_answer", "code"].includes(item.modality))) {
-    objections.push(makeObjection({
-      artifactId: input.assessment.artifact_id, objectiveId: "pipeline", type: "difficulty_mismatch", severity: "critical",
-      evidence: [`cognitive_demand=${input.spec.difficulty.cognitive_demand}`], action: "增加与认知要求一致的 Tier 2/3 可观察任务",
-    }))
-  }
   if (input.lab.quality.execution_verified !== true || input.lab_secure?.quality.execution_verified === false) objections.push(makeObjection({
     artifactId: input.lab.artifact_id, objectiveId: "pipeline", type: "unexecutable_task",
     evidence: ["execution_verified is not true"], action: "由独立 runner 重新验证 reference、starter 与错误变体",
@@ -196,18 +189,6 @@ function citationsOfBlock(block: RenderBlock) {
   if ("citations" in block) return block.citations
   if ("claims" in block) return block.claims.flatMap((claim) => claim.citations)
   return []
-}
-
-function modalityMeasures(behavior: GenerationSpec["targets"][number]["observable_behavior"], modality: string): boolean {
-  const allowed: Record<typeof behavior, string[]> = {
-    recognize: ["mcq", "true_false", "trace", "short_answer", "code"],
-    explain: ["short_answer"],
-    trace: ["trace", "code"],
-    apply: ["trace", "short_answer", "code"],
-    debug: ["code"],
-    create: ["code"],
-  }
-  return allowed[behavior].includes(modality)
 }
 
 function makeObjection(input: {

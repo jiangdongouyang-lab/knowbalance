@@ -16,18 +16,25 @@ import { UNIFIED_SCHEMA_VERSION } from "./types"
 export function normalizeUnifiedHandoff(input: LooseRecord): UnifiedHandoff {
   const profile = input.b_profile ?? input.profile ?? {}
   const provenance = input.b_provenance ?? input.provenance ?? {}
-  const rag = normalizeUnifiedRagResult(input.a_rag_result ?? input.rag_result ?? {})
+  const rag = normalizeUnifiedRagResult(
+    input.a_rag_result
+      ?? input.rag_result
+      ?? input.retrieval
+      ?? { query: input.rag_query ?? "" },
+  )
+  const conflicts = provenance.conflicts ?? input.conflicts ?? []
   const validCitationIds = new Set<string>(rag.results.flatMap((item) => item.facts.map((fact) => `${fact.sourceId}-${fact.factId}`)))
   const artifacts = (input.c_artifacts ?? input.artifacts ?? []).map((artifact: LooseRecord) => normalizeUnifiedArtifact(artifact, validCitationIds))
 
   return {
     schemaVersion: UNIFIED_SCHEMA_VERSION,
+    observedSegments: normalizeObservedSegments(input),
     version: 1,
     eventMode: input.eventMode === "live" ? "live" : "demo",
     sessionId: input.session_id ?? input.sessionId ?? `session-${profile.learner_id ?? profile.learnerId ?? "anonymous"}`,
     updatedAt: input.updated_at ?? input.updatedAt ?? new Date(0).toISOString(),
     profile: normalizeUnifiedProfile(profile),
-    conflicts: (provenance.conflicts ?? []).map((conflict: LooseRecord) => ({
+    conflicts: conflicts.map((conflict: LooseRecord) => ({
       concept: conflict.concept,
       selfClaim: conflict.self_claim ?? conflict.selfClaim,
       objectiveVerdict: conflict.objective_verdict ?? conflict.objectiveVerdict,
@@ -44,8 +51,8 @@ export function normalizeUnifiedHandoff(input: LooseRecord): UnifiedHandoff {
     ...(input.roleC ? { roleC: normalizeRoleCSession(input.roleC) } : {}),
     ...(input.feedback ? { feedback: input.feedback } : {}),
     evidenceGaps: artifacts.filter((artifact: LearningArtifactView) => artifact.evidenceStatus === "gap").map((artifact: LearningArtifactView) => artifact.id),
-    workflow: (input.workflow_events ?? input.workflowEvents ?? []).map(normalizeUnifiedWorkflowEvent),
-    path: (input.learning_path ?? input.learningPath ?? []).map(normalizeUnifiedPathNode),
+    workflow: (input.workflow_events ?? input.workflowEvents ?? input.workflow ?? []).map(normalizeUnifiedWorkflowEvent),
+    path: (input.learning_path ?? input.learningPath ?? input.path ?? []).map(normalizeUnifiedPathNode),
     decision: {
       next: input.decision?.next ?? "remediate",
       reason: input.decision?.reason ?? "等待测评结果后由决策策略更新。",
@@ -92,25 +99,27 @@ export function normalizeUnifiedProfile(profile: LooseRecord): RoleDSession["pro
 }
 
 export function normalizeUnifiedRagResult(rag: LooseRecord): UnifiedRagResult {
+  const results = rag.results ?? rag.items ?? []
+
   return {
     query: rag.query ?? "",
-    topK: rag.topK ?? rag.top_k ?? rag.results?.length ?? 0,
-    results: (rag.results ?? []).map(normalizeUnifiedRetrievalItem),
+    topK: rag.topK ?? rag.top_k ?? results.length,
+    results: results.map(normalizeUnifiedRetrievalItem),
   }
 }
 
 export function normalizeUnifiedRetrievalItem(item: LooseRecord): RetrievalItemView {
-  const trace = item.retrievalTrace ?? item.retrieval_trace ?? {}
+  const trace = item.retrievalTrace ?? item.retrieval_trace ?? item.trace ?? {}
   const breakdown = trace.scoreBreakdown ?? trace.score_breakdown ?? {}
 
   return {
     sourceId: item.sourceId ?? item.source_id ?? "UNKNOWN",
     title: item.title ?? "未命名知识点",
     difficulty: normalizeUnifiedDifficulty(item.difficulty),
-    score: item.score ?? 0,
-    reason: item.reason ?? "无推荐说明",
+    score: item.score ?? item.rank_score ?? 0,
+    reason: item.reason ?? item.match_reason ?? "无推荐说明",
     snippet: item.snippet ?? "",
-    file: item.file ?? "",
+    file: item.file ?? item.source_file ?? "",
     facts: (item.facts ?? []).map((fact: LooseRecord) => ({
       sourceId: fact.sourceId ?? fact.source_id ?? item.sourceId ?? item.source_id ?? "UNKNOWN",
       factId: fact.factId ?? fact.fact_id ?? "UNKNOWN",
@@ -175,12 +184,54 @@ export function normalizeUnifiedCitation(citation: LooseRecord): UnifiedCitation
 }
 
 export function unifiedBoundaryReport(handoff: UnifiedHandoff): UnifiedBoundaryReport {
+  const boundary = handoff.observedSegments.content
+    ? handoff.observedSegments.retrieval && handoff.observedSegments.profile
+      ? "A_B_C_D_FULL_HANDOFF"
+      : "C_ARTIFACTS_TO_D_SESSION"
+    : handoff.observedSegments.retrieval
+      ? "A_RAG_RESULT_TO_C_CONTENT"
+      : "B_PROFILE_TO_A_RAG_REQUEST"
+  const canonicalFields = boundary === "B_PROFILE_TO_A_RAG_REQUEST"
+    ? ["profile", "conflicts"]
+    : boundary === "A_RAG_RESULT_TO_C_CONTENT"
+      ? ["profile", "retrieval", "evidenceGaps"]
+      : boundary === "C_ARTIFACTS_TO_D_SESSION"
+        ? ["artifacts", "workflow", "evidenceGaps"]
+        : ["profile", "retrieval", "artifacts", "workflow", "evidenceGaps"]
   return {
-    boundary: "A_B_C_D_FULL_HANDOFF",
+    boundary,
     schemaVersion: handoff.schemaVersion,
-    canonicalFields: ["profile", "retrieval", "artifacts", "workflow", "evidenceGaps"],
+    canonicalFields,
     evidenceGaps: handoff.evidenceGaps,
   }
+}
+
+function normalizeObservedSegments(input: LooseRecord): UnifiedHandoff["observedSegments"] {
+  const previous = input.observedSegments
+  if (previous && typeof previous === "object") {
+    return {
+      profile: previous.profile === true
+        || hasOwn(input, "b_profile"),
+      retrieval: previous.retrieval === true
+        || hasOwn(input, "a_rag_result")
+        || hasOwn(input, "rag_result"),
+      content: previous.content === true
+        || hasOwn(input, "c_artifacts"),
+    }
+  }
+  return {
+    profile: hasOwn(input, "b_profile") || hasOwn(input, "profile"),
+    retrieval: hasOwn(input, "a_rag_result")
+      || hasOwn(input, "rag_result")
+      || hasOwn(input, "retrieval"),
+    content: hasOwn(input, "c_artifacts")
+      || hasOwn(input, "artifacts")
+      || hasOwn(input, "roleC"),
+  }
+}
+
+function hasOwn(input: LooseRecord, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(input, key)
 }
 
 function normalizeUnifiedAudit(audit: LooseRecord): RoleDSession["audit"] {

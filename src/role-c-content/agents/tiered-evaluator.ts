@@ -44,10 +44,10 @@ export function createTieredEvaluatorAgent(
         ],
       }
       try {
-        const draft = structuredClone(
+        let draft = structuredClone(
           await provider.generateAssessment(request),
         )
-        const structural = validateAssessmentDraftStructure(request, draft)
+        let structural = validateAssessmentDraftStructure(request, draft)
         if (!structural.ok) {
           return invalidPair(
             common,
@@ -55,12 +55,37 @@ export function createTieredEvaluatorAgent(
             structural.issues.map((issue) => `${issue.path}: ${issue.message}`),
           )
         }
-        const verification: Awaited<ReturnType<AssessmentDraftVerifier["verifyAssessment"]>> = verifier
+        let verification: Awaited<ReturnType<AssessmentDraftVerifier["verifyAssessment"]>> = verifier
           ? await verifier.verifyAssessment(
               request,
               structuredClone(draft),
             )
           : { answer_key_verified: false, issues: ["未配置独立 assessment verifier"] }
+        if (!verification.answer_key_verified
+          && verifier
+          && provider.repairAssessmentAfterVerification
+          && request.generation_spec.policies.max_semantic_revision >= 1) {
+          draft = structuredClone(await provider.repairAssessmentAfterVerification(
+            request,
+            structuredClone(draft),
+            {
+              revision_round: 1,
+              issues: [...verification.issues],
+            },
+          ))
+          structural = validateAssessmentDraftStructure(request, draft)
+          if (!structural.ok) {
+            return invalidPair(
+              common,
+              "tiered-evaluator 可信验证修订稿未通过结构、答案合同、public/secure 或蓝图门禁",
+              structural.issues.map((issue) => `${issue.path}: ${issue.message}`),
+            )
+          }
+          verification = await verifier.verifyAssessment(
+            request,
+            structuredClone(draft),
+          )
+        }
         const citations = structural.citations
         const objectiveCoverage = verification.objective_coverage ?? structural.objective_coverage
         return {
@@ -79,7 +104,7 @@ export function createTieredEvaluatorAgent(
             verified_test_count: verification.verified_test_count,
             verification_issues: verification.answer_key_verified
               ? []
-              : ["测评答案未通过可信验证"],
+              : publicVerificationIssues(verification.issues),
           }),
           secure_artifact: finalizeDraft({
             ...common,
@@ -99,7 +124,12 @@ export function createTieredEvaluatorAgent(
         }
       } catch (error) {
         if (error instanceof ModelOutputValidationError) {
-          return invalidPair(common, `${error.stage} 未在有限修复次数内通过校验`, error.issues)
+          return invalidPair(
+            common,
+            `${error.stage} 未在有限修复次数内通过校验`,
+            error.issues,
+            error.stage.endsWith(".public") ? error.issues : undefined,
+          )
         }
         if (error instanceof UnsupportedTargetError) {
           return unsupportedPair(
@@ -113,6 +143,22 @@ export function createTieredEvaluatorAgent(
       }
     },
   }
+}
+
+function publicVerificationIssues(issues: string[]): string[] {
+  const categories = new Set<string>()
+  for (const issue of issues) {
+    if (issue.includes("reference") || issue.includes("隐藏测试")) {
+      categories.add("代码题参考实现未通过全部隐藏测试")
+    } else if (issue.includes("runner_image_digest") || issue.includes("CodeRunner")) {
+      categories.add("测评代码题的可信执行环境不可用或身份不一致")
+    } else {
+      categories.add("测评答案未通过可信验证")
+    }
+  }
+  return categories.size > 0
+    ? [...categories]
+    : ["测评答案未通过可信验证"]
 }
 
 function unsupportedPair(
@@ -142,6 +188,7 @@ function invalidPair(
   common: { spec: GenerationSpec; evidence: RagEvidencePack; input_refs: string[] },
   message: string,
   details: string[],
+  publicDetails: string[] = ["tiered-evaluator Draft 未通过可信门禁"],
 ): AssessmentArtifactPair {
   return {
     public_artifact: invalidOutputEnvelope({
@@ -149,7 +196,7 @@ function invalidPair(
       agent: "tiered-evaluator",
       artifact_type: "assessment_public",
       message,
-      details: ["tiered-evaluator Draft 未通过可信门禁"],
+      details: publicDetails,
     }),
     secure_artifact: invalidOutputEnvelope({
       ...common,

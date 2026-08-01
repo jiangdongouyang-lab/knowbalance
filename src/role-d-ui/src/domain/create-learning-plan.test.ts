@@ -1,5 +1,14 @@
 import { describe, expect, test } from "vitest"
-import { createLearningPlan, evaluatePlanDiagnosis } from "./create-learning-plan"
+import { adaptLearnerProfile } from "../../../role-c-content/contracts/profile-adapter"
+import {
+  adaptRagResult,
+  projectPublicRagEvidencePack,
+} from "../../../role-c-content/contracts/evidence-pack"
+import {
+  createLearningPlan,
+  evaluatePlanDiagnosis,
+  type RoleCRequester,
+} from "./create-learning-plan"
 
 const input = {
   learnerId: "student-project-001",
@@ -43,15 +52,18 @@ describe("createLearningPlan", () => {
     expect(plan.diagnosis.items.map((item) => item.sourceId)).not.toEqual(expect.arrayContaining(["K003", "K007", "K009", "K013"]))
   })
 
-  test("attaches official Role C real lesson, lab, and five-tiered assessment items", async () => {
+  test("attaches official Role C resources only after the final diagnosis evidence is available", async () => {
     const plan = await createLearningPlan(input)
+    expect(plan.session.artifacts).toEqual([])
+    const answers = Object.fromEntries(plan.diagnosis.items.map((item) => [item.id, item.answer]))
+    const updated = await evaluatePlanDiagnosis(plan, answers)
 
-    expect(plan.session.artifacts.map((artifact) => artifact.kind)).toEqual(["lesson", "lab", "assessment"])
-    expect(plan.session.artifacts.every((artifact) => artifact.status === "real")).toBe(true)
-    expect(plan.session.artifacts.find((artifact) => artifact.kind === "assessment")?.items).toHaveLength(5)
-    expect(plan.session.workflow.some((event) => event.agent === "concept-tutor" && event.status === "completed")).toBe(true)
-    expect(plan.session.workflow.some((event) => event.agent === "code-lab" && event.status === "completed")).toBe(true)
-    expect(plan.session.workflow.some((event) => event.agent === "tiered-evaluator" && event.status === "completed")).toBe(true)
+    expect(updated.session.artifacts.map((artifact) => artifact.kind)).toEqual(["lesson", "lab", "assessment"])
+    expect(updated.session.artifacts.every((artifact) => artifact.status === "real")).toBe(true)
+    expect(updated.session.artifacts.find((artifact) => artifact.kind === "assessment")?.items).toHaveLength(5)
+    expect(updated.session.workflow.some((event) => event.agent === "concept-tutor" && event.status === "completed")).toBe(true)
+    expect(updated.session.workflow.some((event) => event.agent === "code-lab" && event.status === "completed")).toBe(true)
+    expect(updated.session.workflow.some((event) => event.agent === "tiered-evaluator" && event.status === "completed")).toBe(true)
   })
 
   test("marks path nodes completed from B concept provenance source IDs", async () => {
@@ -72,6 +84,63 @@ describe("createLearningPlan", () => {
     expect(updated.session.profile.knownConcepts).toContain(plan.diagnosis.items[0]?.concept)
     expect(updated.session.profile.weakConcepts).toEqual(expect.arrayContaining(plan.diagnosis.items.slice(1).map((item) => item.concept)))
     expect(updated.session.retrieval.items.length).toBeGreaterThan(0)
+  })
+
+  test("builds D's final session and path from C's recovered answer-free profile", async () => {
+    let recoveredTargetTitle = ""
+    const recoveringC: RoleCRequester = async (request) => {
+      const pathNode = request.pathNode
+      if (!pathNode) throw new Error("test requires the formal B path")
+      const targetSourceId = pathNode.target_source_ids[0]!
+      recoveredTargetTitle = request.ragResult.results.find((item) =>
+        item.sourceId === targetSourceId)?.title ?? targetSourceId
+      const profileSnapshot = adaptLearnerProfile({
+        learner_id: request.profile.learner_id,
+        level: "integrated",
+        known_concepts: [recoveredTargetTitle],
+        weak_concepts: [],
+        goal: request.profile.goal,
+      }, {
+        profile_version: "PROFILE-RECOVERED-V2",
+        provenance_ref: "role-b:recovery",
+      })
+      const finalEvidence = projectPublicRagEvidencePack(adaptRagResult(
+        request.ragResult,
+        { kb_version: request.kbVersion, rag_version: "test-recovery-v1" },
+      ))
+      return {
+        status: "ready",
+        artifacts: [],
+        workflow: [],
+        runId: request.runId,
+        learningSession: {
+          sessionId: `${request.runId}-SESSION-1`,
+          formId: `${request.runId}-FORM-1`,
+          attemptNo: 1,
+        },
+        finalContext: {
+          profileSnapshot,
+          profileVersion: profileSnapshot.profile_version,
+          pathNode,
+          evidencePack: finalEvidence,
+        },
+      }
+    }
+    const plan = await createLearningPlan(input, recoveringC)
+    const answers = Object.fromEntries(plan.diagnosis.items.map((item) => [item.id, item.answer]))
+    const updated = await evaluatePlanDiagnosis(plan, answers, recoveringC)
+
+    expect(updated.session.profile).toMatchObject({
+      learnerId: input.learnerId,
+      profileVersion: "PROFILE-RECOVERED-V2",
+      level: "integrated",
+      knownConcepts: [recoveredTargetTitle],
+      weakConcepts: [],
+      goal: input.goal,
+    })
+    expect(updated.session.view.selfRatingDraft).toBe("integrated")
+    expect(updated.session.path.find((node) => node.title === recoveredTargetTitle)?.status)
+      .toBe("completed")
   })
 
   test("keeps an objectively incorrect concept out of completed path nodes", async () => {
@@ -103,14 +172,52 @@ describe("createLearningPlan", () => {
     expect(variableNode?.reason).toContain("客观诊断答错")
   })
 
-  test("rejects an exact target with no authored choice instead of borrowing unrelated questions", async () => {
-    await expect(createLearningPlan({
+  test("keeps an exact target with no authored choice as an explicit empty diagnosis", async () => {
+    const plan = await createLearningPlan({
       ...input,
       knownConcepts: [],
       weakConcepts: ["Python 是什么"],
       goal: "了解 Python 是什么",
       selfRating: "beginner",
-    })).rejects.toThrow("A 精确命中的知识点没有可直接作答的选择题")
+    })
+
+    expect(plan.diagnosis.availability).toBe("unavailable")
+    expect(plan.diagnosis.items).toEqual([])
+    expect(plan.diagnosis.unavailableReason).toContain("不产生客观诊断证据")
+  })
+
+  test("calls C zero times before diagnosis and once after submit or skip", async () => {
+    let calls = 0
+    const blockedC = async ({ runId }: { runId: string }) => {
+      calls += 1
+      return { status: "blocked" as const, artifacts: [], workflow: [], runId, reason: "test" }
+    }
+    const plan = await createLearningPlan(input, blockedC)
+    expect(calls).toBe(0)
+    const answers = Object.fromEntries(plan.diagnosis.items.map((item) => [item.id, item.answer]))
+    await evaluatePlanDiagnosis(plan, answers, blockedC)
+    expect(calls).toBe(1)
+  })
+
+  test("skips an unavailable diagnosis without creating incorrect objective evidence", async () => {
+    let requestedProfile: { known_concepts: string[]; weak_concepts: string[] } | undefined
+    const blockedC = async ({ runId, profile }: { runId: string; profile: { known_concepts: string[]; weak_concepts: string[] } }) => {
+      requestedProfile = profile
+      return { status: "blocked" as const, artifacts: [], workflow: [], runId, reason: "test" }
+    }
+    const plan = await createLearningPlan({
+      ...input,
+      knownConcepts: [],
+      weakConcepts: ["Python 是什么"],
+      goal: "了解 Python 是什么",
+      selfRating: "beginner",
+    }, blockedC)
+
+    const updated = await evaluatePlanDiagnosis(plan, {}, blockedC)
+    expect(updated.session.view.diagnosisSubmitted).toBe(true)
+    expect(updated.session.diagnosis.items).toEqual([])
+    expect(requestedProfile?.known_concepts).not.toContain("Python 是什么")
+    expect(requestedProfile?.weak_concepts).toContain("Python 是什么")
   })
 
   test.each(["画一只猫", "学习装饰器", "学习量子计算电路"])("rejects diagnosis for an unrelated goal: %s", async (goal) => {

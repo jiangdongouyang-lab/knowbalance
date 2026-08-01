@@ -22,6 +22,7 @@ export interface ConceptTutorModelInput {
   upstream: {
     next_round_context?: ConceptTutorRequest["next_round_context"]
     revision_objections?: ConceptTutorRequest["revision_objections"]
+    external_revision_round?: ConceptTutorRequest["external_revision_round"]
   }
 }
 
@@ -79,6 +80,9 @@ export function buildConceptTutorModelInput(
         ? { next_round_context: nextRoundContext }
         : {}),
       ...(request.revision_objections ? { revision_objections: structuredClone(request.revision_objections) } : {}),
+      ...(request.external_revision_round !== undefined
+        ? { external_revision_round: request.external_revision_round }
+        : {}),
     },
   }
 }

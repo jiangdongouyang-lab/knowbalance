@@ -51,7 +51,7 @@ async function buildContext(
   provider: DeterministicCodeLabContentProvider
 }> {
   const ragRequest = buildRagRequest(profile)
-  const rag = await retrieveKnowledge({ query: ragRequest.query, learnerLevel: profile.level, topK: 5 })
+  const rag = await retrieveKnowledge({ query: ragRequest.query, learnerLevel: profile.level, topK: 8 })
   const kb = await loadKnowledgeBase()
   const pack = adaptRagResult(rag, { kb_version: kb.version, rag_version: "rule-rag-0.1" })
   const rawPath = await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()
@@ -217,6 +217,53 @@ describe("role C phase-three trusted assessment Author", () => {
     expect(indirectReport.issues.some(
       (entry) => entry.code === "explicit_answer_leak",
     )).toBe(true)
+  })
+
+  test("scopes hidden expected-value checks to the linked code item and an explicit answer relation", async () => {
+    const { request, provider } = await buildContext()
+    const validCoincidence = await provider.generateAssessment(request)
+    const suite = validCoincidence.secure_draft.payload.code_test_suites[0]!
+    suite.hidden_tests[0]!.expected = 3
+    validCoincidence.public_draft.payload.items[0]!.prompt +=
+      " 第 3 题用于讨论函数返回值。"
+
+    const validReport = validateAssessmentDraftStructure(
+      request,
+      validCoincidence,
+    )
+    expect(validReport.issues.some(
+      (entry) => entry.code === "hidden_test_expected_leak",
+    )).toBe(false)
+
+    const leaked = structuredClone(validCoincidence)
+    const codeItem = leaked.public_draft.payload.items.find(
+      (item) => item.modality === "code",
+    )!
+    codeItem.prompt += " 该隐藏场景的预期结果为 3。"
+
+    const leakedReport = validateAssessmentDraftStructure(request, leaked)
+    expect(leakedReport.issues.some(
+      (entry) => entry.code === "hidden_test_expected_leak",
+    )).toBe(true)
+
+    const noInputContract = await provider.generateAssessment(request)
+    const noInputSuite =
+      noInputContract.secure_draft.payload.code_test_suites[0]!
+    for (const test of noInputSuite.hidden_tests) {
+      test.input = null
+      test.expected = "Python 是一种通用编程语言。"
+    }
+    const noInputCodeItem = noInputContract.public_draft.payload.items.find(
+      (item) => item.modality === "code",
+    )!
+    noInputCodeItem.prompt +=
+      " 程序运行后应输出：Python 是一种通用编程语言。"
+    const noInputReport =
+      validateAssessmentDraftStructure(request, noInputContract)
+    expect(noInputReport.issues.some(
+      (entry) => entry.code === "hidden_test_input_leak"
+        || entry.code === "hidden_test_expected_leak",
+    )).toBe(false)
   })
 
   test("does not let an accepting custom verifier bypass deterministic Author gates", async () => {

@@ -53,9 +53,10 @@ function planLowerDifficultyPath(
 
   const selected = selectBestTargets(levelItems, profile, kb, goal, 3)
   if (selected.length === 0) {
-    // 回退：选任意同难度非排除项
-    const fallback = levelItems.slice(0, Math.min(3, levelItems.length))
-    return buildPathResult(fallback, goal, `难度不匹配，推荐降至 ${targetLevel} 级别重新学习。已重新选择 ${fallback.length} 个目标知识点。`, true)
+    return buildUnsupportedPathResult(
+      goal,
+      `当前知识库中没有与学习目标或薄弱点相关、且不高于 ${targetLevel} 级别的可用知识点。`,
+    )
   }
 
   return buildPathResult(selected, goal, `难度不匹配，推荐降至 ${targetLevel} 级别重新学习。新路径包含 ${selected.map((i) => i.title).join("、")}。`, true)
@@ -104,12 +105,9 @@ function planAdjustedContentPath(
 
   const selected = selectBestTargets(levelItems, profile, kb, goal, 3)
   if (selected.length === 0) {
-    const fallback = levelItems.slice(0, Math.min(3, levelItems.length))
-    return buildPathResult(
-      fallback,
+    return buildUnsupportedPathResult(
       goal,
-      `薄弱点/目标对齐问题：原教学内容不匹配，已替换为 ${fallback.map((i) => i.title).join("、")}。`,
-      fallback.length > 0,
+      "当前知识库中没有与学习目标或薄弱点相关的替代知识点。",
     )
   }
 
@@ -121,7 +119,7 @@ function planAdjustedContentPath(
   )
 }
 
-/** 从候选知识点中选择最佳目标：优先覆盖薄弱点，其次关联目标 */
+/** 从候选知识点中选择最佳目标：语义相关是入选前提，难度只用于相关候选之间的排序。 */
 function selectBestTargets(
   candidates: KnowledgeItem[],
   profile: LearnerProfile,
@@ -131,32 +129,68 @@ function selectBestTargets(
 ): KnowledgeItem[] {
   if (candidates.length === 0) return []
 
-  // 打分：薄弱点覆盖 +4，目标关联 +2，难度接近 +1
-  const goalLower = goal.toLowerCase()
+  // 打分：薄弱点覆盖 +4，目标关联 +2，难度接近 +1。
+  // 最后一项不构成语义证据，避免将“同难度”误当作“同主题”。
   const weakMapped = new Set(
     profile.weak_concepts.flatMap((raw) => {
       const mapped = canonicalizeConcept(raw, kb)
       return mapped.sourceIds
     }),
   )
+  const goalMapped = sourceIdsRelevantToGoal(goal, kb)
 
   const scored = candidates.map((item) => {
-    let score = 0
+    let semanticScore = 0
     // 薄弱点覆盖
-    if (weakMapped.has(item.sourceId)) score += 4
+    if (weakMapped.has(item.sourceId)) semanticScore += 4
     // 目标关联
-    const kwText = [item.title, ...(item.keywords ?? [])].join(" ").toLowerCase()
-    const goalWords = goalLower.split(/[\s，,、。！？；：""''（）]+/).filter((w) => w.length >= 2)
-    if (goalWords.some((w) => kwText.includes(w))) score += 2
+    if (goalMapped.has(item.sourceId)) semanticScore += 2
     // 难度接近学习者水平
     const itemIdx = LEVEL_ORDER.indexOf(item.difficulty)
     const profileIdx = LEVEL_ORDER.indexOf(profile.level)
-    if (itemIdx === profileIdx || itemIdx === profileIdx + 1) score += 1
-    return { item, score }
+    const difficultyScore = itemIdx === profileIdx || itemIdx === profileIdx + 1 ? 1 : 0
+    return { item, semanticScore, difficultyScore }
   })
 
-  scored.sort((a, b) => b.score - a.score)
-  return scored.slice(0, maxCount).map((s) => s.item)
+  const relevant = scored.filter((entry) => entry.semanticScore > 0)
+  relevant.sort((a, b) =>
+    b.semanticScore - a.semanticScore
+    || b.difficultyScore - a.difficultyScore
+    || a.item.sourceId.localeCompare(b.item.sourceId),
+  )
+  return relevant.slice(0, maxCount).map((entry) => entry.item)
+}
+
+function sourceIdsRelevantToGoal(goal: string, kb: KnowledgeBase): Set<string> {
+  const normalizedGoal = normalizeSemanticText(goal)
+  const sourceIds = new Set(canonicalizeConcept(goal, kb).sourceIds)
+  if (normalizedGoal.length === 0) return sourceIds
+
+  for (const item of kb.items) {
+    const terms = [item.title, ...(item.keywords ?? [])]
+      .map(normalizeSemanticText)
+      .filter((term) => term.length >= 2)
+    if (terms.some((term) => normalizedGoal.includes(term))) {
+      sourceIds.add(item.sourceId)
+    }
+  }
+  return sourceIds
+}
+
+function normalizeSemanticText(value: string): string {
+  return value.toLowerCase().replace(/[\s，,、。！？；："'`（）()[\]{}\-_/]+/g, "")
+}
+
+function buildUnsupportedPathResult(
+  goal: string,
+  rationale: string,
+): PlanRecoveryPathResult {
+  return buildPathResult(
+    [],
+    goal,
+    `${rationale}无法自动规划恢复路径，请扩充知识库或调整学习目标。`,
+    false,
+  )
 }
 
 function buildPathResult(
@@ -166,7 +200,9 @@ function buildPathResult(
   requiresNewRag: boolean,
 ): PlanRecoveryPathResult {
   const targetSourceIds = items.map((item) => item.sourceId)
-  const nodeId = `RECOVERY-${targetSourceIds.join("-")}-${Date.now()}`
+  const nodeId = targetSourceIds.length > 0
+    ? `RECOVERY-${targetSourceIds.join("-")}-${Date.now()}`
+    : `RECOVERY-UNSUPPORTED-${Date.now()}`
 
   const objectives: LearningObjective[] = items.map((item, index) => ({
     objective_id: `RO${index + 1}`,

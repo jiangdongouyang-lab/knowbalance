@@ -183,6 +183,37 @@ describe("role C intake contracts", () => {
     expect(report.issues.map((issue) => issue.code)).not.toContain("weak_target_source")
   })
 
+  test("requires frozen evidence for every declared prerequisite source", async () => {
+    const { pack, path } = await buildGoldenContext()
+    const missingPrerequisite = structuredClone(pack)
+    missingPrerequisite.results = missingPrerequisite.results.filter(
+      (item) => item.source_id !== path.prerequisite_source_ids[0],
+    )
+    const built = buildGenerationSpec({
+      run_id: "RUN-MISSING-PREREQUISITE-EVIDENCE",
+      profile_snapshot: adaptLearnerProfile(profile, {
+        profile_version: "profile-v1",
+      }),
+      path_node: path,
+      evidence_pack: missingPrerequisite,
+      versions: {
+        prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+        model_config_hash: "none",
+      },
+    })
+    expect(built.ok).toBe(false)
+    if (!built.ok) {
+      expect(built.code).toBe("MISSING_EVIDENCE")
+      if (built.code !== "MISSING_EVIDENCE") return
+      expect(built.errors).toContain(
+        `缺少先修知识点：${path.prerequisite_source_ids[0]}`,
+      )
+      expect(built.gap_request.target_source_ids).toContain(
+        path.prerequisite_source_ids[0],
+      )
+    }
+  })
+
   test("copies the upstream assessment blueprint verbatim and includes it in spec identity", async () => {
     const { pack, path, spec } = await buildGoldenContext()
     const customPath = structuredClone(path)
@@ -249,6 +280,89 @@ describe("role C intake contracts", () => {
         "不支持的 assessment modality：essay",
         "assessment blueprint 总题量不能少于 core objective 数量",
       ]))
+    }
+  })
+
+  test("rejects a blueprint whose fixed modalities cannot measure every core objective", async () => {
+    const { pack, path } = await buildGoldenContext()
+    const incompatible = structuredClone(path)
+    incompatible.target_source_ids = ["K007"]
+    incompatible.prerequisite_source_ids = []
+    incompatible.objectives = [{
+      objective_id: "O-EXPLAIN",
+      source_id: "K007",
+      required_fact_ids: ["F001"],
+      observable_behavior: "explain",
+      importance: "core",
+    }]
+    incompatible.assessment_blueprint = {
+      tier_1_count: 1,
+      tier_2_count: 0,
+      tier_3_count: 0,
+      required_modalities: ["mcq"],
+    }
+    const built = buildGenerationSpec({
+      run_id: "RUN-INCOMPATIBLE-BLUEPRINT",
+      profile_snapshot: adaptLearnerProfile(profile, {
+        profile_version: "profile-v1",
+      }),
+      path_node: incompatible,
+      evidence_pack: pack,
+      versions: {
+        prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+        model_config_hash: "none",
+      },
+    })
+    expect(built.ok).toBe(false)
+    if (!built.ok) {
+      expect(built.errors).toContain(
+        "assessment blueprint 的必选题型和剩余题量无法直接测量全部 core objective",
+      )
+    }
+  })
+
+  test("rejects target source ids that have no corresponding objective", async () => {
+    const { pack, path } = await buildGoldenContext()
+    const incomplete = structuredClone(path)
+    incomplete.objectives = incomplete.objectives.filter(
+      (objective) => objective.source_id !== "K009",
+    )
+    const built = buildGenerationSpec({
+      run_id: "RUN-MISSING-TARGET-OBJECTIVE",
+      profile_snapshot: adaptLearnerProfile(profile, { profile_version: "profile-v1" }),
+      path_node: incomplete,
+      evidence_pack: pack,
+      versions: { prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION, model_config_hash: "none" },
+    })
+    expect(built.ok).toBe(false)
+    if (!built.ok) {
+      expect(built.errors).toContain(
+        "target_source_ids 中的每个知识点都必须有 objective：K009",
+      )
+    }
+  })
+
+  test("rejects an assessment blueprint with only Tier 3 items", async () => {
+    const { pack, path } = await buildGoldenContext()
+    const noAnchor = structuredClone(path)
+    noAnchor.assessment_blueprint = {
+      tier_1_count: 0,
+      tier_2_count: 0,
+      tier_3_count: 3,
+      required_modalities: ["code"],
+    }
+    const built = buildGenerationSpec({
+      run_id: "RUN-NO-ASSESSMENT-ANCHOR",
+      profile_snapshot: adaptLearnerProfile(profile, { profile_version: "profile-v1" }),
+      path_node: noAnchor,
+      evidence_pack: pack,
+      versions: { prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION, model_config_hash: "none" },
+    })
+    expect(built.ok).toBe(false)
+    if (!built.ok) {
+      expect(built.errors).toContain(
+        "assessment blueprint 至少需要一道 Tier 1 或 Tier 2 锚点题",
+      )
     }
   })
 
@@ -360,7 +474,7 @@ describe("role C public/private and orchestration boundaries", () => {
       JSON.stringify(context) === JSON.stringify(nextRoundContext))).toBe(true)
   })
 
-  test("runs at most one critic-directed revision and revalidates before publication", async () => {
+  test("keeps optional semantic critic findings as nonblocking diagnostics", async () => {
     const { pack, spec } = await buildGoldenContext()
     const baseline = fixtureProvider()
     let assessmentCalls = 0
@@ -385,7 +499,6 @@ describe("role C public/private and orchestration boundaries", () => {
         critic: {
           async review(input) {
             reviews += 1
-            if (reviews > 1) return []
             return [{
               objection_id: "OBJ-ONE-REVISION",
               from_agent: "cross-artifact-gate",
@@ -401,9 +514,15 @@ describe("role C public/private and orchestration boundaries", () => {
       },
     )
     expect(result.status).toBe("ready")
-    expect(assessmentCalls).toBe(2)
-    expect(reviews).toBe(2)
-    expect(result.trace_events.filter((event) => event.retry_kind === "semantic_revision")).toHaveLength(1)
+    expect(assessmentCalls).toBe(1)
+    expect(reviews).toBe(1)
+    expect(result.alignment_report?.objections).toContainEqual(
+      expect.objectContaining({
+        objection_id: "OBJ-ONE-REVISION",
+        severity: "warning",
+      }),
+    )
+    expect(result.trace_events.filter((event) => event.retry_kind === "semantic_revision")).toHaveLength(0)
   })
 
   test("revises code lab before assessment and passes the revised lab summary downstream", async () => {

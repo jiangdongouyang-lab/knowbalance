@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { loadKnowledgeBase } from "../src/knowledge/loader"
 import type { KnowledgeBase } from "../src/knowledge/types"
+import { auditTeaching } from "../src/role-b-profile/teaching-audit/auditor"
 import {
   buildGenerationSpec,
   contentHash,
@@ -279,6 +280,127 @@ describe("Role C review recovery orchestration", () => {
     })
   })
 
+  test("binds a new B draft from current evidence without calling A again", async () => {
+    const fixture = recoveryFixture()
+    const draft = pathFor("PATH-K001-REPLANNED", "K001", "RO-K001")
+    draft.objectives[0]!.required_fact_ids = []
+    const reviewedInputs: CPipelineInput[] = []
+    let evidenceCalls = 0
+
+    const result = await runRecoverableReviewedCPipeline(
+      fixture.input,
+      unusedAgents,
+      recordingSecureStore().store,
+      {
+        profile_snapshot: fixture.profile,
+        review_port: unusedReviewPort,
+        reviewed_pipeline_runner: async (input) => {
+          reviewedInputs.push(structuredClone(input))
+          return reviewedInputs.length === 1
+            ? blockedResult(input, recoveryReport(
+                input,
+                "new_spec",
+                "replan_path",
+              ))
+            : readyResult(input)
+        },
+        path_planning_port: {
+          async replanLearningPath(request) {
+            return {
+              status: "ready",
+              request_id: request.request_id,
+              path_draft: structuredClone(draft),
+            }
+          },
+        },
+        evidence_refresh_port: {
+          async refreshEvidence() {
+            evidenceCalls += 1
+            throw new Error("current evidence already covers this path")
+          },
+        },
+      },
+    )
+
+    expect(result.status).toBe("ready")
+    expect(evidenceCalls).toBe(0)
+    expect(reviewedInputs).toHaveLength(2)
+    expect(reviewedInputs[1]!.evidence_pack)
+      .toEqual(fixture.input.evidence_pack)
+    expect(reviewedInputs[1]!.generation_spec.targets[0]!.required_fact_ids)
+      .toEqual(fixture.input.evidence_pack.results[0]!.facts
+        .map((fact) => fact.fact_id)
+        .sort())
+    expect(result.recovery_history[0]!.evidence_request_id).toBeUndefined()
+  })
+
+  test("does not refresh A solely because current source evidence is sparse", async () => {
+    const fixture = recoveryFixture()
+    const sparseEvidence = structuredClone(fixture.evidence)
+    sparseEvidence.results[0]!.examples = []
+    sparseEvidence.results[0]!.practice_tasks = []
+    sparseEvidence.results[0]!.quiz_seeds = []
+    const rebuilt = buildGenerationSpec({
+      run_id: "RUN-RECOVERY-SPARSE",
+      profile_snapshot: fixture.profile,
+      path_node: fixture.path,
+      evidence_pack: sparseEvidence,
+      versions: {
+        prompt_version: "prompt-recovery-test-v1",
+        model_config_hash: "model-recovery-test-v1",
+      },
+      seed: 7,
+    })
+    if (!rebuilt.ok) throw new Error(rebuilt.errors.join("; "))
+    const sparseInput: CPipelineInput = {
+      generation_spec: rebuilt.spec,
+      evidence_pack: sparseEvidence,
+    }
+    const draft = pathFor("PATH-K001-SPARSE", "K001", "RO-K001-SPARSE")
+    draft.objectives[0]!.required_fact_ids = []
+    let runnerCalls = 0
+    let evidenceCalls = 0
+
+    const result = await runRecoverableReviewedCPipeline(
+      sparseInput,
+      unusedAgents,
+      recordingSecureStore().store,
+      {
+        profile_snapshot: fixture.profile,
+        review_port: unusedReviewPort,
+        reviewed_pipeline_runner: async (input) => {
+          runnerCalls += 1
+          return runnerCalls === 1
+            ? blockedResult(input, recoveryReport(
+                input,
+                "new_spec",
+                "replan_path",
+              ))
+            : readyResult(input)
+        },
+        path_planning_port: {
+          async replanLearningPath(request) {
+            return {
+              status: "ready",
+              request_id: request.request_id,
+              path_draft: structuredClone(draft),
+            }
+          },
+        },
+        evidence_refresh_port: {
+          async refreshEvidence() {
+            evidenceCalls += 1
+            throw new Error("auxiliary authoring material is not a fact gap")
+          },
+        },
+      },
+    )
+
+    expect(result.status).toBe("ready")
+    expect(runnerCalls).toBe(2)
+    expect(evidenceCalls).toBe(0)
+  })
+
   test("consumes the actual B path draft after A evidence is refreshed and facts are bound", async () => {
     const fixture = recoveryFixture()
     const knowledgeBase = await loadKnowledgeBase()
@@ -336,7 +458,7 @@ describe("Role C review recovery orchestration", () => {
 
     expect(result.status).toBe("ready")
     expect(plannedPaths).toHaveLength(1)
-    expect(plannedPaths[0]!.target_source_ids).toEqual(["K007"])
+    expect(plannedPaths[0]!.target_source_ids).toEqual(["K003"])
     expect(plannedPaths[0]!.objectives.every(
       (objective) => objective.required_fact_ids.length === 0,
     )).toBe(true)
@@ -647,7 +769,10 @@ describe("Role C review recovery orchestration", () => {
     expect(result.blocked_reason?.message).toContain("离线 code-lab")
     expect(result.public_artifacts.concept_lesson?.status).toBe("ready")
     expect(result.public_artifacts.code_lab?.status).toBe("blocked")
-    expect(result.public_artifacts.assessment?.status).toBe("blocked")
+    expect(result.public_artifacts.assessment).toBeUndefined()
+    expect(result.trace_events.some((event) =>
+      event.agent === "tiered-evaluator" && event.event_type === "c.agent.started"))
+      .toBe(false)
     expect(result.secure_refs).toEqual([])
   })
 
@@ -691,6 +816,116 @@ describe("Role C review recovery orchestration", () => {
       can_recover: false,
       reason: "本地 B 路径规划执行失败",
     })
+  })
+
+  test("local B selects the first dependency-ready prerequisite as a focused recovery stage", async () => {
+    const fixture = recoveryFixture()
+    const knowledgeBase = await loadKnowledgeBase()
+    const profile: LearnerProfileSnapshot = {
+      ...structuredClone(fixture.profile),
+      level: "basic",
+      known_concepts: [],
+      weak_concepts: ["综合项目"],
+      goal: "完成成绩统计器综合项目",
+    }
+    const request: RoleBPathPlanningRequest = {
+      schema_version: "1.0",
+      request_id: "BPATH-K018-RECURSIVE",
+      run_id: fixture.input.generation_spec.run_id,
+      current_spec_id: fixture.input.generation_spec.spec_id,
+      profile_snapshot: profile,
+      current_path_node: {
+        ...structuredClone(fixture.path),
+        node_id: "PATH-K018-MISSING-PREREQUISITES",
+        target_source_ids: ["K018"],
+        prerequisite_source_ids: [],
+        goal: profile.goal,
+        objectives: [{
+          objective_id: "O-K018",
+          source_id: "K018",
+          required_fact_ids: ["F001"],
+          observable_behavior: "create",
+          importance: "core",
+        }],
+      },
+      failed_dimensions: ["prerequisite_coverage"],
+      missing_prerequisite_source_ids: ["K007", "K009", "K013"],
+      required_action: "replan_path",
+      fix_scope: "new_spec",
+      review_instruction_ids: ["REV-K018-PREREQUISITES"],
+    }
+
+    const result = await createLocalBPathPlanningPort(
+      knowledgeBase,
+    ).replanLearningPath(request)
+    if (result.status !== "ready") throw new Error(result.reason)
+
+    expect(result.path_draft.target_source_ids).toEqual(["K001"])
+    expect(result.path_draft.target_source_ids).not.toContain("K018")
+    expect(result.path_draft.prerequisite_source_ids).toEqual([])
+    expect(
+      result.path_draft.assessment_blueprint.tier_1_count
+      + result.path_draft.assessment_blueprint.tier_2_count
+      + result.path_draft.assessment_blueprint.tier_3_count,
+    ).toBeGreaterThanOrEqual(result.path_draft.objectives.length)
+    expect(result.path_draft.goal).toContain(profile.goal)
+    expect(result.profile_snapshot?.profile_version)
+      .not.toBe(profile.profile_version)
+    expect(result.profile_snapshot?.weak_concepts).toEqual(
+      expect.arrayContaining(["Python 是什么"]),
+    )
+
+    const stageProfile = result.profile_snapshot
+    if (!stageProfile) throw new Error("先修阶段缺少复审画像")
+    const stageAudit = auditTeaching({
+      artifactId: "ARTIFACT-K018-PREREQUISITE-STAGE",
+      learnerProfile: {
+        learner_id: stageProfile.learner_id,
+        level: stageProfile.level,
+        known_concepts: [...stageProfile.known_concepts],
+        weak_concepts: [...stageProfile.weak_concepts],
+        goal: result.path_draft.goal,
+      },
+      knowledgeBase,
+      citedSourceIds: [...result.path_draft.target_source_ids],
+      targetSourceIds: [...result.path_draft.target_source_ids],
+      contentSummary: result.path_draft.goal,
+    })
+    expect(stageAudit.status).toBe("pass")
+    expect(stageAudit.failedDimensions).toEqual([])
+    expect(stageAudit.missingPrerequisiteSourceIds).toEqual([])
+  })
+
+  test("local B fails closed when a recursive prerequisite reference is unknown", async () => {
+    const fixture = recoveryFixture()
+    const knowledgeBase = await loadKnowledgeBase()
+    const malformed = structuredClone(knowledgeBase)
+    const nested = malformed.items.find((item) => item.sourceId === "K013")
+    if (!nested) throw new Error("测试知识库缺少 K013")
+    nested.prerequisites = [...nested.prerequisites, "K999"]
+    const result = await createLocalBPathPlanningPort(
+      malformed,
+    ).replanLearningPath({
+      schema_version: "1.0",
+      request_id: "BPATH-UNKNOWN-NESTED-PREREQUISITE",
+      run_id: fixture.input.generation_spec.run_id,
+      current_spec_id: fixture.input.generation_spec.spec_id,
+      profile_snapshot: structuredClone(fixture.profile),
+      current_path_node: structuredClone(fixture.path),
+      failed_dimensions: ["prerequisite_coverage"],
+      missing_prerequisite_source_ids: ["K013"],
+      required_action: "replan_path",
+      fix_scope: "new_spec",
+      review_instruction_ids: ["REV-UNKNOWN-NESTED-PREREQUISITE"],
+    })
+
+    expect(result).toMatchObject({
+      status: "blocked",
+      code: "BLOCKED",
+      can_recover: false,
+    })
+    if (result.status !== "blocked") throw new Error("预期 B 拒绝未知先修")
+    expect(result.reason).toContain("K999")
   })
 
   test("gives equivalent B drafts a stable formal path identity and deterministic fact binding", async () => {
@@ -1091,7 +1326,7 @@ describe("Role C review recovery orchestration", () => {
     expect(result.recovery_history).toEqual([])
   })
 
-  test("fails closed on port exceptions, mismatched B response IDs, and unchanged A evidence", async () => {
+  test("handles port exceptions, mismatched B response IDs, and coverage-complete unchanged A evidence", async () => {
     const fixture = recoveryFixture()
     const newEvidenceReport = recoveryReport(
       fixture.input,
@@ -1170,11 +1405,13 @@ describe("Role C review recovery orchestration", () => {
         review_port: unusedReviewPort,
         reviewed_pipeline_runner: async (input) => {
           unchangedRunnerCalls += 1
-          return blockedResult(input, recoveryReport(
-            input,
-            "new_evidence",
-            "request_new_evidence",
-          ))
+          return unchangedRunnerCalls === 1
+            ? blockedResult(input, recoveryReport(
+                input,
+                "new_evidence",
+                "request_new_evidence",
+              ))
+            : readyResult(input)
         },
         evidence_refresh_port: {
           async refreshEvidence() {
@@ -1184,11 +1421,12 @@ describe("Role C review recovery orchestration", () => {
       },
     )
     expect(unchangedEvidence.recovery).toMatchObject({
-      code: "BLOCKED",
+      code: "READY",
       recovery_attempts: 1,
     })
-    expect(unchangedEvidence.recovery.message).toContain("没有新增或修正内容")
-    expect(unchangedRunnerCalls).toBe(1)
+    expect(unchangedRunnerCalls).toBe(2)
+    expect(unchangedEvidence.generation_spec.evidence_ref)
+      .toBe(fixture.input.evidence_pack.retrieval_id)
   })
 
   test("blocks unknown prerequisite references without calling A or B", async () => {

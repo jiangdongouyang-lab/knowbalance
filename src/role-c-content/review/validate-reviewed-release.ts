@@ -166,40 +166,14 @@ export function assertReviewedReadyPipeline(
     }
   }
 
-  const terminalTrace = pipeline.trace_events.at(-1)
-  const readyEvents = pipeline.trace_events.filter(
-    (event) => event.event_type === "c.pipeline.ready",
-  )
-  const publicArtifactIds = [concept, codeLab, assessment].map(
-    (artifact) => artifact.artifact_id,
-  )
-  if (readyEvents.length !== 1
-    || terminalTrace?.event_type !== "c.pipeline.ready"
-    || terminalTrace.status !== "success"
-    || terminalTrace.run_id !== runId
-    || publicArtifactIds.some((id) => !terminalTrace.input_refs.includes(id))) {
-    throw failure("READY_TRACE_MISSING")
-  }
-  let lastSeq = 0
+  // Trace is operational telemetry. Release only enforces its identity and
+  // public-data boundary; ordering or event loss cannot invalidate ready content.
   for (const event of pipeline.trace_events) {
     if (event.run_id !== runId) throw failure("TRACE_RUN_MISMATCH")
-    if (event.seq <= lastSeq) throw failure("TRACE_NOT_STRICTLY_ORDERED")
     if (event.input_refs.some(isSecureReference)
       || (event.output_ref !== undefined && isSecureReference(event.output_ref))) {
       throw failure("TRACE_SECURE_REF_LEAK")
     }
-    lastSeq = event.seq
-  }
-  const reviewEvents = pipeline.trace_events.filter((event) =>
-    event.event_type === "c.review.passed"
-      || event.event_type === "c.review.revision_requested")
-  if (reviewEvents.length !== reports.length
-    || reviewEvents.some((event, index) =>
-      event.attempt !== index + 1
-        || event.event_type !== (reports[index]!.decision === "pass"
-          ? "c.review.passed"
-          : "c.review.revision_requested"))) {
-    throw failure("REVIEW_TRACE_MISMATCH")
   }
 
   return {

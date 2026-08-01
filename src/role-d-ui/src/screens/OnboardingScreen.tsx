@@ -24,11 +24,11 @@ export function OnboardingScreen({ isDemo = true, goal, selfRating, onGoalChange
       <div className="form-section">
         <label htmlFor="learning-goal">这次你想学会什么？</label>
         <textarea id="learning-goal" value={goal} onChange={(event) => onGoalChange(event.target.value)} rows={4} />
-        <small>{isDemo ? "已根据案例集画像预填，你可以直接修改；下一步会真实运行 B / A / C。" : "已根据新建计划预填，修改后会用于下一步诊断。"}</small>
+        <small>{isDemo ? "已根据案例集画像预填，你可以直接修改；下一步会运行 B 画像和 A 知识检索。" : "已根据新建计划预填，修改后会用于下一步诊断。"}</small>
       </div>
       <fieldset className="rating-options"><legend>你觉得自己目前处于什么水平？</legend>{levels.map((level) => <label className={selfRating === level.value ? "is-selected" : ""} key={level.value}><input type="radio" name="self-rating" checked={selfRating === level.value} onChange={() => onRatingChange(level.value)} /><span><strong>{level.label}</strong><small>{level.detail}</small></span></label>)}</fieldset>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="screen-actions"><span>{isDemo ? "将运行真实 B / A / C 流水线" : "下一阶段预计用时 2 分钟"}</span><button className="primary-action" type="button" disabled={!goal.trim() || submitting} onClick={onContinue}>{submitting ? "正在运行 B/A/C…" : "下一步：客观诊断"}</button></div>
+      <div className="screen-actions"><span>{isDemo ? "将运行真实 B / A 流程" : "下一阶段预计用时 2 分钟"}</span><button className="primary-action" type="button" disabled={!goal.trim() || submitting} onClick={onContinue}>{submitting ? "正在运行 B/A…" : "下一步：客观诊断"}</button></div>
     </section>
   )
 }

@@ -32,6 +32,7 @@ export interface CodeLabModelInput {
   }
   next_round_context?: CodeLabRequest["next_round_context"]
   revision_objections?: CodeLabRequest["revision_objections"]
+  external_revision_round?: CodeLabRequest["external_revision_round"]
 }
 
 /** Builds the model-visible lab context without learner identity or answer-bearing quiz seeds. */
@@ -101,6 +102,7 @@ export function buildCodeLabModelInput(request: CodeLabRequest): CodeLabModelInp
     revision_objections: request.revision_objections
       ? structuredClone(request.revision_objections)
       : undefined,
+    external_revision_round: request.external_revision_round,
   }
 }
 

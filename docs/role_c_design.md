@@ -4,7 +4,7 @@
 |---|---|
 | 设计版本 | 3.5 |
 | Schema 版本 | 1.0 |
-| Prompt manifest | `c-prompts-1.8.2` |
+| Prompt manifest | `c-prompts-1.15.0` |
 | 实现目录 | `src/role-c-content/` |
 | Schema 目录 | `schemas/role-c-content/` |
 | 自动检查 | `bun run check` |
@@ -32,7 +32,7 @@ flowchart TD
     I["画像 + 路径节点 + RAG 证据"] --> S["冻结 GenerationSpec"]
     S --> C1["概念讲解 Agent"]
     C1 --> C2["代码实验 Agent"]
-    C1 --> C3["分层测评 Agent"]
+    C2 --> C3["分层测评 Agent"]
     C1 --> V["Schema、证据、安全、执行与跨产物门禁"]
     C2 --> V
     C3 --> V
@@ -76,7 +76,7 @@ RAG 无命中、弱匹配或材料不足时生成 `EvidenceGapRequest`；事实�
 | Agent | 主要产物 | 核心门禁 |
 |---|---|---|
 | 概念讲解 `concept-tutor` | 先修桥梁、概念解释、示例、误区、即时检查、三级提示和目标映射 | 目标覆盖、事实引用、可见正文审核 |
-| 代码实验 `code-lab` | public 任务、starter、公开测试、提示；secure 参考实现、隐藏测试、评分组和错误变体 | public/secure 对齐、参考实现、mutation、Docker 执行、泄漏检查 |
+| 代码实验 `code-lab` | public 任务、starter、公开测试、提示；secure 参考实现、隐藏测试和评分组 | public/secure 对齐、参考实现、Docker 执行、泄漏检查；mutation 仅记录可选质量指标 |
 | 分层测评 `tiered-evaluator` | Tier 1/2/3 题面、稳定题目身份、secure AnswerSpec、rubric 和代码测试 | 蓝图覆盖、答案一致性、代码执行、选项与评分语义 |
 
 三个 Agent 使用同一份递归冻结的 `GenerationSpec` 和证据包。模型生成候选内容，程序生成稳定 ID、题目计划、覆盖索引、评分聚合、质量指标和发布状态。
@@ -109,11 +109,11 @@ C 内部门禁依次检查：
 1. JSON Schema、状态语义和冻结输入身份；
 2. Claim、引用和全部学习者可见正文的事实接地；
 3. public/secure 分离和敏感值泄漏；
-4. 参考实现、starter、公开测试、隐藏测试和错误变体；
+4. 参考实现、starter、公开测试和隐藏测试；可选错误变体只形成质量指标；
 5. 测评题面、AnswerSpec、rubric 与代码测试；
 6. 讲义、实验、测评之间的目标、难度和答案对齐。
 
-内部 Alignment Critic 对 critical objection 最多执行一次定向修订。随后，A 检查事实和引用，B 检查目标、先修、难度和教学适配。外部审核最多修订两轮，并始终使用同一份冻结输入。
+确定性跨产物检查只处理目标映射、可执行性和答案一致性等结构问题，关键问题最多执行一次定向修订。可选模型 Critic 只输出诊断信息。随后，A 检查事实和引用，B 检查目标、先修、难度和教学适配。外部审核最多修订两轮，并始终使用同一份冻结输入。
 
 审核请求和结果绑定 `pipeline_input_hash`、`generation_spec_hash`、`GenerationSpec.evidence_content_hash`、三份公开产物哈希、审核策略版本和修订序号。B 的结构化结果包含失败维度、缺失先修、未知先修引用、恢复动作、修复范围、建议难度和可恢复状态。
 

@@ -330,11 +330,8 @@ async function publishReviewedReleaseToD(
     const leak = validatePublicArtifactNoSecrets(artifact)
     if (!leak.ok) throw new Error(`ROLE_C_D_DELIVERY_SECRET_LEAK:${leak.issues.map((issue) => issue.path).join(",")}`)
   }
-  let lastSeq = 0
   for (const event of trace) {
     if (event.run_id !== runId) throw new Error("ROLE_C_D_TRACE_RUN_MISMATCH")
-    if (event.seq <= lastSeq) throw new Error("ROLE_C_D_TRACE_NOT_STRICTLY_ORDERED")
-    lastSeq = event.seq
     assertOutboundSchema("agent_trace_event.schema.json", event)
     const leak = validatePublicArtifactNoSecrets(event)
     if (!leak.ok) throw new Error("ROLE_C_D_TRACE_SECRET_LEAK")

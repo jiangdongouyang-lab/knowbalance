@@ -2,7 +2,7 @@
 
 | 项目 | 当前值 |
 |---|---|
-| Prompt manifest | `c-prompts-1.8.2` |
+| Prompt manifest | `c-prompts-1.15.0` |
 | 入口 | `src/role-c-content/prompts/index.ts` |
 | 公共策略 | `src/role-c-content/prompts/common-policy.ts` |
 
@@ -25,7 +25,7 @@
 |---|---|---|
 | `CONCEPT_SEGMENT_SYSTEM_PROMPT` | concept 目标组 | 目标组与裁剪证据 → `ConceptLessonPayload` 分段 |
 | `CODE_LAB_PUBLIC_STAGE_SYSTEM_PROMPT` | code-lab public | 冻结合同 → 任务、starter、公开测试、提示和引用 |
-| `CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT` | code-lab secure | 冻结 public → reference、隐藏测试、评分组和 mutation |
+| `CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT` | code-lab secure | 冻结 public → reference、隐藏测试和评分组 |
 | `ASSESSMENT_PUBLIC_STAGE_SYSTEM_PROMPT` | assessment public | 冻结 item plan → 题面、选项、starter 和引用 |
 | `ASSESSMENT_SECURE_STAGE_SYSTEM_PROMPT` | assessment secure | 冻结题面 → 答案合同、rubric 和代码测试套件 |
 | `stagedRepairPrompt` | staged repair | 当前阶段 Draft 与校验问题 → 修复后的同阶段 Draft |

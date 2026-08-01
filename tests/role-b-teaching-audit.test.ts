@@ -578,6 +578,68 @@ describe("planRecoveryPath", () => {
     expect(result.pathNode.assessment_blueprint).toBeDefined()
     expect(result.pathNode.assessment_blueprint.tier_1_count).toBeGreaterThan(0)
   })
+
+  test("keeps only semantically related recovery targets instead of filling the target quota", async () => {
+    const kb = await getKB()
+    const learnerProfile = makeProfile({
+      weak_concepts: ["字典"],
+      goal: "掌握字典的键值查询",
+    })
+    const auditResult = auditTeaching({
+      artifactId: "plan-semantic-target",
+      learnerProfile,
+      knowledgeBase: kb,
+      citedSourceIds: ["K001"],
+    })
+
+    const result = planRecoveryPath({
+      learnerProfile,
+      knowledgeBase: kb,
+      auditResult,
+      currentPathNode: {
+        target_source_ids: ["K001"],
+        prerequisite_source_ids: [],
+        goal: learnerProfile.goal,
+      },
+    })
+
+    expect(result.pathNode.target_source_ids).toEqual(["K010"])
+    expect(result.pathNode.target_source_ids).not.toContain("K009")
+    expect(result.pathNode.target_source_ids).not.toContain("K011")
+  })
+
+  test("returns an explicit unsupported path when the knowledge base has no semantic match", async () => {
+    const kb = await getKB()
+    const learnerProfile = makeProfile({
+      known_concepts: [],
+      weak_concepts: ["React 组件", "CSS 网格"],
+      goal: "使用 React 构建响应式网页",
+    })
+    const auditResult = auditTeaching({
+      artifactId: "plan-unsupported-domain",
+      learnerProfile,
+      knowledgeBase: kb,
+      citedSourceIds: ["K001"],
+    })
+
+    const result = planRecoveryPath({
+      learnerProfile,
+      knowledgeBase: kb,
+      auditResult,
+      currentPathNode: {
+        target_source_ids: ["K001"],
+        prerequisite_source_ids: [],
+        goal: learnerProfile.goal,
+      },
+    })
+
+    expect(result.pathNode.target_source_ids).toEqual([])
+    expect(result.pathNode.objectives).toEqual([])
+    expect(result.pathNode.node_id).toContain("RECOVERY-UNSUPPORTED")
+    expect(result.requiresNewRag).toBe(false)
+    expect(result.rationale).toContain("当前知识库中没有")
+    expect(result.rationale).toContain("无法自动规划恢复路径")
+  })
 })
 
 // ── Week3: 学习进展接收 ──

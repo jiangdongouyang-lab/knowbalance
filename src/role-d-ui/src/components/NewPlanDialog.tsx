@@ -52,7 +52,7 @@ export function NewPlanDialog({ user, onCancel, onCreate }: NewPlanDialogProps) 
           <div className="profile-reuse-note full-row"><strong>复用用户档案</strong><span>{user.educationContext || "未填写专业或身份"} · {levelLabel(user.selfRating)} · {user.timeBudget || "未填写学习时间"}</span></div>
           {error && <p className="form-error" role="alert">{error}</p>}
         </div>
-        <footer><span>计划将独立保存画像、学习路径、C 资源、答案和当前阶段。</span><div><button className="secondary-action" type="button" disabled={submitting} onClick={onCancel}>取消</button><button className="primary-action" type="button" disabled={!valid || submitting} onClick={submit}>{submitting ? "正在运行 B/A/C…" : "创建学习计划"}</button></div></footer>
+        <footer><span>计划将独立保存画像、学习路径、C 资源、答案和当前阶段。</span><div><button className="secondary-action" type="button" disabled={submitting} onClick={onCancel}>取消</button><button className="primary-action" type="button" disabled={!valid || submitting} onClick={submit}>{submitting ? "正在运行 B/A…" : "创建学习计划"}</button></div></footer>
       </section>
     </div>
   )

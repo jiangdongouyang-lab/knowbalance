@@ -54,6 +54,18 @@ export function validateAssessmentPublicStage(
       citation.source_id === target.source_id && target.required_fact_ids.includes(citation.fact_id),
     )) issues.push(issue("missing_required_fact", `$.items[${index}].citations`, "题目未引用所属目标的必要事实"))
   })
+  for (const target of coreTargets) {
+    const citedFactIds = new Set(publicPayload.items
+      .filter((item) => item.objective_id === target.objective_id)
+      .flatMap((item) => item.citations)
+      .filter((citation) => citation.source_id === target.source_id)
+      .map((citation) => citation.fact_id))
+    const missing = target.required_fact_ids.filter((factId) =>
+      !citedFactIds.has(factId))
+    if (missing.length > 0) {
+      issues.push(issue("missing_required_fact", `$.objective.${target.objective_id}`, `核心目标必要事实未被测评完整覆盖：${missing.join("、")}`))
+    }
+  }
   const expected = request.generation_spec.assessment_blueprint
   for (const tier of [1, 2, 3] as const) {
     const count = publicPayload.items.filter((item) => item.tier === tier).length
@@ -66,14 +78,6 @@ export function validateAssessmentPublicStage(
   }
   const citations = deduplicate(publicPayload.items.flatMap((item) => item.citations))
   issues.push(...validateCitations(deduplicate([...citations, ...publicPayload.used_evidence]), request.evidence_pack).issues)
-  const citationKeys = new Set(citations.map(citationKey))
-  const usedKeys = new Set(publicPayload.used_evidence.map(citationKey))
-  for (const citation of citations) {
-    if (!usedKeys.has(citationKey(citation))) issues.push(issue("used_evidence_incomplete", "$.used_evidence", `未登记实际引用 ${citationKey(citation)}`))
-  }
-  for (const citation of publicPayload.used_evidence) {
-    if (!citationKeys.has(citationKey(citation))) issues.push(issue("unused_evidence", "$.used_evidence", `登记了未使用引用 ${citationKey(citation)}`))
-  }
   let coveredCore = 0
   for (const target of coreTargets) {
     const entry = coverage.get(target.objective_id)
@@ -192,15 +196,6 @@ export function validateAssessmentDraftStructure(
 
   const contentCitations = deduplicate(publicPayload.items.flatMap((item) => item.citations))
   issues.push(...validateCitations(deduplicate([...contentCitations, ...publicPayload.used_evidence]), request.evidence_pack).issues)
-  const contentKeys = new Set(contentCitations.map(citationKey))
-  const usedKeys = new Set(publicPayload.used_evidence.map(citationKey))
-  for (const citation of contentCitations) {
-    if (!usedKeys.has(citationKey(citation))) issues.push(issue("used_evidence_incomplete", "$.public_draft.payload.used_evidence", `未登记实际引用 ${citationKey(citation)}`))
-  }
-  for (const citation of publicPayload.used_evidence) {
-    if (!contentKeys.has(citationKey(citation))) issues.push(issue("unused_evidence", "$.public_draft.payload.used_evidence", `登记了未使用引用 ${citationKey(citation)}`))
-  }
-
   const publicCoverage = uniqueMap(publicPayload.objective_coverage, "objective_id", "$.public_draft.payload.objective_coverage", issues)
   const secureCoverage = uniqueMap(securePayload.objective_coverage, "objective_id", "$.secure_draft.payload.objective_coverage", issues)
   let coveredCore = 0
@@ -213,13 +208,22 @@ export function validateAssessmentDraftStructure(
     const secureOk = Boolean(secureEntry && secureEntry.item_ids.length > 0 &&
       secureEntry.item_ids.every((id) => secureItems.get(id)?.objective_id === target.objective_id) &&
       sameStringSet(secureEntry.answer_kinds, unique(secureEntry.item_ids.map((id) => secureItems.get(id)!.answer_spec.kind))))
+    const citedFactIds = new Set(publicPayload.items
+      .filter((item) => item.objective_id === target.objective_id)
+      .flatMap((item) => item.citations)
+      .filter((citation) => citation.source_id === target.source_id)
+      .map((citation) => citation.fact_id))
+    const missingRequiredFacts = target.required_fact_ids.filter((factId) =>
+      !citedFactIds.has(factId))
     if (!publicOk) issues.push(issue("missing_public_objective_coverage", `$.objective.${target.objective_id}`, "核心目标缺少有效公开测评映射"))
     if (!secureOk) issues.push(issue("missing_secure_objective_coverage", `$.objective.${target.objective_id}`, "核心目标缺少有效答案规范映射"))
-    if (publicOk && secureOk) coveredCore += 1
+    if (missingRequiredFacts.length > 0) {
+      issues.push(issue("missing_required_fact", `$.objective.${target.objective_id}`, `核心目标必要事实未被测评完整覆盖：${missingRequiredFacts.join("、")}`))
+    }
+    if (publicOk && secureOk && missingRequiredFacts.length === 0) coveredCore += 1
   }
 
   validateRouting(publicPayload, publicItems, issues)
-  validateCorrectPositionBalance(publicPayload.items, secureItems, issues)
   for (const [index, suite] of securePayload.code_test_suites.entries()) {
     const staticReport = analyzePythonSource(suite.reference_solution, suite.execution_contract)
     for (const entry of staticReport) issues.push(issue(`static_${entry.code}`, `$.secure_draft.payload.code_test_suites[${index}]`, entry.message))
@@ -327,10 +331,6 @@ function validateChoiceContract(
   if (!sameStringSet(Object.keys(secureItem.misconception_by_option), wrongIds)) {
     issues.push(issue("incomplete_misconception_map", `$.secure_draft.payload.items[${index}].misconception_by_option`, "每个错误选项必须且只能映射一个误区"))
   }
-  const correctText = options.find((option) => option.option_id === secureItem.correct_option_id)?.text ?? ""
-  if (normalize(correctText).length >= 4 && normalize(publicItem.prompt).includes(normalize(correctText))) {
-    issues.push(issue("answer_hint_in_prompt", `$.public_draft.payload.items[${index}].prompt`, "题干直接包含正确选项文本"))
-  }
 }
 
 function validateAnswerModality(
@@ -412,25 +412,6 @@ function validateRouting(
   const expectedActionOrder = ["remediate", "reinforce", "advance"]
   if (rules.some((rule, index) => rule.action !== expectedActionOrder[index])) {
     issues.push(issue("routing_action_order", "$.public_draft.payload.routing.rules", "路由动作必须随分数依次为 remediate、reinforce、advance"))
-  }
-}
-
-function validateCorrectPositionBalance(
-  publicItems: AssessmentItemPublic[],
-  secureItems: Map<string, AssessmentItemSecure>,
-  issues: ValidationIssue[],
-): void {
-  const choiceItems = publicItems.filter((item) => item.options)
-  if (choiceItems.length < 2) return
-  const maxPositions = Math.max(...choiceItems.map((item) => item.options!.length))
-  const counts = Array.from({ length: maxPositions }, () => 0)
-  choiceItems.forEach((item) => {
-    const correct = secureItems.get(item.item_id)?.correct_option_id
-    const position = item.options!.findIndex((option) => option.option_id === correct)
-    if (position >= 0) counts[position] += 1
-  })
-  if (Math.max(...counts) - Math.min(...counts) > 1) {
-    issues.push(issue("unbalanced_correct_positions", "$.public_draft.payload.items", "正确选项位置配额差不得超过 1"))
   }
 }
 

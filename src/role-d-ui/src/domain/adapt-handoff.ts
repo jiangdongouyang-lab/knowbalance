@@ -24,6 +24,9 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
     updatedAt: input.updated_at ?? input.updatedAt ?? new Date(0).toISOString(),
     profile: {
       learnerId: profile.learner_id ?? profile.learnerId ?? "anonymous_learner",
+      ...(profile.profile_version || profile.profileVersion ? {
+        profileVersion: profile.profile_version ?? profile.profileVersion,
+      } : {}),
       level: normalizeDifficulty(profile.level),
       knownConcepts: profile.known_concepts ?? profile.knownConcepts ?? [],
       weakConcepts: profile.weak_concepts ?? profile.weakConcepts ?? [],
@@ -63,6 +66,13 @@ export function adaptHandoff(input: LooseRecord): RoleDSession {
       weakConcepts: input.planInput?.weakConcepts ?? profile.weak_concepts ?? profile.weakConcepts ?? [],
     },
     diagnosis: {
+      availability: input.diagnosis?.availability
+        ?? (Array.isArray(input.diagnosis?.items) && input.diagnosis.items.length === 0
+          ? "unavailable"
+          : "available"),
+      ...(input.diagnosis?.unavailableReason || input.diagnosis?.unavailable_reason ? {
+        unavailableReason: input.diagnosis?.unavailableReason ?? input.diagnosis?.unavailable_reason,
+      } : {}),
       items: input.diagnosis?.items?.map((item: LooseRecord, index: number) => ({
         id: item.id ?? `${item.sourceId ?? item.source_id ?? "UNKNOWN"}-${item.factId ?? item.fact_id ?? "UNKNOWN"}-${index + 1}`,
         sourceId: item.sourceId ?? item.source_id ?? "UNKNOWN",
@@ -155,10 +165,10 @@ function normalizeRetrievalItem(item: LooseRecord): RetrievalItemView {
     sourceId: item.sourceId ?? item.source_id ?? "UNKNOWN",
     title: item.title ?? "未命名知识点",
     difficulty: normalizeDifficulty(item.difficulty),
-    score: item.score ?? 0,
-    reason: item.reason ?? "无推荐说明",
+    score: item.score ?? item.rank_score ?? 0,
+    reason: item.reason ?? item.match_reason ?? "无推荐说明",
     snippet: item.snippet ?? "",
-    file: item.file ?? "",
+    file: item.file ?? item.source_file ?? "",
     facts: (item.facts ?? []).map((fact: LooseRecord) => ({
       sourceId: fact.sourceId ?? fact.source_id ?? item.sourceId ?? item.source_id ?? "UNKNOWN",
       factId: fact.factId ?? fact.fact_id ?? "UNKNOWN",

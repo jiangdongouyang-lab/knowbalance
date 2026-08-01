@@ -12,6 +12,7 @@ import type {
   TeachingAuditResult,
 } from "../../role-b-profile/teaching-audit/types"
 import { stableId } from "../contracts/common"
+import { normalizeGroundedClaimText } from "../validators/claim-grounding"
 import { extractReviewBlocks } from "./extract-review-blocks"
 import { agentForReviewArtifact } from "./revision-mapper"
 import type {
@@ -28,7 +29,7 @@ import type {
   ReviewablePublicArtifact,
 } from "./types"
 
-export const LOCAL_AB_REVIEW_POLICY_VERSION = "role-c-local-ab-review-v1"
+export const LOCAL_AB_REVIEW_POLICY_VERSION = "role-c-local-ab-review-v2"
 
 export interface LocalABContentReviewPortOptions {
   knowledge_base: KnowledgeBase
@@ -53,8 +54,15 @@ export function createLocalABContentReviewPort(
     async review(request): Promise<ContentReviewResult> {
       assertReviewContext(request, kbVersion)
       const ragResult = ragEvidencePackToRagResult(request.evidence_pack)
-      const reviewed = request.artifacts.map((target) =>
-        reviewArtifact(target, request, ragResult, knowledgeBase))
+      const teachingAudit = auditPathTeaching(request, knowledgeBase)
+      const reviewed = request.artifacts.map((target, index) =>
+        reviewArtifact(
+          target,
+          request,
+          ragResult,
+          teachingAudit,
+          index === 0,
+        ))
       const artifactResults = reviewed.map((entry) => entry.result)
       const decision = aggregateDecision(artifactResults.map((result) => result.decision))
       const revisionInstructions = artifactResults.flatMap(
@@ -74,7 +82,7 @@ export function createLocalABContentReviewPort(
         ...(decision === "pass"
           ? {}
           : structuredRecoveryFields(
-              reviewed.map((entry) => entry.teaching_audit),
+              teachingAudit,
               revisionInstructions,
             )),
       }
@@ -138,10 +146,10 @@ function reviewArtifact(
   target: ContentReviewRequest["artifacts"][number],
   request: ContentReviewRequest,
   ragResult: RagResult,
-  knowledgeBase: KnowledgeBase,
+  teachingAudit: TeachingAuditResult,
+  includePathFindings: boolean,
 ): {
   result: ArtifactReviewResult
-  teaching_audit: TeachingAuditResult
 } {
   const blocks = extractReviewBlocks(target)
   const blocksById = new Map(blocks.map((block) => [block.review_block_id, block]))
@@ -162,27 +170,19 @@ function reviewArtifact(
     request.evidence_pack,
     target,
   )
+  const evidenceAnchorAudit = auditEvidenceAnchoredBlocks(
+    blocks.filter((block) => block.fact_audit_mode === "evidence_anchored"),
+    request.evidence_pack,
+    target,
+  )
+  const localFactAuditStatus = artifactLocalFactAuditStatus(factAudit)
   const factStatus: FactAuditStatus = blocks.length === 0
     ? "reject"
-    : aggregateFactStatus([factAudit.status, citationAudit.status])
-  const citedSourceIds = unique(
-    blocks.flatMap((block) => block.citations.map((citation) => citation.source_id)),
-  )
-  const allowedTargetIds = new Set(request.generation_spec.path_node.target_source_ids)
-  const teachingAudit = auditTeaching({
-    artifactId: target.artifact.artifact_id,
-    learnerProfile: {
-      learner_id: request.generation_spec.profile_ref.profile_id,
-      level: request.generation_spec.learner_adaptation.level,
-      known_concepts: [...request.generation_spec.learner_adaptation.known_concepts],
-      weak_concepts: [...request.generation_spec.learner_adaptation.weak_concepts],
-      goal: request.generation_spec.path_node.goal,
-    },
-    knowledgeBase,
-    citedSourceIds,
-    targetSourceIds: citedSourceIds.filter((sourceId) => allowedTargetIds.has(sourceId)),
-    contentSummary: blocks.map((block) => block.text).join("\n").slice(0, 4_000),
-  })
+    : aggregateFactStatus([
+        localFactAuditStatus,
+        citationAudit.status,
+        evidenceAnchorAudit.status,
+      ])
   const arbitration = arbitrate({
     artifactId: target.artifact.artifact_id,
     factAuditStatus: factStatus,
@@ -197,11 +197,17 @@ function reviewArtifact(
     ...(blocks.length === 0 ? [emptyExtractionFinding(target)] : []),
     ...factFindings(target, factAudit, blocksById),
     ...citationAudit.findings,
-    ...teachingFindings(target, teachingAudit),
+    ...evidenceAnchorAudit.findings,
+    ...(includePathFindings ? teachingFindings(target, teachingAudit) : []),
   ]
   const objectiveIds = request.generation_spec.targets.map((target) => target.objective_id)
   const instructions = findings.flatMap((finding) =>
-    toInstructions(finding, objectiveIds))
+    toInstructions(
+      finding,
+      finding.source === "teaching_audit"
+        ? objectiveIds.slice(0, 1)
+        : objectiveIds,
+    ))
   return {
     result: {
       artifact_kind: target.kind,
@@ -214,12 +220,172 @@ function reviewArtifact(
       findings,
       revision_instructions: instructions,
     },
-    teaching_audit: teachingAudit,
   }
 }
 
+/**
+ * B audits the frozen learning path once. Goal wording and weak-concept
+ * preferences remain useful diagnostics, but they do not invalidate a path
+ * whose objectives already have A-owned evidence. Difficulty, prerequisites
+ * and unresolved path references are structural and request a new spec.
+ */
+function auditPathTeaching(
+  request: ContentReviewRequest,
+  knowledgeBase: KnowledgeBase,
+): TeachingAuditResult {
+  const targetSourceIds = unique(
+    request.generation_spec.path_node.target_source_ids,
+  )
+  const raw = auditTeaching({
+    artifactId: stableId("PATH-AUDIT", {
+      run_id: request.run_id,
+      generation_spec_hash: request.generation_spec_hash,
+      revision_round: request.revision_round,
+    }),
+    learnerProfile: {
+      learner_id: request.generation_spec.profile_ref.profile_id,
+      level: request.generation_spec.learner_adaptation.level,
+      known_concepts: [...request.generation_spec.learner_adaptation.known_concepts],
+      weak_concepts: [...request.generation_spec.learner_adaptation.weak_concepts],
+      goal: request.generation_spec.path_node.goal,
+    },
+    knowledgeBase,
+    citedSourceIds: targetSourceIds,
+    targetSourceIds,
+  })
+
+  const knownSourceIds = new Set(
+    knowledgeBase.items.map((item) => item.sourceId),
+  )
+  const unknownTargetSourceIds = targetSourceIds.filter(
+    (sourceId) => !knownSourceIds.has(sourceId),
+  )
+  const blockingDimensions = raw.failedDimensions.filter((dimension) =>
+    dimension === "difficulty_alignment"
+    || dimension === "prerequisite_coverage")
+  if (unknownTargetSourceIds.length > 0
+    && !blockingDimensions.includes("prerequisite_coverage")) {
+    blockingDimensions.push("prerequisite_coverage")
+  }
+
+  if (blockingDimensions.length === 0) {
+    return {
+      ...raw,
+      status: "pass",
+      summary: "路径教学审核通过。",
+      revisionHints: [],
+      failedDimensions: [],
+      missingPrerequisiteSourceIds: [],
+      unknownPrerequisiteRefs: [],
+      requiredAction: "adjust_content",
+      fixScope: "artifact",
+      recommendedLevel: null,
+      canRecover: true,
+    }
+  }
+
+  const unknownReferences = unique([
+    ...raw.unknownPrerequisiteRefs,
+    ...unknownTargetSourceIds,
+  ])
+  return {
+    ...raw,
+    status: "reject",
+    summary: "路径教学审核需要重新规划。",
+    revisionHints: raw.revisionHints.filter((hint) =>
+      hint.includes("[difficulty_alignment]")
+      || hint.includes("[prerequisite_coverage]")),
+    failedDimensions: blockingDimensions,
+    unknownPrerequisiteRefs: unknownReferences,
+    requiredAction: "replan_path",
+    fixScope: "new_spec",
+    canRecover: unknownReferences.length === 0 && raw.canRecover,
+  }
+}
+
+function auditEvidenceAnchoredBlocks(
+  blocks: ReviewContentBlock[],
+  evidence: ReviewEvidencePack,
+  target: ReviewablePublicArtifact,
+): { status: FactAuditStatus; findings: ContentReviewFinding[] } {
+  const facts = new Map<string, string>(evidence.results.flatMap((item) =>
+    item.facts.map((fact) => [
+      `${fact.source_id}:${fact.fact_id}`,
+      fact.content,
+    ] as const)))
+  const findings: ContentReviewFinding[] = []
+
+  for (const block of blocks) {
+    if (block.citations.length === 0) {
+      findings.push({
+        source: "fact_audit",
+        code: "missing_citation",
+        artifact_kind: target.kind,
+        artifact_id: target.artifact.artifact_id,
+        message: "教学正文未绑定当前冻结证据",
+        proposed_action: "为正文绑定当前 evidence_pack 中存在的事实引用",
+        fix_scope: "artifact",
+        locator: block.locator,
+        evidence_refs: [block.review_block_id],
+      })
+      continue
+    }
+
+    const rendered = normalizeGroundedClaimText(block.text)
+    const missingFacts: Array<{
+      key: string
+      kind: "missing_citation" | "missing_anchor"
+    }> = []
+    for (const citation of block.citations) {
+      const key = `${citation.source_id}:${citation.fact_id}`
+      const fact = facts.get(key)
+      if (!fact) missingFacts.push({ key, kind: "missing_citation" })
+      else if (!rendered.includes(normalizeGroundedClaimText(fact))) {
+        missingFacts.push({ key, kind: "missing_anchor" })
+      }
+    }
+    if (missingFacts.length === 0) continue
+
+    const hasUnknownCitation = missingFacts.some((entry) =>
+      entry.kind === "missing_citation")
+    findings.push({
+      source: "fact_audit",
+      code: hasUnknownCitation ? "unsupported_citation" : "missing_evidence_anchor",
+      artifact_kind: target.kind,
+      artifact_id: target.artifact.artifact_id,
+      message: hasUnknownCitation
+        ? `引用不存在于当前冻结证据：${missingFacts.map((entry) => entry.key).join("、")}`
+        : `教学正文没有呈现已声明的证据事实：${missingFacts.map((entry) => entry.key).join("、")}`,
+      proposed_action: hasUnknownCitation
+        ? "改用当前 evidence_pack 中存在且与目标对应的引用"
+        : "在教学正文中呈现对应的冻结事实，个性化说明可作为教学脚手架保留",
+      fix_scope: "artifact",
+      locator: block.locator,
+      evidence_refs: [block.review_block_id, ...missingFacts.map((entry) => entry.key)],
+    })
+  }
+
+  return {
+    status: findings.some((finding) => finding.code === "unsupported_citation")
+      ? "reject"
+      : findings.length > 0
+        ? "revise"
+        : "pass",
+    findings,
+  }
+}
+
+function artifactLocalFactAuditStatus(result: FactAuditResult): FactAuditStatus {
+  if (result.status !== "reject") return result.status
+  const terminal = result.checkedClaims.some((claim) =>
+    claim.verdict === "external_knowledge"
+    || (claim.verdict === "unsupported"
+      && claim.reason.startsWith("引用不存在于当前 RAG 结果")))
+  return terminal ? "reject" : "revise"
+}
+
 function structuredRecoveryFields(
-  teachingAudits: TeachingAuditResult[],
+  teachingAudit: TeachingAuditResult,
   instructions: ContentRevisionInstruction[],
 ): Pick<
   ContentReviewResult,
@@ -238,40 +404,38 @@ function structuredRecoveryFields(
     : scopes.has("new_evidence")
       ? "new_evidence"
       : "artifact"
-  const matchingAudit = teachingAudits.find((audit) =>
-    audit.fixScope === fixScope)
+  const matchingAudit = teachingAudit.fixScope === fixScope
+    ? teachingAudit
+    : undefined
   const requiredAction: RequiredAction = matchingAudit?.requiredAction
     ?? (fixScope === "new_spec"
       ? "replan_path"
       : fixScope === "new_evidence"
         ? "request_new_evidence"
         : "adjust_content")
-  const relevantTeachingAudits = teachingAudits.filter((audit) =>
-    audit.fixScope === fixScope && audit.status !== "pass")
-  const recommendedLevel = relevantTeachingAudits
-    .map((audit) => audit.recommendedLevel)
-    .find((level) => level !== null)
+  const relevantTeachingAudit = teachingAudit.fixScope === fixScope
+    && teachingAudit.status !== "pass"
+    ? teachingAudit
+    : undefined
+  const recommendedLevel = relevantTeachingAudit?.recommendedLevel ?? null
   return {
     failed_dimensions: unique([
-      ...teachingAudits.flatMap((audit) => audit.failedDimensions),
+      ...teachingAudit.failedDimensions,
       ...instructions
         .filter((instruction) => instruction.source !== "teaching_audit")
         .map((instruction) => instruction.code),
     ]),
     missing_prerequisite_source_ids: unique(
-      teachingAudits.flatMap((audit) =>
-        audit.missingPrerequisiteSourceIds),
+      teachingAudit.missingPrerequisiteSourceIds,
     ),
     unknown_prerequisite_refs: unique(
-      teachingAudits.flatMap((audit) =>
-        audit.unknownPrerequisiteRefs),
+      teachingAudit.unknownPrerequisiteRefs,
     ),
     required_action: requiredAction,
     fix_scope: fixScope,
     ...(recommendedLevel ? { recommended_level: recommendedLevel } : {}),
     can_recover: fixScope === "new_spec"
-      ? relevantTeachingAudits.length > 0
-        && relevantTeachingAudits.every((audit) => audit.canRecover)
+      ? relevantTeachingAudit?.canRecover ?? false
       : true,
   }
 }

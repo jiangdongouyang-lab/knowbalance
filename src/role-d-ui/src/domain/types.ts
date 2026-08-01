@@ -6,6 +6,7 @@ export type GuidedStage = "onboarding" | "diagnosis" | "profile" | "plan" | "lea
 
 export interface LearnerProfileView {
   learnerId: string
+  profileVersion?: string
   level: Difficulty
   knownConcepts: string[]
   weakConcepts: string[]
@@ -216,6 +217,8 @@ export interface RoleDSession {
     weakConcepts: string[]
   }
   diagnosis: {
+    availability?: "available" | "unavailable"
+    unavailableReason?: string
     items?: Array<{
       id: string
       sourceId: string

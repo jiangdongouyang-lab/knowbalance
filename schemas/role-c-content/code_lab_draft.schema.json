@@ -19,6 +19,51 @@
     }
   },
   "$defs": {
+    "public_safety_repair_patch": {
+      "type": "object",
+      "required": [
+        "starter_code",
+        "instruction_texts",
+        "public_test_descriptions",
+        "public_test_expected_behaviors",
+        "hint_texts",
+        "reflection_questions"
+      ],
+      "properties": {
+        "starter_code": { "type": "string", "minLength": 1 },
+        "instruction_texts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "public_test_descriptions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "public_test_expected_behaviors": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "hint_texts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 3,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        },
+        "reflection_questions": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
     "citation": {
       "type": "object",
       "required": ["source_id", "fact_id", "relation"],
@@ -127,7 +172,7 @@
           "type": "array",
           "uniqueItems": true,
           "items": {
-            "enum": ["bisect", "collections", "decimal", "fractions", "functools", "heapq", "itertools", "math", "operator", "statistics", "string"]
+            "enum": ["bisect", "collections", "datetime", "decimal", "enum", "fractions", "functools", "heapq", "itertools", "io", "json", "math", "operator", "random", "re", "statistics", "string"]
           }
         },
         "input_contract": {
@@ -192,6 +237,50 @@
         "public_test_ids": {
           "type": "array", "minItems": 1, "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "public_author_payload": {
+      "type": "object",
+      "required": ["title", "execution_contract", "starter_code", "objectives"],
+      "properties": {
+        "title": { "type": "string", "minLength": 1 },
+        "execution_contract": { "$ref": "#/$defs/execution_contract" },
+        "starter_code": { "type": "string", "minLength": 1, "maxLength": 20000 },
+        "objectives": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "instruction_text",
+              "public_test",
+              "hints",
+              "reflection_question"
+            ],
+            "properties": {
+              "instruction_text": { "type": "string", "minLength": 1 },
+              "public_test": {
+                "type": "object",
+                "required": ["description", "input", "expected_behavior"],
+                "properties": {
+                  "description": { "type": "string", "minLength": 1 },
+                  "input": {},
+                  "expected_behavior": { "type": "string", "minLength": 1 }
+                },
+                "additionalProperties": false
+              },
+              "hints": {
+                "type": "array",
+                "minItems": 3,
+                "maxItems": 3,
+                "items": { "type": "string", "minLength": 1 }
+              },
+              "reflection_question": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -311,8 +400,94 @@
           "items": { "type": "string", "minLength": 1 }
         },
         "mutation_ids": {
-          "type": "array", "minItems": 1, "uniqueItems": true,
+          "type": "array", "uniqueItems": true,
           "items": { "type": "string", "minLength": 1 }
+        }
+      },
+      "additionalProperties": false
+    },
+    "execution_repair_patch": {
+      "type": "object",
+      "required": ["reference_solution", "hidden_test_repairs", "mutation_repairs"],
+      "properties": {
+        "reference_solution": {
+          "oneOf": [
+            { "type": "string", "minLength": 1, "maxLength": 20000 },
+            { "type": "null" }
+          ]
+        },
+        "hidden_test_repairs": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["test_id", "input", "expected", "comparison"],
+            "properties": {
+              "test_id": { "type": "string", "minLength": 1 },
+              "input": {},
+              "expected": {},
+              "comparison": { "$ref": "#/$defs/test_comparison" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "mutation_repairs": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {
+            "type": "object",
+            "required": ["mutation_id", "code"],
+            "properties": {
+              "mutation_id": { "type": "string", "minLength": 1 },
+              "code": { "type": "string", "minLength": 1, "maxLength": 20000 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "starter_repair_patch": {
+      "type": "object",
+      "required": ["starter_code"],
+      "properties": {
+        "starter_code": { "type": "string", "minLength": 1, "maxLength": 20000 }
+      },
+      "additionalProperties": false
+    },
+    "secure_author_payload": {
+      "type": "object",
+      "required": ["reference_solution", "hidden_tests", "mutation_variants"],
+      "properties": {
+        "reference_solution": { "type": "string", "minLength": 1, "maxLength": 20000 },
+        "hidden_tests": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["input", "expected", "comparison", "misconception_tag"],
+            "properties": {
+              "input": {},
+              "expected": {},
+              "comparison": { "$ref": "#/$defs/test_comparison" },
+              "misconception_tag": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "mutation_variants": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "required": ["code", "misconception_tag"],
+            "properties": {
+              "code": { "type": "string", "minLength": 1, "maxLength": 20000 },
+              "misconception_tag": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          }
         }
       },
       "additionalProperties": false
@@ -326,7 +501,7 @@
         "execution_contract": { "$ref": "#/$defs/execution_contract" },
         "reference_solution": { "type": "string", "minLength": 1, "maxLength": 20000 },
         "hidden_tests": {
-          "type": "array", "minItems": 2, "maxItems": 64,
+          "type": "array", "minItems": 1, "maxItems": 64,
           "items": { "$ref": "#/$defs/hidden_test" }
         },
         "scoring_groups": {
@@ -346,7 +521,7 @@
           }
         },
         "mutation_variants": {
-          "type": "array", "minItems": 1,
+          "type": "array",
           "items": { "$ref": "#/$defs/mutation_variant" }
         },
         "objective_coverage": {

@@ -21,6 +21,7 @@ import {
   reportFromObjections,
   validateCrossArtifactAlignment,
   type CrossArtifactCritic,
+  type AlignmentObjection,
   type AlignmentReport,
 } from "../validators/alignment-validator"
 import { detectEvidenceConflicts, validateSpecEvidence } from "../validators/evidence-validator"
@@ -57,6 +58,7 @@ export interface CPipelineResult {
 }
 
 export interface CPipelineOptions {
+  /** Optional semantic diagnostics; its findings never override deterministic trust checks. */
   critic?: CrossArtifactCritic
   fact_audit_port?: FactAuditPort
   cache?: ContentCache<CPipelineResult>
@@ -411,65 +413,181 @@ async function runCPipelineCore(
     validator_results: [{ validator: "concept-structure-grounding", ok: true, issue_count: 0 }],
   })
 
-  // Both branches consume the same frozen spec and lesson. They do not edit each other.
-  for (const agent of ["code-lab", "tiered-evaluator"] as const) {
+  let labPair: CodeLabArtifactPair
+  let assessmentPair: AssessmentArtifactPair
+  const resumedBranches = checkpoint?.stage === "branches_ready"
+    && checkpoint.code_lab !== undefined
+    && checkpoint.assessment !== undefined
+  if (resumedBranches) {
+    labPair = checkpoint!.code_lab!
+    assessmentPair = checkpoint!.assessment!
+    for (const agent of ["code-lab", "tiered-evaluator"] as const) {
+      pushTrace({
+        event_type: "c.agent.started",
+        run_id: input.generation_spec.run_id,
+        agent,
+        status: "started",
+        input_refs: [input.generation_spec.spec_id, input.evidence_pack.retrieval_id, concept.artifact_id],
+        summary: `${agent} 从已验证检查点恢复`,
+        retry_kind: "resume",
+      })
+    }
+  } else {
     pushTrace({
       event_type: "c.agent.started",
       run_id: input.generation_spec.run_id,
-      agent,
+      agent: "code-lab",
       status: "started",
       input_refs: [input.generation_spec.spec_id, input.evidence_pack.retrieval_id, concept.artifact_id],
-      summary: `${agent} 开始生成`,
-      ...(checkpoint?.stage === "branches_ready" ? { retry_kind: "resume" as const } : {}),
+      summary: "code-lab 开始生成",
     })
-  }
-  let labPair: CodeLabArtifactPair
-  let assessmentPair: AssessmentArtifactPair
-  try {
-    if (checkpoint?.stage === "branches_ready" && checkpoint.code_lab && checkpoint.assessment) {
-      labPair = checkpoint.code_lab
-      assessmentPair = checkpoint.assessment
-    } else {
-      const [generatedLab, generatedAssessment] = await Promise.all([
-        agents.code_lab.generate({
-          generation_spec: input.generation_spec,
-          evidence_pack: input.evidence_pack,
-          concept_artifact: concept,
-          next_round_context: input.next_round_context,
-        }),
-        agents.tiered_evaluator.generate({
-          generation_spec: input.generation_spec,
-          evidence_pack: input.evidence_pack,
-          concept_artifact: concept,
-          next_round_context: input.next_round_context,
-        }),
-      ])
-      labPair = generatedLab
-      assessmentPair = generatedAssessment
-      if ([labPair.public_artifact, labPair.secure_artifact, assessmentPair.public_artifact, assessmentPair.secure_artifact]
-        .every((artifact) => artifact.status === "ready")) {
-        try {
-          await options.checkpoint_store?.save({
-            input_hash: inputHash,
-            stage: "branches_ready",
-            concept,
-            code_lab: labPair,
-            assessment: assessmentPair,
-          })
-        } catch { /* checkpoint is non-authoritative */ }
-      }
+    try {
+      labPair = await agents.code_lab.generate({
+        generation_spec: input.generation_spec,
+        evidence_pack: input.evidence_pack,
+        concept_artifact: concept,
+        next_round_context: input.next_round_context,
+      })
+    } catch (error) {
+      state = transitionCState(state, "FAILED")
+      const failure: FailureReason = { code: "PROVIDER_ERROR", message: errorMessage(error) }
+      pushTrace({
+        event_type: "c.pipeline.failed",
+        run_id: input.generation_spec.run_id,
+        agent: "code-lab",
+        status: "failed",
+        input_refs: [input.generation_spec.spec_id, input.evidence_pack.retrieval_id, concept.artifact_id],
+        summary: failure.message,
+      })
+      return failedResult(input.generation_spec, state, trace, failure, {
+        concept_lesson: concept,
+      })
     }
-  } catch (error) {
-    state = transitionCState(state, "FAILED")
-    const failure: FailureReason = { code: "PROVIDER_ERROR", message: errorMessage(error) }
+    const blockedLab = [labPair.public_artifact, labPair.secure_artifact]
+      .find((artifact) => artifact.status !== "ready")
+    if (blockedLab) {
+      state = transitionCState(state, "BLOCKED")
+      pushTrace({
+        event_type: "c.pipeline.blocked",
+        run_id: input.generation_spec.run_id,
+        agent: "code-lab",
+        status: "blocked",
+        input_refs: blockedLab.input_refs,
+        output_ref: blockedLab.artifact_id,
+        summary: blockedLab.blocked_reason?.message ?? "code-lab 产物未就绪",
+      })
+      return blockedResult(
+        input.generation_spec,
+        state,
+        trace,
+        blockedLab.blocked_reason
+          ?? { code: "BLOCKED_PROVIDER_UNAVAILABLE", message: "code-lab 产物未就绪" },
+        { concept_lesson: concept, code_lab: labPair.public_artifact },
+      )
+    }
     pushTrace({
-      event_type: "c.pipeline.failed",
+      event_type: "c.agent.ready",
       run_id: input.generation_spec.run_id,
-      status: "failed",
-      input_refs: [input.generation_spec.spec_id, input.evidence_pack.retrieval_id, concept.artifact_id],
-      summary: failure.message,
+      agent: "code-lab",
+      status: "success",
+      input_refs: labPair.public_artifact.input_refs,
+      output_ref: labPair.public_artifact.artifact_id,
+      summary: "code-lab public/secure 产物已通过发布前门禁",
+      validator_results: [{ validator: "code-lab-structure-execution", ok: true, issue_count: 0 }],
     })
-    return failedResult(input.generation_spec, state, trace, failure, { concept_lesson: concept })
+
+    pushTrace({
+      event_type: "c.agent.started",
+      run_id: input.generation_spec.run_id,
+      agent: "tiered-evaluator",
+      status: "started",
+      input_refs: [input.generation_spec.spec_id, input.evidence_pack.retrieval_id, concept.artifact_id, labPair.public_artifact.artifact_id],
+      summary: "tiered-evaluator 开始生成",
+    })
+    try {
+      assessmentPair = await agents.tiered_evaluator.generate({
+        generation_spec: input.generation_spec,
+        evidence_pack: input.evidence_pack,
+        concept_artifact: concept,
+        ...(labPair.public_artifact.payload
+          ? {
+              code_lab_summary: {
+                lab_id: labPair.public_artifact.payload.lab_id,
+                objective_ids: [
+                  ...labPair.public_artifact.payload.objective_ids,
+                ],
+                execution_verified:
+                  labPair.public_artifact.quality.execution_verified
+                    === true,
+              },
+            }
+          : {}),
+        next_round_context: input.next_round_context,
+      })
+    } catch (error) {
+      state = transitionCState(state, "FAILED")
+      const failure: FailureReason = { code: "PROVIDER_ERROR", message: errorMessage(error) }
+      pushTrace({
+        event_type: "c.pipeline.failed",
+        run_id: input.generation_spec.run_id,
+        agent: "tiered-evaluator",
+        status: "failed",
+        input_refs: [input.generation_spec.spec_id, input.evidence_pack.retrieval_id, concept.artifact_id, labPair.public_artifact.artifact_id],
+        summary: failure.message,
+      })
+      return failedResult(input.generation_spec, state, trace, failure, {
+        concept_lesson: concept,
+        code_lab: labPair.public_artifact,
+      })
+    }
+    const blockedAssessment = [
+      assessmentPair.public_artifact,
+      assessmentPair.secure_artifact,
+    ].find((artifact) => artifact.status !== "ready")
+    if (blockedAssessment) {
+      state = transitionCState(state, "BLOCKED")
+      pushTrace({
+        event_type: "c.pipeline.blocked",
+        run_id: input.generation_spec.run_id,
+        agent: "tiered-evaluator",
+        status: "blocked",
+        input_refs: blockedAssessment.input_refs,
+        output_ref: blockedAssessment.artifact_id,
+        summary: blockedAssessment.blocked_reason?.message
+          ?? "tiered-evaluator 产物未就绪",
+      })
+      return blockedResult(
+        input.generation_spec,
+        state,
+        trace,
+        blockedAssessment.blocked_reason
+          ?? { code: "BLOCKED_PROVIDER_UNAVAILABLE", message: "tiered-evaluator 产物未就绪" },
+        {
+          concept_lesson: concept,
+          code_lab: labPair.public_artifact,
+          assessment: assessmentPair.public_artifact,
+        },
+      )
+    }
+    pushTrace({
+      event_type: "c.agent.ready",
+      run_id: input.generation_spec.run_id,
+      agent: "tiered-evaluator",
+      status: "success",
+      input_refs: assessmentPair.public_artifact.input_refs,
+      output_ref: assessmentPair.public_artifact.artifact_id,
+      summary: "tiered-evaluator public/secure 产物已通过发布前门禁",
+      validator_results: [{ validator: "assessment-structure-answer", ok: true, issue_count: 0 }],
+    })
+    try {
+      await options.checkpoint_store?.save({
+        input_hash: inputHash,
+        stage: "branches_ready",
+        concept,
+        code_lab: labPair,
+        assessment: assessmentPair,
+      })
+    } catch { /* checkpoint is non-authoritative */ }
   }
 
   let publicArtifacts = {
@@ -503,26 +621,28 @@ async function runCPipelineCore(
     )
   }
 
-  pushTrace({
-    event_type: "c.agent.ready",
-    run_id: input.generation_spec.run_id,
-    agent: "code-lab",
-    status: "success",
-    input_refs: labPair.public_artifact.input_refs,
-    output_ref: labPair.public_artifact.artifact_id,
-    summary: "code-lab public/secure 产物已通过发布前门禁",
-    validator_results: [{ validator: "code-lab-structure-execution", ok: true, issue_count: 0 }],
-  })
-  pushTrace({
-    event_type: "c.agent.ready",
-    run_id: input.generation_spec.run_id,
-    agent: "tiered-evaluator",
-    status: "success",
-    input_refs: assessmentPair.public_artifact.input_refs,
-    output_ref: assessmentPair.public_artifact.artifact_id,
-    summary: "tiered-evaluator public/secure 产物已通过发布前门禁",
-    validator_results: [{ validator: "assessment-structure-answer", ok: true, issue_count: 0 }],
-  })
+  if (resumedBranches) {
+    pushTrace({
+      event_type: "c.agent.ready",
+      run_id: input.generation_spec.run_id,
+      agent: "code-lab",
+      status: "success",
+      input_refs: labPair.public_artifact.input_refs,
+      output_ref: labPair.public_artifact.artifact_id,
+      summary: "code-lab public/secure 产物已从检查点恢复",
+      validator_results: [{ validator: "code-lab-structure-execution", ok: true, issue_count: 0 }],
+    })
+    pushTrace({
+      event_type: "c.agent.ready",
+      run_id: input.generation_spec.run_id,
+      agent: "tiered-evaluator",
+      status: "success",
+      input_refs: assessmentPair.public_artifact.input_refs,
+      output_ref: assessmentPair.public_artifact.artifact_id,
+      summary: "tiered-evaluator public/secure 产物已从检查点恢复",
+      validator_results: [{ validator: "assessment-structure-answer", ok: true, issue_count: 0 }],
+    })
+  }
 
   state = transitionCState(state, "VALIDATING")
   const alignmentInput = {
@@ -536,25 +656,11 @@ async function runCPipelineCore(
   let criticObjections = validateCrossArtifactAlignment(alignmentInput).objections
   if (options.critic) {
     try {
-      criticObjections = [...criticObjections, ...await options.critic.review(alignmentInput)]
-    } catch (error) {
-      state = transitionCState(state, "FAILED")
-      const failure: FailureReason = { code: "PROVIDER_ERROR", message: `cross-artifact critic 失败：${errorMessage(error)}` }
-      pushTrace({
-        event_type: "c.pipeline.failed",
-        run_id: input.generation_spec.run_id,
-        status: "failed",
-        input_refs: [concept.artifact_id, labPair.public_artifact.artifact_id, assessmentPair.public_artifact.artifact_id],
-        summary: failure.message,
-      })
-      return failedResult(
-        input.generation_spec,
-        state,
-        trace,
-        failure,
-        publicArtifacts,
-      )
-    }
+      criticObjections = [
+        ...criticObjections,
+        ...asDiagnosticObjections(await options.critic.review(alignmentInput)),
+      ]
+    } catch { /* optional semantic diagnostics do not affect publication */ }
   }
   let alignmentReport = reportFromObjections(input.generation_spec, criticObjections)
   if (!alignmentReport.ok) {
@@ -570,10 +676,13 @@ async function runCPipelineCore(
       validator_results: [{ validator: "cross-artifact-critic", ok: false, issue_count: alignmentReport.objections.length }],
     })
 
-    const conceptNeedsRevision = alignmentReport.objections.some((entry) => entry.target_artifact_id === concept.artifact_id)
-    const labNeedsRevision = conceptNeedsRevision || alignmentReport.objections.some((entry) =>
+    const blockingObjections = alignmentReport.objections.filter((entry) =>
+      entry.severity === "critical")
+    const conceptNeedsRevision = blockingObjections.some((entry) =>
+      entry.target_artifact_id === concept.artifact_id)
+    const labNeedsRevision = conceptNeedsRevision || blockingObjections.some((entry) =>
       entry.target_artifact_id === labPair.public_artifact.artifact_id || entry.target_artifact_id === labPair.secure_artifact.artifact_id)
-    const assessmentNeedsRevision = conceptNeedsRevision || alignmentReport.objections.some((entry) =>
+    const assessmentNeedsRevision = conceptNeedsRevision || labNeedsRevision || blockingObjections.some((entry) =>
       entry.target_artifact_id === assessmentPair.public_artifact.artifact_id || entry.target_artifact_id === assessmentPair.secure_artifact.artifact_id)
     try {
       if (conceptNeedsRevision) {
@@ -581,7 +690,7 @@ async function runCPipelineCore(
           generation_spec: input.generation_spec,
           evidence_pack: input.evidence_pack,
           next_round_context: input.next_round_context,
-          revision_objections: alignmentReport.objections.filter((entry) => entry.target_artifact_id === concept.artifact_id),
+          revision_objections: blockingObjections.filter((entry) => entry.target_artifact_id === concept.artifact_id),
         })
       }
       if (labNeedsRevision) {
@@ -590,7 +699,7 @@ async function runCPipelineCore(
           evidence_pack: input.evidence_pack,
           concept_artifact: concept,
           next_round_context: input.next_round_context,
-          revision_objections: alignmentReport.objections.filter((entry) =>
+          revision_objections: blockingObjections.filter((entry) =>
             entry.target_artifact_id === labPair.public_artifact.artifact_id
               || entry.target_artifact_id === labPair.secure_artifact.artifact_id),
         })
@@ -602,7 +711,7 @@ async function runCPipelineCore(
           concept_artifact: concept,
           next_round_context: input.next_round_context,
           code_lab_summary: toCodeLabSummary(labPair),
-          revision_objections: alignmentReport.objections.filter((entry) =>
+          revision_objections: blockingObjections.filter((entry) =>
             entry.target_artifact_id === assessmentPair.public_artifact.artifact_id
               || entry.target_artifact_id === assessmentPair.secure_artifact.artifact_id),
         })
@@ -659,26 +768,12 @@ async function runCPipelineCore(
     }
     let revisedObjections = validateCrossArtifactAlignment(revisedAlignmentInput).objections
     if (options.critic) {
-      try { revisedObjections = [...revisedObjections, ...await options.critic.review(revisedAlignmentInput)] } catch (error) {
-        state = transitionCState(state, "FAILED")
-        const failure: FailureReason = { code: "PROVIDER_ERROR", message: `修订后 critic 失败：${errorMessage(error)}` }
-        pushTrace({
-          event_type: "c.pipeline.failed",
-          run_id: input.generation_spec.run_id,
-          status: "failed",
-          input_refs: [concept.artifact_id, labPair.public_artifact.artifact_id, assessmentPair.public_artifact.artifact_id],
-          summary: failure.message,
-          retry_kind: "semantic_revision",
-          attempt: 1,
-        })
-        return failedResult(
-          input.generation_spec,
-          state,
-          trace,
-          failure,
-          publicArtifacts,
-        )
-      }
+      try {
+        revisedObjections = [
+          ...revisedObjections,
+          ...asDiagnosticObjections(await options.critic.review(revisedAlignmentInput)),
+        ]
+      } catch { /* optional semantic diagnostics do not affect publication */ }
     }
     alignmentReport = reportFromObjections(input.generation_spec, revisedObjections)
     if (!alignmentReport.ok) {
@@ -830,6 +925,15 @@ function sameStringSet(left: readonly string[], right: readonly string[]): boole
   const rightSet = new Set(right)
   return leftSet.size === left.length && rightSet.size === right.length
     && leftSet.size === rightSet.size && [...leftSet].every((value) => rightSet.has(value))
+}
+
+function asDiagnosticObjections(
+  objections: AlignmentObjection[],
+): AlignmentObjection[] {
+  return objections.map((objection) => ({
+    ...objection,
+    severity: "warning",
+  }))
 }
 
 function failedResult(

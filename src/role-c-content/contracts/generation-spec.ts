@@ -16,6 +16,7 @@ import type {
   LearningObjective,
   LearningPathNode,
 } from "./profile-adapter"
+import { assessmentBlueprintCanMeasureCoreObjectives } from "./assessment-measurement"
 
 export type { AssessmentBlueprint } from "./profile-adapter"
 
@@ -92,7 +93,6 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
       errors,
     }
   }
-  const evidenceBySource = new Map(input.evidence_pack.results.map((item) => [item.source_id, item]))
   const sourceIds = new Set(input.evidence_pack.results.map((item) => item.source_id))
   const factKeys = new Set(
     input.evidence_pack.results.flatMap((item) =>
@@ -101,6 +101,8 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
   )
 
   const missingSources = input.path_node.target_source_ids.filter((sourceId) => !sourceIds.has(sourceId))
+  const missingPrerequisiteSources = input.path_node.prerequisite_source_ids
+    .filter((sourceId) => !sourceIds.has(sourceId))
   const missingFacts = input.path_node.objectives.flatMap((objective) =>
     objective.required_fact_ids
       .filter((factId) => !factKeys.has(`${objective.source_id}:${factId}`))
@@ -110,11 +112,15 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
   if (
     input.evidence_pack.match_status === "no_match" ||
     missingSources.length > 0 ||
+    missingPrerequisiteSources.length > 0 ||
     missingFacts.length > 0
   ) {
     const details = [
       ...errors,
       ...(missingSources.length > 0 ? [`缺少知识点：${missingSources.join("、")}`] : []),
+      ...(missingPrerequisiteSources.length > 0
+        ? [`缺少先修知识点：${missingPrerequisiteSources.join("、")}`]
+        : []),
       ...(missingFacts.length > 0 ? [`缺少事实：${missingFacts.join("、")}`] : []),
     ]
     return {
@@ -132,34 +138,6 @@ export function buildGenerationSpec(input: BuildGenerationSpecInput): BuildGener
       code: "WEAK_EVIDENCE",
       errors: [`${weakDetail}，当前证据不足以发布事实性教学内容`],
       gap_request: createGapRequest(input, "strong_match", `${weakDetail}，需要重写 query 或补充证据`),
-    }
-  }
-
-  for (const sourceId of input.path_node.target_source_ids) {
-    const item = evidenceBySource.get(sourceId)!
-    if (item.examples.length === 0) {
-      return {
-        ok: false,
-        code: "MISSING_EVIDENCE",
-        errors: [`目标知识点 ${sourceId} 缺少可追踪示例`],
-        gap_request: createGapRequest(input, "example", `目标知识点 ${sourceId} 缺少示例`),
-      }
-    }
-    if (item.practice_tasks.length === 0) {
-      return {
-        ok: false,
-        code: "MISSING_EVIDENCE",
-        errors: [`目标知识点 ${sourceId} 缺少实践任务`],
-        gap_request: createGapRequest(input, "practice_task", `目标知识点 ${sourceId} 缺少实践任务`),
-      }
-    }
-    if (item.quiz_seeds.length === 0) {
-      return {
-        ok: false,
-        code: "MISSING_EVIDENCE",
-        errors: [`目标知识点 ${sourceId} 缺少题目种子`],
-        gap_request: createGapRequest(input, "quiz_seed", `目标知识点 ${sourceId} 缺少题目种子`),
-      }
     }
   }
 
@@ -273,7 +251,9 @@ function validateInputShape(input: BuildGenerationSpecInput): string[] {
   if (!input.path_node.node_id.trim()) errors.push("path_node.node_id 不能为空")
   if (!input.path_node.goal.trim()) errors.push("path_node.goal 不能为空")
   if (input.path_node.target_source_ids.length === 0) errors.push("target_source_ids 不能为空")
+  if (input.path_node.target_source_ids.length > 30) errors.push("target_source_ids 单轮最多包含 30 个目标")
   if (input.path_node.objectives.length === 0) errors.push("objectives 不能为空")
+  if (input.path_node.objectives.length > 30) errors.push("objectives 单轮最多包含 30 个目标")
   if (input.path_node.objectives.length > 0 && !input.path_node.objectives.some((objective) => objective.importance === "core")) {
     errors.push("objectives 至少包含一个 core 目标")
   }
@@ -302,6 +282,15 @@ function validateInputShape(input: BuildGenerationSpecInput): string[] {
       errors.push(`目标 ${objective.objective_id} 缺少 required_fact_ids`)
     }
     if (new Set(objective.required_fact_ids).size !== objective.required_fact_ids.length) errors.push(`目标 ${objective.objective_id} 的 required_fact_ids 不得重复`)
+  }
+  const objectiveSourceIds = new Set(
+    input.path_node.objectives.map((objective) => objective.source_id),
+  )
+  const targetsWithoutObjective = input.path_node.target_source_ids.filter(
+    (sourceId) => !objectiveSourceIds.has(sourceId),
+  )
+  if (targetsWithoutObjective.length > 0) {
+    errors.push(`target_source_ids 中的每个知识点都必须有 objective：${targetsWithoutObjective.join("、")}`)
   }
   validateDifficulty(input.difficulty, errors)
   if (input.adaptive_shell?.scaffold_level !== undefined
@@ -335,9 +324,18 @@ function validateInputShape(input: BuildGenerationSpecInput): string[] {
   }
   const total = blueprint.tier_1_count + blueprint.tier_2_count + blueprint.tier_3_count
   if (total < 1 || total > 30) errors.push("assessment blueprint 总题量必须在 1..30")
+  if (blueprint.tier_1_count + blueprint.tier_2_count < 1) {
+    errors.push("assessment blueprint 至少需要一道 Tier 1 或 Tier 2 锚点题")
+  }
   if (blueprint.required_modalities.length > total) errors.push("required_modalities 数量不能超过总题量")
   if (total < input.path_node.objectives.filter((objective) => objective.importance === "core").length) {
     errors.push("assessment blueprint 总题量不能少于 core objective 数量")
+  }
+  if (!assessmentBlueprintCanMeasureCoreObjectives(
+    input.path_node.objectives,
+    blueprint,
+  )) {
+    errors.push("assessment blueprint 的必选题型和剩余题量无法直接测量全部 core objective")
   }
   return errors
 }
@@ -364,7 +362,10 @@ function createGapRequest(
     schema_version: C_SCHEMA_VERSION,
     request_id: stableId("EGR", { run_id: input.run_id, node_id: input.path_node.node_id, missingType, reason }),
     run_id: input.run_id,
-    target_source_ids: [...input.path_node.target_source_ids],
+    target_source_ids: [...new Set([
+      ...input.path_node.target_source_ids,
+      ...input.path_node.prerequisite_source_ids,
+    ])],
     missing_type: missingType,
     reason,
     learner_level: input.profile_snapshot.level,

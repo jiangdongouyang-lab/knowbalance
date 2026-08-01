@@ -1,4 +1,5 @@
 export * from "./artifacts"
+export * from "./assessment-measurement"
 export * from "./common"
 export * from "./dynamic-feedback"
 export * from "./evidence-pack"

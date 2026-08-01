@@ -1,11 +1,12 @@
 import { retrieveKnowledge } from "../src/rag/retriever"
 import { loadKnowledgeBase } from "../src/knowledge/loader"
 import type { KnowledgeDifficulty } from "../src/knowledge/types"
-import { generateRoleCForRoleD } from "../src/role-d-integration/role-c-service"
+import { generateRoleCForRoleDWithRuntime } from "../src/role-d-integration/role-c-service"
 import { adaptHandoff } from "../src/role-d-ui/src/domain/adapt-handoff"
 import { exportProgressJson } from "../src/role-d-ui/src/domain/progress-file"
 import { isValidRoleDSession } from "../src/role-d-ui/src/domain/session-store"
-import { unifiedBoundaryReport } from "../src/contracts/unified"
+import { normalizeUnifiedHandoff, unifiedBoundaryReport } from "../src/contracts/unified"
+import { defineLearningPathNode, type LearningPathNode } from "../src/role-c-content"
 
 interface LearnerProfile {
   learner_id: string
@@ -15,7 +16,8 @@ interface LearnerProfile {
   goal: string
 }
 
-const profile = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
+const profile = (await Bun.file("examples/role-c-content/learner_score_project_ready.json").json()) as LearnerProfile
+const rawPath = (await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json()) as LearningPathNode
 
 const query = [
   `学习者水平：${profile.level}`,
@@ -24,13 +26,58 @@ const query = [
   `学习目标：${profile.goal}`,
 ].join("；")
 
-const ragResult = await retrieveKnowledge({ query, learnerLevel: profile.level, topK: 5 })
+const initialRagResult = await retrieveKnowledge({ query, learnerLevel: profile.level, topK: 5 })
 const knowledgeBase = await loadKnowledgeBase()
-const roleC = await generateRoleCForRoleD({
+const pathNode = defineLearningPathNode({
+  node_id: rawPath.node_id,
+  target_source_ids: rawPath.target_source_ids,
+  prerequisite_source_ids: rawPath.prerequisite_source_ids,
+  goal: rawPath.goal,
+  objectives: rawPath.objectives,
+  assessment_blueprint: rawPath.assessment_blueprint,
+})
+
+const requiredSourceIds = [...new Set([
+  ...pathNode.target_source_ids,
+  ...pathNode.prerequisite_source_ids,
+])]
+const presentSourceIds = new Set(initialRagResult.results.map((item) => item.sourceId))
+const missingSourceIds = requiredSourceIds.filter((sourceId) => !presentSourceIds.has(sourceId))
+const missingKnowledgeItems = missingSourceIds.map((sourceId) =>
+  knowledgeBase.items.find((item) => item.sourceId === sourceId))
+if (missingKnowledgeItems.some((item) => !item)) {
+  const unknown = missingSourceIds.filter((_sourceId, index) => !missingKnowledgeItems[index])
+  throw new Error(`B 路径引用了知识库中不存在的节点：${unknown.join("、")}`)
+}
+const refreshed = missingSourceIds.length > 0
+  ? await retrieveKnowledge({
+      query: `学习路径目标与前置证据：${missingKnowledgeItems.map((item) => item!.title).join("、")}；学习目标：${pathNode.goal}`,
+      learnerLevel: profile.level,
+      topK: Math.max(5, missingSourceIds.length + 2),
+    })
+  : undefined
+const refreshedById = new Map(
+  (refreshed?.results ?? []).map((item) => [item.sourceId, item]),
+)
+const unresolvedSourceIds = missingSourceIds.filter((sourceId) => !refreshedById.has(sourceId))
+if (unresolvedSourceIds.length > 0) {
+  throw new Error(`A 未返回 B 路径所需证据：${unresolvedSourceIds.join("、")}`)
+}
+const additions = missingSourceIds.map((sourceId) => refreshedById.get(sourceId)!)
+const ragResult = {
+  ...initialRagResult,
+  topK: Math.max(initialRagResult.topK, initialRagResult.results.length + additions.length),
+  results: [...initialRagResult.results, ...additions],
+}
+const roleC = await generateRoleCForRoleDWithRuntime({
   profile,
   ragResult,
   kbVersion: knowledgeBase.version,
   runId: "RUN-team-integration-demo",
+  pathNode,
+}, {
+  providerMode: "deterministic",
+  allowDeterministicFallback: true,
 })
 const roleDSession = adaptHandoff({
   eventMode: "demo",
@@ -58,15 +105,21 @@ const roleDSession = adaptHandoff({
   a_rag_result: ragResult,
   workflow_events: roleC.workflow,
   c_artifacts: roleC.artifacts,
-  learning_path: [
-    { id: "for-loop", title: "for 循环", difficulty: "beginner", status: "current", reason: "A 检索命中 K007，作为当前补强点。" },
-    { id: "list", title: "列表", difficulty: "basic", status: "upcoming", reason: "A 检索命中 K009，支撑成绩数据集合。" },
-    { id: "score-project", title: "成绩统计器综合项目", difficulty: "integrated", status: "upcoming", reason: "A 检索命中 K018，作为项目化目标。" },
-  ],
+  learning_path: pathNode.target_source_ids.map((sourceId, index) => {
+    const item = knowledgeBase.items.find((candidate) => candidate.sourceId === sourceId)!
+    return {
+      id: sourceId,
+      title: item.title,
+      difficulty: item.difficulty,
+      status: index === 0 ? "current" as const : "upcoming" as const,
+      reason: `B 正式路径将 ${sourceId} 列为本轮学习目标，A 已补齐相应证据。`,
+    }
+  }),
   decision: { next: "remediate", reason: "等待 C 正式评分后更新动态路径。" },
 })
 const progressJson = exportProgressJson(roleDSession, "2026-07-23T00:00:00.000Z")
 const progressPreview = JSON.parse(progressJson) as { format: string; version: number; session: unknown }
+const boundaryReport = unifiedBoundaryReport(normalizeUnifiedHandoff(roleDSession))
 
 const handoff = {
   workflow: "B_profile_to_A_rag_to_C_content_to_D_display",
@@ -126,11 +179,11 @@ const handoff = {
     },
   },
   unified_contract: {
-    ...unifiedBoundaryReport(roleDSession),
-    schema_version: unifiedBoundaryReport(roleDSession).schemaVersion,
+    ...boundaryReport,
+    schema_version: boundaryReport.schemaVersion,
     adapter: "normalizeUnifiedHandoff",
-    canonical_fields: unifiedBoundaryReport(roleDSession).canonicalFields,
-    evidence_gaps: unifiedBoundaryReport(roleDSession).evidenceGaps,
+    canonical_fields: boundaryReport.canonicalFields,
+    evidence_gaps: boundaryReport.evidenceGaps,
     package: "src/contracts/unified",
   },
 }

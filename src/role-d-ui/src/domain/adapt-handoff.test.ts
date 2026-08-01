@@ -14,6 +14,18 @@ const shared = {
 }
 
 describe("adaptHandoff", () => {
+  test("preserves the final profile version supplied by C", () => {
+    const session = adaptHandoff({
+      ...shared,
+      b_profile: {
+        ...shared.b_profile,
+        profile_version: "PROFILE-RECOVERED-V2",
+      },
+    })
+
+    expect(session.profile.profileVersion).toBe("PROFILE-RECOVERED-V2")
+  })
+
   test("does not invent the K007 demo diagnosis when a handoff omits diagnosis data", () => {
     const session = adaptHandoff({
       ...shared,
