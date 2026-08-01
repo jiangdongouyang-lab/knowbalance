@@ -4,6 +4,7 @@ import {
   adaptRagResult,
   projectPublicRagEvidencePack,
 } from "../../../role-c-content/contracts/evidence-pack"
+import { loadKnowledgeBase } from "../../../knowledge/loader"
 import {
   createLearningPlan,
   evaluatePlanDiagnosis,
@@ -184,6 +185,39 @@ describe("createLearningPlan", () => {
     expect(plan.diagnosis.availability).toBe("unavailable")
     expect(plan.diagnosis.items).toEqual([])
     expect(plan.diagnosis.unavailableReason).toContain("不产生客观诊断证据")
+  })
+
+  test("orders pending path nodes by knowledge-base prerequisites before the final project", async () => {
+    const knowledgeBase = await loadKnowledgeBase()
+    const plan = await createLearningPlan({
+      learnerId: "student-path-order",
+      educationContext: "大二非计算机专业",
+      timeBudget: "每周 4 小时",
+      selfRating: "basic",
+      priorLanguages: ["Python"],
+      knownConcepts: ["Python 是什么", "变量"],
+      weakConcepts: ["循环", "列表"],
+      goal: "完成成绩统计程序，计算平均分、最高分和最低分",
+    })
+
+    const pathIds = new Set(plan.session.path.map((node) => node.id))
+    const nodeById = new Map(plan.session.path.map((node) => [node.id, node]))
+    // 规则：任何节点的前置知识如果也出现在路径中且尚未完成，必须排在该节点之前
+    for (const node of plan.session.path) {
+      const item = knowledgeBase.items.find((candidate) => candidate.sourceId === node.id)
+      for (const prereqId of item?.prerequisites ?? []) {
+        const prereqNode = nodeById.get(prereqId)
+        if (prereqNode && prereqNode.status !== "completed" && pathIds.has(prereqId)) {
+          expect(plan.session.path.indexOf(prereqNode)).toBeLessThan(plan.session.path.indexOf(node))
+        }
+      }
+    }
+
+    // 综合项目的前置知识未完成时，综合项目不能是当前学习节点
+    const k018Prereqs = new Set(knowledgeBase.items.find((item) => item.sourceId === "K018")?.prerequisites ?? [])
+    const pendingK018Prereqs = plan.session.path.filter((node) => k018Prereqs.has(node.id) && node.status !== "completed")
+    expect(pendingK018Prereqs.length).toBeGreaterThan(0)
+    expect(plan.session.path.find((node) => node.id === "K018")?.status).not.toBe("current")
   })
 
   test("calls C zero times before diagnosis and once after submit or skip", async () => {

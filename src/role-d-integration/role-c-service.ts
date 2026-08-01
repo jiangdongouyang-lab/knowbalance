@@ -67,6 +67,7 @@ import {
   type CodeExecutionRequest,
   type CodeExecutionResult,
   type CodeRunner,
+  type RenderBlock,
   type LearningCyclePublicOutcome,
   type LearningCycleStore,
   type MasteryStateStore,
@@ -1147,6 +1148,7 @@ function toRoleDArtifacts(publicArtifacts: {
     prompt: item.prompt,
     options: item.options?.map((option) => `${option.label}. ${option.text}`) ?? [],
     option_ids: item.options?.map((option) => option.option_id) ?? [],
+    maxScore: item.max_score,
     ...(item.starter_code ? { starter_code: item.starter_code } : {}),
     citations: simplifyCitations(item.citations),
   }))
@@ -1160,6 +1162,7 @@ function toRoleDArtifacts(publicArtifacts: {
       options: [],
       citations: simplifyCitations(concept.citations),
       items: [],
+      sections: conceptSections(concept.payload),
     },
     {
       id: lab.artifact_id,
@@ -1192,6 +1195,29 @@ function renderConceptLesson(payload: NonNullable<ConceptLessonArtifact["payload
   const misconceptions = payload.misconceptions.map((item) => `常见误区：${item.explanation}`)
   const summaries = payload.summary.flatMap((block) => "text" in block ? [block.text] : [])
   return [...explanations, ...examples, ...misconceptions, ...summaries].join("\n\n")
+}
+
+function conceptSections(payload: NonNullable<ConceptLessonArtifact["payload"]>): RoleDGeneratedArtifact["sections"] {
+  const blocks = [...payload.prerequisite_bridge, ...payload.explanation_blocks, ...payload.worked_examples, ...payload.summary]
+  return [
+    ...blocks.flatMap((block) => toRoleDSection(block)),
+    ...payload.misconceptions.map((item, index) => ({
+      id: `misconception-${index + 1}`,
+      title: "常见误区",
+      kind: "callout" as const,
+      text: item.explanation,
+      citations: simplifyCitations(item.citations),
+    })),
+  ]
+}
+
+function toRoleDSection(block: RenderBlock): NonNullable<RoleDGeneratedArtifact["sections"]> {
+  if (block.block_type === "heading") return [{ id: block.block_id, title: block.text, kind: "heading", text: block.text, citations: [] }]
+  if (block.block_type === "paragraph") return [{ id: block.block_id, title: block.text.split(/[。！？]/)[0]!.slice(0, 28), kind: "paragraph", text: block.text, citations: simplifyCitations(block.claims.flatMap((claim) => claim.citations)) }]
+  if (block.block_type === "code") return [{ id: block.block_id, title: block.caption ?? "代码示例", kind: "code", code: block.code, language: block.language, citations: simplifyCitations(block.claims.flatMap((claim) => claim.citations)) }]
+  if (block.block_type === "callout") return [{ id: block.block_id, title: block.title, kind: "callout", text: block.text, citations: simplifyCitations(block.claims.flatMap((claim) => claim.citations)) }]
+  if (block.block_type === "comparison") return [{ id: block.block_id, title: block.title, kind: "comparison", text: block.columns.map((column) => `${column.heading}：${column.content}`).join("\n"), citations: simplifyCitations(block.claims.flatMap((claim) => claim.citations)) }]
+  return []
 }
 
 function renderCodeLab(payload: NonNullable<CodeLabPublicArtifact["payload"]>): string {

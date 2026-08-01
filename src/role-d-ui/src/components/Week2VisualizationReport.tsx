@@ -14,12 +14,6 @@ const statusLabel: Record<WorkflowStatus, string> = {
   blocked: "受阻",
 }
 
-const levelScore: Record<RoleDSession["profile"]["level"], number> = {
-  beginner: 35,
-  basic: 55,
-  intermediate: 75,
-  integrated: 90,
-}
 
 const auditStatusLabel: Record<AuditStatusView, string> = {
   pass: "通过",
@@ -29,8 +23,7 @@ const auditStatusLabel: Record<AuditStatusView, string> = {
 
 export function Week2VisualizationReport({ session }: Week2VisualizationReportProps) {
   const matchSeries = buildDifficultyMatchSeries(session.profile.level, session.retrieval.items)
-  const radarAxes = buildRadarAxes(session)
-  const radarPoints = radarAxes.map((axis, index) => radarPoint(index, radarAxes.length, axis.score))
+
   const displayWorkflow = arrangeWorkflowForDisplay(session.workflow)
   const workflowCounts = summarizeWorkflow(displayWorkflow)
   const audit = session.audit
@@ -47,36 +40,6 @@ export function Week2VisualizationReport({ session }: Week2VisualizationReportPr
       </header>
 
       <div className="week2-report-grid">
-        <article className="week2-card radar-card" aria-labelledby="ability-radar-title">
-          <div className="week2-card-heading">
-            <span>能力雷达图</span>
-            <strong>{session.profile.level}</strong>
-          </div>
-          <svg className="ability-radar" role="img" aria-label="能力雷达图" viewBox="0 0 240 210">
-            <title id="ability-radar-title">能力雷达图</title>
-            <polygon className="radar-grid outer" points={radarPolygon(100)} />
-            <polygon className="radar-grid middle" points={radarPolygon(66)} />
-            <polygon className="radar-grid inner" points={radarPolygon(33)} />
-            {radarAxes.map((axis, index) => {
-              const end = radarPoint(index, radarAxes.length, 100)
-              const label = radarPoint(index, radarAxes.length, 116)
-              return (
-                <g key={axis.label}>
-                  <line className="radar-axis" x1="120" y1="105" x2={end.x} y2={end.y} />
-                  <text className="radar-label" x={label.x} y={label.y}>{axis.label}</text>
-                </g>
-              )
-            })}
-            <polygon className="radar-value" points={radarPoints.map((point) => `${point.x},${point.y}`).join(" ")} />
-            {radarAxes.map((axis, index) => {
-              const point = radarPoints[index]!
-              return <circle className="radar-dot" key={axis.label} cx={point.x} cy={point.y} r="3.5" />
-            })}
-          </svg>
-          <div className="radar-legend">
-            {radarAxes.map((axis) => <span key={axis.label}><b>{axis.score}</b>{axis.label}</span>)}
-          </div>
-        </article>
 
         <article className="week2-card" aria-labelledby="week2-path-title">
           <div className="week2-card-heading">
@@ -159,42 +122,10 @@ export function Week2VisualizationReport({ session }: Week2VisualizationReportPr
   )
 }
 
-function buildRadarAxes(session: RoleDSession) {
-  const known = session.profile.knownConcepts.length
-  const weak = session.profile.weakConcepts.length
-  const resolvedPath = session.path.filter((node) => node.status === "completed" || node.status === "current").length
-  const grounded = session.artifacts.filter((artifact) => artifact.evidenceStatus === "grounded").length
-  const difficultyFits = session.retrieval.items.filter((item) => item.trace.difficultyMatch).length
-
-  return [
-    { label: "画像", score: levelScore[session.profile.level] },
-    { label: "掌握", score: percentage(known, Math.max(known + weak, 1)) },
-    { label: "溯源", score: percentage(grounded, Math.max(session.artifacts.length, 1)) },
-    { label: "路径", score: percentage(resolvedPath, Math.max(session.path.length, 1)) },
-    { label: "匹配", score: percentage(difficultyFits, Math.max(session.retrieval.items.length, 1)) },
-  ]
-}
 
 function summarizeWorkflow(events: RoleDSession["workflow"]) {
   return {
     total: events.length,
     finished: events.filter((event) => event.status === "completed" || event.status === "review").length,
   }
-}
-
-function percentage(value: number, total: number): number {
-  return Math.round(Math.max(0, Math.min(1, value / total)) * 100)
-}
-
-function radarPolygon(score: number): string {
-  return Array.from({ length: 5 }, (_, index) => {
-    const point = radarPoint(index, 5, score)
-    return `${point.x},${point.y}`
-  }).join(" ")
-}
-
-function radarPoint(index: number, total: number, score: number) {
-  const angle = -Math.PI / 2 + (Math.PI * 2 * index) / total
-  const radius = score * 0.82
-  return { x: 120 + Math.cos(angle) * radius, y: 105 + Math.sin(angle) * radius }
 }

@@ -75,11 +75,21 @@ export interface LearningArtifactView {
     prompt: string
     options: string[]
     optionIds?: string[]
+    maxScore?: number
     starterCode?: string
     citations: CitationView[]
   }>
   citations: CitationView[]
   evidenceStatus: "grounded" | "gap"
+  sections?: Array<{
+    id: string
+    title: string
+    kind: "heading" | "paragraph" | "code" | "callout" | "comparison"
+    text?: string
+    code?: string
+    language?: string
+    citations: CitationView[]
+  }>
 }
 
 export interface WorkflowEventView {
@@ -153,7 +163,6 @@ export interface RoleCFeedbackView {
   itemResults: Array<{
     itemId: string
     objectiveId: string
-    modality: "mcq" | "true_false" | "trace" | "short_answer" | "code"
     status: string
     rawScore: number
     maxScore: number
@@ -197,6 +206,9 @@ export interface RoleDSession {
     learningSessionId: string
     formId: string
     attemptNo: number
+    submissionId?: string
+    routingRequestId?: string
+    anchorItemIds?: string[]
   }
   feedback?: RoleCFeedbackView
   evidenceGaps: string[]
