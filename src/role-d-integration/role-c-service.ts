@@ -3,6 +3,8 @@ import type {
   ContinueRoleCForRoleDResult,
   GenerateRoleCForRoleDInput,
   RoleDContentAuditSummary,
+  RoleDCodeLab,
+  RoleCCodeLabFeedbackCode,
   RoleCForRoleDResult,
   RoleDAssessmentItem,
   RoleDGeneratedArtifact,
@@ -10,6 +12,8 @@ import type {
   RoleDWorkflowEvent,
   RouteRoleCAssessmentAnchorsInput,
   RouteRoleCAssessmentAnchorsResult,
+  RunRoleCCodeLabInput,
+  RunRoleCCodeLabResult,
   SubmitRoleCAssessmentInput,
 } from "./contracts"
 import { loadKnowledgeBase } from "../knowledge/loader"
@@ -580,6 +584,60 @@ export async function submitRoleCAssessment(
   })
 }
 
+/** Executes one published code lab without accepting hidden tests from D. */
+export async function runRoleCCodeLab(
+  input: RunRoleCCodeLabInput,
+  runtime: RoleCForRoleDRuntimeOptions = {},
+): Promise<RunRoleCCodeLabResult> {
+  let runner: CodeRunner
+  try {
+    runner = await resolveRoleCCodeRunner(runtime)
+  } catch {
+    return {
+      status: "blocked",
+      executionId: input.executionId,
+      code: "RUNNER_UNAVAILABLE",
+      message: "代码执行服务暂不可用",
+    }
+  }
+  const persistence = resolveRoleCLearningPersistence(runtime)
+  const service = new LearningCycleService({
+    cycle_store: persistence.cycleStore,
+    secure_store: persistence.secureStore,
+    mastery_store: persistence.masteryStore,
+    code_runner: runner,
+  })
+  const result = await service.executePublishedCodeLab({
+    execution_id: input.executionId,
+    session_id: input.sessionId,
+    run_id: input.runId,
+    authenticated_learner_id_hash: input.learnerId,
+    lab_id: input.labId,
+    code: input.code,
+  })
+  if (result.status === "blocked") {
+    return {
+      status: "blocked",
+      executionId: result.execution_id,
+      code: result.code,
+      message: result.message,
+    }
+  }
+  return {
+    status: result.status,
+    executionId: result.execution_id,
+    runId: result.run_id,
+    labId: result.lab_id,
+    passedChecks: result.passed_checks,
+    totalChecks: result.total_checks,
+    scoreRatio: result.score_ratio,
+    feedback: result.feedback_codes.map((code) => ({
+      code,
+      message: codeLabFeedbackMessage(code),
+    })),
+  }
+}
+
 /**
  * Completes the backend-owned post-submission loop. The current run, profile,
  * evidence and feedback are reloaded from C storage; a new B path is refreshed
@@ -814,6 +872,9 @@ export async function continueRoleCAfterSubmission(
     learningSession: createLearningSessionDelivery(
       publishedRun.pipeline_result,
       continuation.learning_session,
+    ),
+    artifacts: toRoleDArtifacts(
+      publishedRun.pipeline_result.public_artifacts,
     ),
     finalContext: {
       profileSnapshot: structuredClone(publishedRun.profile_snapshot),
@@ -1169,10 +1230,11 @@ function toRoleDArtifacts(publicArtifacts: {
       kind: "lab",
       title: lab.payload.title,
       status: "real",
-      content: renderCodeLab(lab.payload),
+      content: lab.payload.starter_code,
       options: [],
       citations: simplifyCitations(lab.citations),
       items: [],
+      lab: toRoleDCodeLab(lab.payload),
     },
     {
       id: assessment.artifact_id,
@@ -1220,10 +1282,49 @@ function toRoleDSection(block: RenderBlock): NonNullable<RoleDGeneratedArtifact[
   return []
 }
 
-function renderCodeLab(payload: NonNullable<CodeLabPublicArtifact["payload"]>): string {
-  const instructions = payload.instructions.flatMap((block) => "text" in block ? [block.text] : [])
-  const tests = payload.public_tests.map((test) => `公开测试：${test.description}（${test.expected_behavior}）`)
-  return [...instructions, "Starter code:", payload.starter_code, ...tests].join("\n\n")
+function toRoleDCodeLab(
+  payload: NonNullable<CodeLabPublicArtifact["payload"]>,
+): RoleDCodeLab {
+  return {
+    lab_id: payload.lab_id,
+    instructions: payload.instructions.flatMap((block) => toRoleDSection(block)),
+    execution_contract: structuredClone(payload.execution_contract),
+    starter_code: payload.starter_code,
+    public_tests: payload.public_tests.map((test) => ({
+      id: test.test_id,
+      objective_id: test.objective_id,
+      description: test.description,
+      input: structuredClone(test.input),
+      expected_behavior: test.expected_behavior,
+      citations: simplifyCitations(test.citations),
+    })),
+    hint_ladders: payload.hint_ladders.map((ladder) => ({
+      objective_id: ladder.objective_id,
+      hints: ladder.hints.map((hint) => ({
+        level: hint.hint_level,
+        text: hint.text,
+        citations: simplifyCitations(hint.citations),
+      })),
+    })),
+    reflection_questions: [...payload.reflection_questions],
+  }
+}
+
+function codeLabFeedbackMessage(
+  code: RoleCCodeLabFeedbackCode,
+): string {
+  return ({
+    assertion_failed: "代码已运行，但部分检查结果不符合要求。",
+    syntax_error: "代码存在语法错误，请检查缩进、括号和关键字。",
+    runtime_error: "代码运行时发生错误，请检查变量、类型和边界情况。",
+    output_limit: "程序输出过多，请检查循环或输出逻辑。",
+    non_json_output: "程序返回值不符合实验约定。",
+    forbidden_import: "代码使用了本实验不允许的导入。",
+    forbidden_syntax: "代码使用了本实验不允许的语法。",
+    resource_limit_exceeded: "程序超出运行资源限制。",
+    execution_timeout: "程序运行超时，请检查循环和算法。",
+    execution_failed: "代码暂未通过检查，请结合实验提示继续修改。",
+  })[code]
 }
 
 function simplifyCitations(citations: CitationRef[]): RoleDPublicCitation[] {

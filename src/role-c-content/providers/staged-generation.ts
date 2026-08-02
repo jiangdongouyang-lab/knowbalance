@@ -484,6 +484,15 @@ export function validateCodeLabPublicAuthorAgainstPlan(
       )
     }
   })
+  issues.push(...functionOutputContractIssues(
+    payload.execution_contract,
+    "execution_contract",
+    payload.objectives.flatMap((entry) => [
+      entry.instruction_text,
+      entry.public_test.expected_behavior,
+      ...entry.hints,
+    ]),
+  ))
   return issues
 }
 
@@ -1061,6 +1070,10 @@ export function validateAssessmentSecureAgainstPublic(
     }
   })
   payload.code_test_suites.forEach((suite, suiteIndex) => {
+    issues.push(...functionOutputContractIssues(
+      suite.execution_contract,
+      `code_test_suites[${suiteIndex}].execution_contract`,
+    ))
     if (suite.execution_contract.execution_mode !== "function") return
     suite.hidden_tests.forEach((test, testIndex) => {
       if (!isFunctionInvocationEnvelope(test.input)) {
@@ -1069,6 +1082,28 @@ export function validateAssessmentSecureAgainstPublic(
     })
   })
   return issues
+}
+
+function functionOutputContractIssues(
+  contract: ExecutionContract,
+  path: string,
+  learnerVisibleText: string[] = [],
+): string[] {
+  if (contract.execution_mode !== "function") return []
+  const outputContract = [
+    contract.output_contract.type,
+    ...(contract.output_contract.constraints ?? []),
+  ].join(" ").normalize("NFKC").toLocaleLowerCase()
+  const visible = learnerVisibleText.join(" ")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+  if (/^(?:none|null|void)(?:\s|$)/u.test(outputContract)
+    || /(?:标准输出|打印|stdout|\bprint\b)/u.test(`${outputContract} ${visible}`)) {
+    return [
+      `${path} 的 function 模式只校验入口函数返回值；请改为可 JSON 序列化的返回值，或将纯打印任务改为 stdin_stdout 模式`,
+    ]
+  }
+  return []
 }
 
 export function validateAssessmentSecureAuthorAgainstPublic(
@@ -1109,6 +1144,10 @@ export function validateAssessmentSecureAuthorAgainstPublic(
     }
   })
   payload.code_test_suites.forEach((suite, suiteIndex) => {
+    issues.push(...functionOutputContractIssues(
+      suite.execution_contract,
+      `code_test_suites[${suiteIndex}].execution_contract`,
+    ))
     if (suite.execution_contract.execution_mode !== "function") return
     suite.hidden_tests.forEach((test, testIndex) => {
       if (!isFunctionInvocationEnvelope(test.input)) {

@@ -7,6 +7,7 @@ import type { Plugin } from "vite"
 import {
   continueRoleCAfterSubmission,
   generateRoleCForRoleDWithRuntime,
+  runRoleCCodeLab,
   routeRoleCAssessmentAnchors,
   submitRoleCAssessment,
 } from "../role-d-integration/role-c-service"
@@ -15,6 +16,7 @@ import {
   type ContinueRoleCAfterSubmissionInput,
   type GenerateRoleCForRoleDInput,
   type RoleCApiPath,
+  type RunRoleCCodeLabInput,
   type RouteRoleCAssessmentAnchorsInput,
   type SubmitRoleCAssessmentInput,
 } from "../role-d-integration/contracts"
@@ -69,6 +71,12 @@ function roleCApiPlugin(): Plugin {
           }
           result = await submitRoleCAssessment(body, runtime)
           break
+        case ROLE_C_API_PATHS.runCodeLab:
+          if (!isRoleCCodeLabRunRequest(body)) {
+            return sendError(response, 400, "ROLE_C_CODE_LAB_RUN_INVALID")
+          }
+          result = await runRoleCCodeLab(body, runtime)
+          break
         case ROLE_C_API_PATHS.continue:
           if (!isRoleCContinuationRequest(body)) {
             return sendError(response, 400, "ROLE_C_CONTINUATION_INVALID")
@@ -84,7 +92,9 @@ function roleCApiPlugin(): Plugin {
         default:
           return assertNeverRoleCApiPath(path)
       }
-      response.statusCode = isSuccessfulRoleCApiStatus(result.status) ? 200 : 422
+      response.statusCode = isSuccessfulRoleCApiStatus(path, result.status)
+        ? 200
+        : 422
       response.setHeader("content-type", "application/json; charset=utf-8")
       response.end(JSON.stringify(result))
     } catch (error) {
@@ -115,7 +125,10 @@ function assertNeverRoleCApiPath(value: never): never {
   throw new Error(`ROLE_C_API_PATH_UNHANDLED:${String(value)}`)
 }
 
-function isSuccessfulRoleCApiStatus(status: string): boolean {
+function isSuccessfulRoleCApiStatus(path: RoleCApiPath, status: string): boolean {
+  if (path === ROLE_C_API_PATHS.runCodeLab) {
+    return ["passed", "failed", "timeout"].includes(status)
+  }
   return [
     "ready",
     "completed",
@@ -182,6 +195,19 @@ function isRoleCSubmissionRequest(value: unknown): value is SubmitRoleCAssessmen
     && typeof record.submissionId === "string" && record.submissionId.length > 0
     && Array.isArray(record.answers)
     && record.answers.every(isSubmissionAnswer)
+}
+
+function isRoleCCodeLabRunRequest(
+  value: unknown,
+): value is RunRoleCCodeLabInput {
+  if (!isRecord(value)) return false
+  return nonEmptyString(value.executionId)
+    && nonEmptyString(value.sessionId)
+    && nonEmptyString(value.runId)
+    && nonEmptyString(value.learnerId)
+    && nonEmptyString(value.labId)
+    && typeof value.code === "string"
+    && value.code.trim().length > 0
 }
 
 function isRoleCContinuationRequest(

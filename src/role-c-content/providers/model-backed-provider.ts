@@ -14,7 +14,6 @@ import { buildCodeLabModelInput } from "../context/code-lab-context"
 import { buildAssessmentAuthorModelInput } from "../context/assessment-context"
 import type {
   AssessmentPublicPayload,
-  AssessmentSecurePayload,
   CodeLabPublicPayload,
   CodeLabSecurePayload,
   ConceptLessonPayload,
@@ -57,6 +56,7 @@ import {
 import { validateCodeLabDraftStructure, validateCodeLabPublicStage } from "../validators/code-lab-validator"
 import { validateAssessmentDraftStructure, validateAssessmentPublicStage } from "../validators/assessment-validator"
 import { validateConceptLesson } from "../validators/concept-validator"
+import { analyzePythonSource } from "../security/python-static-analyzer"
 import {
   getRoleCModelOutputSchema,
   getRoleCModelOutputSchemaFragment,
@@ -171,11 +171,11 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
     this.conceptGroupSize = positiveInteger(options.concept_group_size, 1, "concept_group_size")
     this.conceptConcurrency = positiveInteger(options.concept_concurrency, 1, "concept_concurrency")
     this.conceptSegmentMaxTokens = positiveInteger(options.concept_segment_max_tokens, 3_500, "concept_segment_max_tokens")
-    this.codeLabTemperature = options.code_lab_temperature ?? 0.2
+    this.codeLabTemperature = options.code_lab_temperature ?? 0
     this.codeLabMaxTokens = options.code_lab_max_tokens ?? 7_000
     this.codeLabPublicMaxTokens = positiveInteger(options.code_lab_public_max_tokens, 3_500, "code_lab_public_max_tokens")
     this.codeLabSecureMaxTokens = positiveInteger(options.code_lab_secure_max_tokens, 5_000, "code_lab_secure_max_tokens")
-    this.assessmentTemperature = options.assessment_temperature ?? 0.15
+    this.assessmentTemperature = options.assessment_temperature ?? 0
     this.assessmentMaxTokens = options.assessment_max_tokens ?? 8_000
     this.assessmentPublicMaxTokens = positiveInteger(options.assessment_public_max_tokens, 4_500, "assessment_public_max_tokens")
     this.assessmentSecureMaxTokens = positiveInteger(options.assessment_secure_max_tokens, 5_500, "assessment_secure_max_tokens")
@@ -292,23 +292,27 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
           payload,
         )
         if (!schema.ok) return validationIssues(schema)
+        const normalizedAuthor = normalizeCodeLabPublicAuthorPayload(payload)
         const planIssues = validateCodeLabPublicAuthorAgainstPlan(
-          payload,
+          normalizedAuthor,
           objectivePlan,
         )
         if (planIssues.length > 0) return planIssues
         const normalized = materializeCodeLabPublicAuthorPayload(
           request,
-          payload,
+          normalizedAuthor,
           identity.lab_id,
           objectivePlan,
         )
         return validationIssues(validateCodeLabPublicStage(request, normalized))
       },
     })
+    const normalizedPublicAuthor = normalizeCodeLabPublicAuthorPayload(
+      publicAuthor,
+    )
     let normalizedPublic = materializeCodeLabPublicAuthorPayload(
       request,
-      publicAuthor,
+      normalizedPublicAuthor,
       identity.lab_id,
       objectivePlan,
     )
@@ -348,15 +352,19 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       validate: (payload) => {
         const schema = validateRoleCSchemaFragment("code_lab_draft.schema.json", "/$defs/secure_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
-        const authorIssues = validateCodeLabSecureAuthorAgainstPlan(
+        const normalizedAuthor = normalizeCodeLabSecureAuthorPayload(
           payload,
+          normalizedPublic.execution_contract,
+        )
+        const authorIssues = validateCodeLabSecureAuthorAgainstPlan(
+          normalizedAuthor,
           securePlan,
           normalizedPublic.execution_contract.execution_mode,
         )
         if (authorIssues.length > 0) return authorIssues
         const normalized = materializeCodeLabSecureAuthorPayload(
           request.generation_spec,
-          payload,
+          normalizedAuthor,
           normalizedPublic,
           identity.test_suite_id,
           securePlan,
@@ -370,9 +378,13 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         return validationIssuesExcludingRepairablePublicAnswerLeak(report)
       },
     })
+    const normalizedSecureAuthorPayload = normalizeCodeLabSecureAuthorPayload(
+      secureAuthorPayload,
+      normalizedPublic.execution_contract,
+    )
     let securePayload = materializeCodeLabSecureAuthorPayload(
       request.generation_spec,
-      secureAuthorPayload,
+      normalizedSecureAuthorPayload,
       normalizedPublic,
       identity.test_suite_id,
       securePlan,
@@ -513,15 +525,23 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
           patch,
         )
         if (!schema.ok) return validationIssues(schema)
+        const normalizedPatch = normalizeCodeLabExecutionRepairPatch(
+          patch,
+          draft.secure_draft.payload,
+          publicPayload.execution_contract,
+        )
         const patchIssues = validateCodeLabExecutionRepairPatch(
           draft.secure_draft.payload,
-          patch,
+          normalizedPatch,
           feedback,
         )
         if (patchIssues.length > 0) return patchIssues
         const repaired = normalizeCodeLabSecure(
           request.generation_spec,
-          applyCodeLabExecutionRepairPatch(draft.secure_draft.payload, patch),
+          applyCodeLabExecutionRepairPatch(
+            draft.secure_draft.payload,
+            normalizedPatch,
+          ),
           publicPayload,
           identity.test_suite_id,
           objectivePlan,
@@ -543,11 +563,16 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         }))
       },
     })
+    const normalizedRepairPatch = normalizeCodeLabExecutionRepairPatch(
+      repairPatch,
+      draft.secure_draft.payload,
+      publicPayload.execution_contract,
+    )
     const securePayload = normalizeCodeLabSecure(
       request.generation_spec,
       applyCodeLabExecutionRepairPatch(
         draft.secure_draft.payload,
-        repairPatch,
+        normalizedRepairPatch,
       ),
       publicPayload,
       identity.test_suite_id,
@@ -640,12 +665,16 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       validate: (payload) => {
         const schema = validateRoleCSchemaFragment("assessment_draft.schema.json", "/$defs/secure_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
-        const crossIssues = validateAssessmentSecureAuthorAgainstPublic(payload, normalizedPublic)
+        const normalizedAuthor = normalizeAssessmentSecureAuthorPayload(
+          payload,
+          normalizedPublic,
+        )
+        const crossIssues = validateAssessmentSecureAuthorAgainstPublic(normalizedAuthor, normalizedPublic)
         if (crossIssues.length > 0) return crossIssues
         const secure = materializeAssessmentSecureAuthorPayload(
           request.generation_spec,
           normalizedPublic,
-          payload,
+          normalizedAuthor,
         )
         const normalized = normalizeAssessmentPair(request.generation_spec, normalizedPublic, secure)
         return validationIssues(validateAssessmentDraftStructure(request, {
@@ -654,10 +683,14 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         }))
       },
     })
+    const normalizedSecureAuthorPayload = normalizeAssessmentSecureAuthorPayload(
+      secureAuthorPayload,
+      normalizedPublic,
+    )
     const securePayload = materializeAssessmentSecureAuthorPayload(
       request.generation_spec,
       normalizedPublic,
-      secureAuthorPayload,
+      normalizedSecureAuthorPayload,
     )
     const normalized = normalizeAssessmentPair(request.generation_spec, normalizedPublic, securePayload)
     return {
@@ -686,7 +719,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
     const verificationIssues = feedback.issues
       .slice(0, 32)
       .map((issue) => issue.slice(0, 500))
-    const securePayload = await this.generateStage<AssessmentSecurePayload>({
+    const secureAuthorPayload = await this.generateStage<AssessmentSecureAuthorPayload>({
       task: "role-c.tiered-evaluator.secure.execution-repair",
       system_prompt: ASSESSMENT_EXECUTION_REPAIR_SYSTEM_PROMPT,
       input: {
@@ -707,10 +740,10 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         revision_objections: modelInput.revision_objections,
         external_revision_round: modelInput.external_revision_round,
       },
-      output_schema_id: "role_c_assessment_secure_payload_v1",
+      output_schema_id: "role_c_assessment_secure_author_payload_v1",
       output_schema: fragment(
         "assessment_draft.schema.json",
-        "/$defs/secure_payload",
+        "/$defs/secure_author_payload",
       ),
       temperature: this.assessmentTemperature,
       max_tokens: this.assessmentSecureMaxTokens,
@@ -728,19 +761,28 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       validate: (payload) => {
         const schema = validateRoleCSchemaFragment(
           "assessment_draft.schema.json",
-          "/$defs/secure_payload",
+          "/$defs/secure_author_payload",
           payload,
         )
         if (!schema.ok) return validationIssues(schema)
-        const crossIssues = validateAssessmentSecureAgainstPublic(
+        const normalizedAuthor = normalizeAssessmentSecureAuthorPayload(
           payload,
           publicPayload,
         )
+        const crossIssues = validateAssessmentSecureAuthorAgainstPublic(
+          normalizedAuthor,
+          publicPayload,
+        )
         if (crossIssues.length > 0) return crossIssues
+        const materialized = materializeAssessmentSecureAuthorPayload(
+          request.generation_spec,
+          publicPayload,
+          normalizedAuthor,
+        )
         const normalized = normalizeAssessmentPair(
           request.generation_spec,
           publicPayload,
-          payload,
+          materialized,
         )
         return validationIssues(validateAssessmentDraftStructure(request, {
           public_draft: { payload: normalized.public_payload },
@@ -748,10 +790,19 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         }))
       },
     })
+    const normalizedSecureAuthorPayload = normalizeAssessmentSecureAuthorPayload(
+      secureAuthorPayload,
+      publicPayload,
+    )
+    const materialized = materializeAssessmentSecureAuthorPayload(
+      request.generation_spec,
+      publicPayload,
+      normalizedSecureAuthorPayload,
+    )
     const normalized = normalizeAssessmentPair(
       request.generation_spec,
       publicPayload,
-      securePayload,
+      materialized,
     )
     return {
       public_draft: { payload: normalized.public_payload },
@@ -779,68 +830,85 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       identity.test_suite_id,
     )
     const maxRepairs = boundedRepairs(this.maxRepairAttempts, request)
-    const patch = await this.generateStage<CodeLabPublicSafetyRepairPatch>({
-      task: "role-c.code-lab.public.safety-repair",
-      system_prompt: CODE_LAB_PUBLIC_SAFETY_REPAIR_SYSTEM_PROMPT,
-      input: {
-        contract: modelInput.contract,
-        evidence: modelInput.evidence,
-        concept: modelInput.concept,
-        public_payload: input.public_payload,
-        trusted_public_report: { issue: input.repair_reason },
-      },
-      output_schema_id: "role_c_code_lab_public_safety_repair_patch_v1",
-      output_schema: fragment(
+    const validatePatch = (candidatePatch: CodeLabPublicSafetyRepairPatch): string[] => {
+      const schema = validateRoleCSchemaFragment(
         "code_lab_draft.schema.json",
         "/$defs/public_safety_repair_patch",
-      ),
-      temperature: this.codeLabTemperature,
-      max_tokens: this.codeLabPublicMaxTokens,
-      idempotency_identity: {
-        spec_id: request.generation_spec.spec_id,
-        lab_id: identity.lab_id,
-        prior_public_hash: contentHash(input.public_payload),
-        revision_identity: input.revision_identity,
-        stage: "public-safety-repair",
-        prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
-      },
-      max_repairs: maxRepairs,
-      validate: (candidatePatch) => {
-        const schema = validateRoleCSchemaFragment(
+        candidatePatch,
+      )
+      if (!schema.ok) return validationIssues(schema)
+      const shapeIssues = validateCodeLabPublicSafetyPatchShape(
+        input.public_payload,
+        candidatePatch,
+      )
+      if (shapeIssues.length > 0) return shapeIssues
+      const candidate = applyCodeLabPublicSafetyPatch(
+        input.public_payload,
+        candidatePatch,
+      )
+      if (contentHash(candidate) === contentHash(input.public_payload)) {
+        return ["公开安全修订未改变学习者可见内容"]
+      }
+      const publicIssues = validationIssues(
+        validateCodeLabPublicStage(request, candidate),
+      )
+      if (publicIssues.length > 0) return publicIssues
+      const frozenSecure = normalizeCodeLabSecure(
+        request.generation_spec,
+        input.secure_payload,
+        candidate,
+        identity.test_suite_id,
+        securePlan,
+      )
+      return validationIssues(validateCodeLabDraftStructure(request, {
+        public_draft: { payload: candidate },
+        secure_draft: { payload: frozenSecure },
+      }))
+    }
+    let patch: CodeLabPublicSafetyRepairPatch
+    try {
+      patch = await this.generateStage<CodeLabPublicSafetyRepairPatch>({
+        task: "role-c.code-lab.public.safety-repair",
+        system_prompt: CODE_LAB_PUBLIC_SAFETY_REPAIR_SYSTEM_PROMPT,
+        input: {
+          contract: modelInput.contract,
+          evidence: modelInput.evidence,
+          concept: modelInput.concept,
+          public_payload: input.public_payload,
+          trusted_public_report: { issue: input.repair_reason },
+        },
+        output_schema_id: "role_c_code_lab_public_safety_repair_patch_v1",
+        output_schema: fragment(
           "code_lab_draft.schema.json",
           "/$defs/public_safety_repair_patch",
-          candidatePatch,
-        )
-        if (!schema.ok) return validationIssues(schema)
-        const shapeIssues = validateCodeLabPublicSafetyPatchShape(
-          input.public_payload,
-          candidatePatch,
-        )
-        if (shapeIssues.length > 0) return shapeIssues
-        const candidate = applyCodeLabPublicSafetyPatch(
-          input.public_payload,
-          candidatePatch,
-        )
-        if (contentHash(candidate) === contentHash(input.public_payload)) {
-          return ["公开安全修订未改变学习者可见内容"]
-        }
-        const publicIssues = validationIssues(
-          validateCodeLabPublicStage(request, candidate),
-        )
-        if (publicIssues.length > 0) return publicIssues
-        const frozenSecure = normalizeCodeLabSecure(
-          request.generation_spec,
-          input.secure_payload,
-          candidate,
-          identity.test_suite_id,
-          securePlan,
-        )
-        return validationIssues(validateCodeLabDraftStructure(request, {
-          public_draft: { payload: candidate },
-          secure_draft: { payload: frozenSecure },
-        }))
-      },
-    })
+        ),
+        temperature: this.codeLabTemperature,
+        max_tokens: this.codeLabPublicMaxTokens,
+        idempotency_identity: {
+          spec_id: request.generation_spec.spec_id,
+          lab_id: identity.lab_id,
+          prior_public_hash: contentHash(input.public_payload),
+          revision_identity: input.revision_identity,
+          stage: "public-safety-repair",
+          prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
+        },
+        max_repairs: maxRepairs,
+        validate: validatePatch,
+      })
+    } catch (error) {
+      if (!(error instanceof ModelOutputValidationError)) throw error
+      const conservativePatch = conservativeCodeLabPublicSafetyPatch(
+        input.public_payload,
+      )
+      const fallbackIssues = validatePatch(conservativePatch)
+      if (fallbackIssues.length > 0) {
+        throw new ModelOutputValidationError(error.stage, [
+          ...error.issues,
+          ...fallbackIssues,
+        ])
+      }
+      patch = conservativePatch
+    }
     return applyCodeLabPublicSafetyPatch(input.public_payload, patch)
   }
 
@@ -1189,6 +1257,363 @@ function applyCodeLabPublicSafetyPatch(
     reflection_questions: patch.reflection_questions.map((question) =>
       question.trim()),
   }
+}
+
+function conservativeCodeLabPublicSafetyPatch(
+  prior: CodeLabPublicPayload,
+): CodeLabPublicSafetyRepairPatch {
+  return {
+    starter_code: minimalSafeStarter(
+      prior.starter_code,
+      prior.execution_contract,
+    ),
+    instruction_texts: prior.instructions.map((_, index) =>
+      `按执行合同完成第 ${index + 1} 个目标，保持规定的输入与输出形式，核心实现由学习者补全。`),
+    public_test_descriptions: prior.public_tests.map((_, index) =>
+      `公开测试 ${index + 1}：检查实现是否满足题目的可观察行为。`),
+    public_test_expected_behaviors: prior.public_tests.map(() =>
+      "结果应符合执行合同和题目中的输出约束。"),
+    hint_texts: prior.hint_ladders.map(() => [
+      "先明确输入、输出和需要处理的步骤。",
+      "选择合适的控制结构，将核心处理保留在 TODO 位置。",
+      "逐项对照公开测试检查边界、顺序和返回形式。",
+    ]),
+    reflection_questions: prior.reflection_questions.map(() =>
+      "你的实现如何满足输入、输出和边界约束？"),
+  }
+}
+
+function normalizeCodeLabPublicAuthorPayload(
+  payload: CodeLabPublicAuthorPayload,
+): CodeLabPublicAuthorPayload {
+  const normalized = structuredClone(payload)
+  normalizeCodeLabExecutionIntent(normalized)
+  if (analyzePythonSource(
+    normalized.starter_code,
+    normalized.execution_contract,
+  ).length > 0) {
+    normalized.starter_code = minimalSafeStarter(
+      normalized.starter_code,
+      normalized.execution_contract,
+    )
+  }
+  return normalized
+}
+
+function normalizeCodeLabExecutionIntent(
+  payload: CodeLabPublicAuthorPayload,
+): void {
+  const contract = payload.execution_contract
+  if (contract.execution_mode !== "function") return
+  const visibleText = payload.objectives.flatMap((objective) => [
+    objective.instruction_text,
+    objective.public_test.description,
+    objective.public_test.expected_behavior,
+    ...objective.hints,
+    objective.reflection_question,
+  ])
+  const contractText = [
+    contract.output_contract.type,
+    ...(contract.output_contract.constraints ?? []),
+  ]
+  const describesStdout = /(?:标准输出|打印|输出到屏幕|stdout|\bprint\b)/iu.test(
+    [...contractText, ...visibleText].join(" ").normalize("NFKC"),
+  )
+  if (describesStdout) {
+    const priorStarter = payload.starter_code
+    const priorEntryPoint = contract.entry_point?.trim()
+    contract.execution_mode = "stdin_stdout"
+    delete contract.entry_point
+    contract.input_contract = {
+      type: "stdin text",
+      constraints: [...contract.input_contract.constraints],
+    }
+    contract.output_contract = {
+      type: "stdout text",
+      constraints: contract.output_contract.constraints?.length
+        ? [...contract.output_contract.constraints]
+        : ["按题目要求输出结果"],
+    }
+    payload.starter_code = stdoutSafeStarter(priorStarter, priorEntryPoint)
+    payload.objectives.forEach((objective) => {
+      objective.public_test.input = asStandardInput(
+        objective.public_test.input,
+      )
+    })
+    return
+  }
+  if (/^(?:none|null|void)(?:\s|$)/iu.test(
+    contract.output_contract.type.normalize("NFKC"),
+  )) {
+    contract.output_contract = {
+      type: "JSON-serializable return value",
+      constraints: (contract.output_contract.constraints ?? []).filter((entry) =>
+        !/(?:标准输出|打印|stdout|\bprint\b)/iu.test(entry)),
+    }
+  }
+}
+
+function minimalSafeStarter(
+  priorStarter: string,
+  contract: CodeLabPublicPayload["execution_contract"],
+): string {
+  const entryPoint = contract.entry_point?.trim()
+  const signature = entryPoint
+    ? priorStarter.split(/\r?\n/).find((line) =>
+        new RegExp(`^\\s*(?:async\\s+)?def\\s+${escapeRegExp(entryPoint)}\\s*\\(`).test(line))
+    : undefined
+  return contract.execution_mode === "function"
+    ? `${signature?.trim() ?? `def ${entryPoint || "solution"}(*args, **kwargs):`}\n    raise NotImplementedError("TODO")\n`
+    : "raise NotImplementedError(\"TODO\")\n"
+}
+
+function normalizeCodeLabSecureAuthorPayload(
+  payload: CodeLabSecureAuthorPayload,
+  contract: CodeLabPublicPayload["execution_contract"],
+): CodeLabSecureAuthorPayload {
+  const normalized = structuredClone(payload)
+  if (contract.execution_mode === "function") {
+    normalized.reference_solution = normalizeFunctionReturnSemantics(
+      normalized.reference_solution,
+    )
+    normalized.hidden_tests.forEach((test) => {
+      test.input = normalizeEmptyFunctionInvocation(test.input)
+    })
+    normalized.reference_solution = ensureZeroArgumentEntryPoint(
+      normalized.reference_solution,
+      contract.entry_point,
+      normalized.hidden_tests.map((test) => test.input),
+    )
+  } else {
+    normalized.reference_solution = ensureZeroArgumentFunctionIsInvoked(
+      normalized.reference_solution,
+    )
+    normalizePrintedStdoutExpectations(
+      normalized.reference_solution,
+      normalized.hidden_tests,
+    )
+  }
+  return normalized
+}
+
+function normalizeAssessmentSecureAuthorPayload(
+  payload: AssessmentSecureAuthorPayload,
+  publicPayload: AssessmentPublicPayload,
+): AssessmentSecureAuthorPayload {
+  const normalized = structuredClone(payload)
+  normalized.items.forEach((item, index) => {
+    const modality = publicPayload.items[index]?.modality
+    if (modality === "mcq" || modality === "true_false" || modality === "code") {
+      item.answer_spec = null
+    }
+    if (modality !== "mcq" && modality !== "true_false") {
+      item.correct_option_id = null
+      item.misconception_by_option = {}
+    }
+  })
+  normalized.code_test_suites.forEach((suite) => {
+    if (suite.execution_contract.execution_mode === "function") {
+      suite.reference_solution = normalizeFunctionReturnSemantics(
+        suite.reference_solution,
+      )
+      suite.hidden_tests.forEach((test) => {
+        test.input = normalizeEmptyFunctionInvocation(test.input)
+      })
+      suite.reference_solution = ensureZeroArgumentEntryPoint(
+        suite.reference_solution,
+        suite.execution_contract.entry_point,
+        suite.hidden_tests.map((test) => test.input),
+      )
+    } else {
+      suite.reference_solution = ensureZeroArgumentFunctionIsInvoked(
+        suite.reference_solution,
+      )
+      normalizePrintedStdoutExpectations(
+        suite.reference_solution,
+        suite.hidden_tests,
+      )
+    }
+  })
+  return normalized
+}
+
+function ensureZeroArgumentEntryPoint(
+  source: string,
+  entryPoint: string | undefined,
+  inputs: unknown[],
+): string {
+  if (!entryPoint || new RegExp(
+    `^\\s*def\\s+${escapeRegExp(entryPoint)}\\s*\\(`,
+    "mu",
+  ).test(source)) return source
+  if (!inputs.every(isEmptyFunctionInvocation)) return source
+  const lines = source.trim().split(/\r?\n/)
+  if (lines.length === 0 || lines.some((line) => /^\s*(?:class|def)\s+/u.test(line))) {
+    return source
+  }
+  let returnExpression: string | undefined
+  let lastMeaningfulIndex = -1
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]!
+    if (line.trim() !== "" && !line.trimStart().startsWith("#")) {
+      lastMeaningfulIndex = index
+      break
+    }
+  }
+  const lastLine = lines[lastMeaningfulIndex]?.trim()
+  const printed = lastLine?.match(/^print\((.*)\)$/u)
+  const returned = lastLine?.match(/^return\s+(.+)$/u)
+  if (printed || returned) {
+    returnExpression = (printed ?? returned)![1]!.trim()
+    lines.splice(lastMeaningfulIndex, 1)
+  } else {
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const assigned = lines[index]!.trim().match(
+        /^([A-Za-z_][A-Za-z0-9_]*)\s*(?:[+\-*/%]?=)(?!=)/u,
+      )
+      if (assigned) {
+        returnExpression = assigned[1]
+        break
+      }
+    }
+  }
+  if (!returnExpression) return source
+  const body = lines
+    .filter((line, index) => index <= lastMeaningfulIndex || line.trim() !== "")
+    .map((line) => `    ${line}`)
+  body.push(`    return ${returnExpression}`)
+  return `def ${entryPoint}():\n${body.join("\n")}\n`
+}
+
+function isEmptyFunctionInvocation(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false
+  const envelope = input as { args?: unknown[]; kwargs?: Record<string, unknown> }
+  return Array.isArray(envelope.args)
+    && envelope.args.length === 0
+    && Object.keys(envelope.kwargs ?? {}).length === 0
+}
+
+function normalizeCodeLabExecutionRepairPatch(
+  patch: CodeLabExecutionRepairPatch,
+  prior: CodeLabSecurePayload,
+  contract: CodeLabPublicPayload["execution_contract"],
+): CodeLabExecutionRepairPatch {
+  const normalized = structuredClone(patch)
+  const effectiveInputs = new Map(prior.hidden_tests.map((test) => [
+    test.test_id,
+    structuredClone(test.input),
+  ]))
+  normalized.hidden_test_repairs.forEach((test) => {
+    const input = contract.execution_mode === "function"
+      ? normalizeEmptyFunctionInvocation(test.input)
+      : asStandardInput(test.input)
+    test.input = input
+    effectiveInputs.set(test.test_id, structuredClone(input))
+  })
+  if (normalized.reference_solution !== null) {
+    if (contract.execution_mode === "function") {
+      normalized.reference_solution = ensureZeroArgumentEntryPoint(
+        normalizeFunctionReturnSemantics(normalized.reference_solution),
+        contract.entry_point,
+        [...effectiveInputs.values()],
+      )
+    } else {
+      normalized.reference_solution = ensureZeroArgumentFunctionIsInvoked(
+        normalized.reference_solution,
+      )
+      normalizePrintedStdoutExpectations(
+        normalized.reference_solution,
+        normalized.hidden_test_repairs,
+      )
+    }
+  }
+  return normalized
+}
+
+function stdoutSafeStarter(
+  priorStarter: string,
+  entryPoint: string | undefined,
+): string {
+  if (!entryPoint) {
+    return "# TODO: 读取输入、完成计算，并按题目要求输出结果。\n"
+  }
+  const signature = priorStarter.split(/\r?\n/).find((line) =>
+    new RegExp(`^\\s*def\\s+${escapeRegExp(entryPoint)}\\s*\\(\\s*\\)`).test(line))
+  if (!signature) {
+    return "# TODO: 读取输入、完成计算，并按题目要求输出结果。\n"
+  }
+  return `${signature.trim()}\n    raise NotImplementedError("TODO")\n\n${entryPoint}()\n`
+}
+
+function ensureZeroArgumentFunctionIsInvoked(source: string): string {
+  const definition = source.match(/^def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(\s*\)\s*:/mu)
+  if (!definition) return source
+  const functionName = definition[1]!
+  const topLevelInvocation = new RegExp(
+    `^${escapeRegExp(functionName)}\\s*\\(`,
+    "mu",
+  )
+  const topLevelPrintedInvocation = new RegExp(
+    `^print\\s*\\(\\s*${escapeRegExp(functionName)}\\s*\\(`,
+    "mu",
+  )
+  if (topLevelInvocation.test(source) || topLevelPrintedInvocation.test(source)) {
+    return source
+  }
+  const invocation = /(?:^|\n)[ \t]+print\s*\(/u.test(source)
+    ? `${functionName}()`
+    : `print(${functionName}())`
+  return `${source.trimEnd()}\n\n${invocation}\n`
+}
+
+function normalizeFunctionReturnSemantics(source: string): string {
+  return source.replace(
+    /^([ \t]+)print\((.*)\)\s*$/gmu,
+    (_line, indentation: string, expression: string) =>
+      `${indentation}return ${expression}`,
+  )
+}
+
+function asStandardInput(input: unknown): string {
+  if (typeof input === "string") return input
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return input === undefined || input === null ? "" : `${String(input)}\n`
+  }
+  const envelope = input as { args?: unknown[]; kwargs?: Record<string, unknown> }
+  if (!Array.isArray(envelope.args)) return `${JSON.stringify(input)}\n`
+  const lines = [
+    ...envelope.args,
+    ...Object.values(envelope.kwargs ?? {}),
+  ].map((value) => typeof value === "string" ? value : JSON.stringify(value))
+  return lines.length > 0 ? `${lines.join("\n")}\n` : ""
+}
+
+function normalizePrintedStdoutExpectations(
+  referenceSolution: string,
+  tests: Array<{ expected: unknown; comparison: { kind: string } }>,
+): void {
+  const defaultPrint = /\bprint\s*\((?![^\n)]*\bend\s*=)/u.test(referenceSolution)
+  if (!defaultPrint) return
+  tests.forEach((test) => {
+    if (test.comparison.kind === "exact"
+      && typeof test.expected === "string"
+      && !test.expected.endsWith("\n")) {
+      test.expected = `${test.expected}\n`
+    }
+  })
+}
+
+function normalizeEmptyFunctionInvocation(input: unknown): unknown {
+  return input
+    && typeof input === "object"
+    && !Array.isArray(input)
+    && Object.keys(input as Record<string, unknown>).length === 0
+    ? { args: [], kwargs: {} }
+    : input
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
 function fragment(file: RoleCSchemaFile, pointer: string): Record<string, unknown> {

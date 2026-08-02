@@ -3,6 +3,7 @@ import type { LearnerProfile } from "../role-b-profile/types"
 import type {
   AssessmentAnchorRoutingOutcome,
   ContinueCompletedLearningCycleResult,
+  ExecutionContract,
   LearnerProfileSnapshot,
   LearningPathNode,
   ProfileDriftSuggestion,
@@ -15,6 +16,7 @@ import type {
 
 export const ROLE_C_API_PATHS = {
   generate: "/api/role-c/generate",
+  runCodeLab: "/api/role-c/run-code-lab",
   submit: "/api/role-c/submit",
   continue: "/api/role-c/continue",
   routeAnchors: "/api/role-c/route-anchors",
@@ -49,6 +51,8 @@ export interface RoleDGeneratedArtifact {
   citations: RoleDPublicCitation[]
   items: RoleDAssessmentItem[]
   sections?: RoleDLearningSection[]
+  /** Structured code-lab payload. Present only when kind is "lab". */
+  lab?: RoleDCodeLab
 }
 
 export interface RoleDLearningSection {
@@ -59,6 +63,35 @@ export interface RoleDLearningSection {
   code?: string
   language?: string
   citations: RoleDPublicCitation[]
+}
+
+export interface RoleDCodeLabPublicTest {
+  id: string
+  objective_id: string
+  description: string
+  input: unknown
+  expected_behavior: string
+  citations: RoleDPublicCitation[]
+}
+
+export interface RoleDCodeLabHintLadder {
+  objective_id: string
+  hints: Array<{
+    level: 1 | 2 | 3
+    text: string
+    citations: RoleDPublicCitation[]
+  }>
+}
+
+/** Complete public lab data; secure answers and hidden tests never enter this DTO. */
+export interface RoleDCodeLab {
+  lab_id: string
+  instructions: RoleDLearningSection[]
+  execution_contract: ExecutionContract
+  starter_code: string
+  public_tests: RoleDCodeLabPublicTest[]
+  hint_ladders: RoleDCodeLabHintLadder[]
+  reflection_questions: string[]
 }
 
 export interface RoleDWorkflowEvent {
@@ -170,6 +203,57 @@ export interface SubmitRoleCAssessmentInput {
   answers: SubmissionEnvelope["answers"]
 }
 
+export interface RunRoleCCodeLabInput {
+  executionId: string
+  sessionId: string
+  runId: string
+  learnerId: string
+  labId: string
+  code: string
+}
+
+export type RoleCCodeLabFeedbackCode =
+  | "assertion_failed"
+  | "syntax_error"
+  | "runtime_error"
+  | "output_limit"
+  | "non_json_output"
+  | "forbidden_import"
+  | "forbidden_syntax"
+  | "resource_limit_exceeded"
+  | "execution_timeout"
+  | "execution_failed"
+
+export interface RoleCCodeLabFeedback {
+  code: RoleCCodeLabFeedbackCode
+  message: string
+}
+
+export type RunRoleCCodeLabResult =
+  | {
+      status: "passed" | "failed" | "timeout"
+      executionId: string
+      runId: string
+      labId: string
+      passedChecks: number
+      totalChecks: number
+      scoreRatio: number
+      feedback: RoleCCodeLabFeedback[]
+    }
+  | {
+      status: "blocked"
+      executionId: string
+      code:
+        | "INVALID_REQUEST"
+        | "SESSION_NOT_FOUND"
+        | "LEARNER_IDENTITY_MISMATCH"
+        | "RUN_NOT_FOUND"
+        | "LAB_NOT_FOUND"
+        | "SECURE_LAB_UNAVAILABLE"
+        | "RUNNER_UNAVAILABLE"
+      message: string
+    }
+
 /**
  * D sends only stable identities plus optional B-owned next context. C reloads
  * the completed submission and current profile/evidence from its private store.
@@ -193,6 +277,7 @@ export type ContinueRoleCForRoleDResult =
       >
       reviewedRelease: RoleCReviewedReleaseDelivery
       learningSession: RoleCLearningSessionDelivery
+      artifacts: RoleDGeneratedArtifact[]
       finalContext: RoleDFinalContentContext
     }
   | {

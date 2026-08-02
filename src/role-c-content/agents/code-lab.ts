@@ -53,15 +53,23 @@ export function createCodeLabAgent(
         let verification = verifier
           ? await verifier.verifyCodeLab(request, structuredClone(draft))
           : { execution_verified: false, issues: ["未配置独立 code-lab verifier"] }
-        if (!verification.execution_verified
-          && verifier
-          && provider.repairCodeLabAfterVerification
-          && request.generation_spec.policies.max_semantic_revision >= 1) {
-          draft = structuredClone(await provider.repairCodeLabAfterVerification(
+        const activeVerifier = verifier
+        const repairAfterVerification = provider.repairCodeLabAfterVerification
+        const verificationRepairLimit = activeVerifier
+          && repairAfterVerification
+          && request.generation_spec.policies.max_semantic_revision >= 1
+          ? request.generation_spec.policies.max_tool_retry
+          : 0
+        for (let revisionRound = 1;
+          !verification.execution_verified
+            && revisionRound <= verificationRepairLimit;
+          revisionRound += 1) {
+          if (!activeVerifier || !repairAfterVerification) break
+          draft = structuredClone(await repairAfterVerification(
             request,
             structuredClone(draft),
             {
-              revision_round: 1,
+              revision_round: revisionRound,
               issues: [...verification.issues],
               reference_failed: verification.reference_failed,
               reference_failure_codes: verification.reference_failure_codes
@@ -83,7 +91,7 @@ export function createCodeLabAgent(
               structural.issues.map((issue) => `${issue.path}: ${issue.message}`),
             )
           }
-          verification = await verifier.verifyCodeLab(
+          verification = await activeVerifier.verifyCodeLab(
             request,
             structuredClone(draft),
           )
@@ -127,7 +135,7 @@ export function createCodeLabAgent(
             common,
             `${error.stage} 未在有限修复次数内通过校验`,
             error.issues,
-            error.stage.endsWith(".public") ? error.issues : undefined,
+            error.stage.includes(".public") ? error.issues : undefined,
           )
         }
         if (error instanceof UnsupportedTargetError) {

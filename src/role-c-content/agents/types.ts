@@ -64,7 +64,7 @@ export interface CodeLabDraft {
 }
 
 export interface CodeLabVerificationFeedback {
-  revision_round: 1
+  revision_round: number
   /** Trusted-runner diagnostics; never copied into a public artifact verbatim. */
   issues: string[]
   /** Machine-readable trust-plane result; prose remains diagnostic only. */
@@ -85,7 +85,7 @@ export interface AssessmentDraft {
 }
 
 export interface AssessmentVerificationFeedback {
-  revision_round: 1
+  revision_round: number
   /** Trusted-verifier diagnostics; never copied into public assessment data. */
   issues: string[]
 }

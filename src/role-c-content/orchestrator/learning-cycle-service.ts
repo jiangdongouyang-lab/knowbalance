@@ -53,7 +53,10 @@ import {
   type LearningSessionRecord,
   type LearningSubmissionRecord,
 } from "../reliability/learning-cycle-store"
-import type { CodeRunner } from "../security/code-runner"
+import {
+  executeWithRunnerRetry,
+  type CodeRunner,
+} from "../security/code-runner"
 import {
   SecureArtifactStoreError,
   type SecureArtifactStore,
@@ -162,6 +165,52 @@ export interface ProcessSubmissionInput {
   submission: SubmissionEnvelope
   expected_session_revision?: number
 }
+
+export interface ExecutePublishedCodeLabInput {
+  execution_id: string
+  session_id: string
+  run_id: string
+  authenticated_learner_id_hash: string
+  lab_id: string
+  code: string
+}
+
+export type PublishedCodeLabFeedbackCode =
+  | "assertion_failed"
+  | "syntax_error"
+  | "runtime_error"
+  | "output_limit"
+  | "non_json_output"
+  | "forbidden_import"
+  | "forbidden_syntax"
+  | "resource_limit_exceeded"
+  | "execution_timeout"
+  | "execution_failed"
+
+export type ExecutePublishedCodeLabOutcome =
+  | {
+      status: "passed" | "failed" | "timeout"
+      execution_id: string
+      run_id: string
+      lab_id: string
+      passed_checks: number
+      total_checks: number
+      score_ratio: number
+      feedback_codes: PublishedCodeLabFeedbackCode[]
+    }
+  | {
+      status: "blocked"
+      execution_id: string
+      code:
+        | "INVALID_REQUEST"
+        | "SESSION_NOT_FOUND"
+        | "LEARNER_IDENTITY_MISMATCH"
+        | "RUN_NOT_FOUND"
+        | "LAB_NOT_FOUND"
+        | "SECURE_LAB_UNAVAILABLE"
+        | "RUNNER_UNAVAILABLE"
+      message: string
+    }
 
 /**
  * Trusted next-round boundary. Feedback, parent spec, and current evidence are
@@ -877,6 +926,153 @@ export class LearningCycleService {
       submission_id: outcome.submission_id,
       code: outcome.code,
       message: publicBlockMessage(outcome.code),
+    }
+  }
+
+  /**
+   * Executes learner code for one published lab. The caller supplies public
+   * identities and code only; C resolves the verified hidden suite from its
+   * secure store and returns an answer-free summary.
+   */
+  async executePublishedCodeLab(
+    input: ExecutePublishedCodeLabInput,
+  ): Promise<ExecutePublishedCodeLabOutcome> {
+    if (!input.execution_id.trim() || !input.session_id.trim()
+      || !input.run_id.trim() || !input.authenticated_learner_id_hash.trim()
+      || !input.lab_id.trim() || !input.code.trim()
+      || Buffer.byteLength(input.code, "utf8") > 100_000) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "INVALID_REQUEST",
+        "代码实验请求缺少必要字段或代码超过 100 KB",
+      )
+    }
+    if (!this.dependencies.code_runner) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "RUNNER_UNAVAILABLE",
+        "代码执行服务暂不可用",
+      )
+    }
+
+    const session = await this.dependencies.cycle_store.loadSession(
+      input.session_id,
+    )
+    if (!session || session.run_id !== input.run_id) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "SESSION_NOT_FOUND",
+        "代码实验对应的学习会话不存在",
+      )
+    }
+    if (session.session_state.learner_id_hash
+      !== input.authenticated_learner_id_hash) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "LEARNER_IDENTITY_MISMATCH",
+        "学习者身份与代码实验会话不一致",
+      )
+    }
+
+    const run = await this.dependencies.cycle_store.loadRun(input.run_id)
+    if (!run) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "RUN_NOT_FOUND",
+        "代码实验对应的学习轮次不存在",
+      )
+    }
+    if (run.learner_id_hash !== input.authenticated_learner_id_hash) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "LEARNER_IDENTITY_MISMATCH",
+        "学习者身份与代码实验轮次不一致",
+      )
+    }
+
+    const publicLab = run.pipeline_result.public_artifacts.code_lab
+    if (!publicLab?.payload || publicLab.status !== "ready"
+      || publicLab.payload.lab_id !== input.lab_id
+      || !session.session_state.public_artifact_refs.includes(
+        publicLab.artifact_id,
+      )) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "LAB_NOT_FOUND",
+        "当前学习会话没有这项可运行的代码实验",
+      )
+    }
+
+    let secureLab: CodeLabSecureArtifact
+    try {
+      const artifact = await this.dependencies.secure_store.get(
+        run.secure_artifact_refs.code_lab,
+        { principal: "role-c-grader", run_id: run.run_id },
+      )
+      if (artifact.artifact_type !== "code_lab_secure") {
+        return blockedCodeLabExecution(
+          input.execution_id,
+          "SECURE_LAB_UNAVAILABLE",
+          "代码实验测试套件暂不可用",
+        )
+      }
+      secureLab = artifact
+    } catch {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "SECURE_LAB_UNAVAILABLE",
+        "代码实验测试套件暂不可用",
+      )
+    }
+    if (!secureLab.payload || secureLab.status !== "ready"
+      || secureLab.payload.lab_id !== input.lab_id
+      || secureLab.run_id !== run.run_id
+      || contentHash(publicLab.payload.execution_contract)
+        !== contentHash(secureLab.payload.execution_contract)) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "SECURE_LAB_UNAVAILABLE",
+        "代码实验测试套件与当前实验不一致",
+      )
+    }
+
+    const contract = publicLab.payload.execution_contract
+    const result = await executeWithRunnerRetry(
+      this.dependencies.code_runner,
+      {
+        language: "python",
+        code: input.code,
+        test_suite_id: secureLab.payload.test_suite_id,
+        test_suite: {
+          test_suite_id: secureLab.payload.test_suite_id,
+          execution_contract: structuredClone(contract),
+          tests: structuredClone(secureLab.payload.hidden_tests),
+        },
+        timeout_ms: contract.resource_limits.timeout_ms,
+        memory_mb: contract.resource_limits.memory_mb,
+        max_output_bytes: contract.resource_limits.max_output_bytes,
+        network_allowed: false,
+      },
+      run.pipeline_input.generation_spec.policies.max_tool_retry,
+    )
+    if (result.status === "runner_error"
+      || result.runner_image_digest
+        !== this.dependencies.code_runner.runner_image_digest) {
+      return blockedCodeLabExecution(
+        input.execution_id,
+        "RUNNER_UNAVAILABLE",
+        "代码执行服务暂不可用",
+      )
+    }
+    return {
+      status: result.status,
+      execution_id: input.execution_id,
+      run_id: input.run_id,
+      lab_id: input.lab_id,
+      passed_checks: result.passed_tests,
+      total_checks: result.total_tests,
+      score_ratio: result.score_ratio,
+      feedback_codes: publicCodeLabFeedbackCodes(result.failure_codes),
     }
   }
 
@@ -2048,6 +2244,40 @@ function assertRegisteredSecurePair(
     })) {
     throw new LearningCycleServiceError("INVALID_READY_RUN", "assessment public/secure 题目映射不一致")
   }
+}
+
+function blockedCodeLabExecution(
+  executionId: string,
+  code: Extract<ExecutePublishedCodeLabOutcome, { status: "blocked" }>["code"],
+  message: string,
+): Extract<ExecutePublishedCodeLabOutcome, { status: "blocked" }> {
+  return {
+    status: "blocked",
+    execution_id: executionId,
+    code,
+    message,
+  }
+}
+
+function publicCodeLabFeedbackCodes(
+  failureCodes: string[],
+): PublishedCodeLabFeedbackCode[] {
+  const mapped = failureCodes.map((raw): PublishedCodeLabFeedbackCode => {
+    const code = raw.toLocaleLowerCase()
+    if (code.includes("assertion_failed")) return "assertion_failed"
+    if (code.includes("syntax_error")) return "syntax_error"
+    if (code.includes("runtime_")) return "runtime_error"
+    if (code.includes("output_limit")) return "output_limit"
+    if (code.includes("non_json_output")) return "non_json_output"
+    if (code.includes("forbidden_import")) return "forbidden_import"
+    if (code.includes("forbidden")) return "forbidden_syntax"
+    if (code.includes("resource_limit_exceeded")) {
+      return "resource_limit_exceeded"
+    }
+    if (code.includes("timeout")) return "execution_timeout"
+    return "execution_failed"
+  })
+  return [...new Set(mapped)]
 }
 
 function readyAssessment(run: LearningRunRecord): AssessmentPublicArtifact {

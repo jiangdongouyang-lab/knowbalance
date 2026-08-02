@@ -2,7 +2,7 @@
 
 | 项目 | 当前值 |
 |---|---|
-| Prompt manifest | `c-prompts-1.15.0` |
+| Prompt manifest | `c-prompts-1.16.0` |
 | 入口 | `src/role-c-content/prompts/index.ts` |
 | 公共策略 | `src/role-c-content/prompts/common-policy.ts` |
 
