@@ -37,6 +37,10 @@ export {
   receiveLearningProgress,
   applyProgressObservation,
   RoleBLearningProgressAdapter,
+  buildFormalPath,
+  advanceToNextNode,
+  startPath,
+  getPathStatus,
 } from "./teaching-audit"
 export type {
   TeachingAuditInput,
@@ -58,6 +62,13 @@ export type {
   RoleBLearnerProgressRegistration,
   RoleBLearnerProgressState,
   RoleBLearningProgressAdapterOptions,
+  FormalPathNode,
+  FormalPathNodeStatus,
+  FormalLearningPath,
+  BuildFormalPathInput,
+  AdvancePathInput,
+  AdvancePathResult,
+  FormalPathStatus,
 } from "./teaching-audit"
 
 // 统一 IO 契约适配器

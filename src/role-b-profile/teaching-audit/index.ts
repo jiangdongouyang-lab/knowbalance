@@ -11,6 +11,21 @@ export type {
   RoleBLearnerProgressState,
   RoleBLearningProgressAdapterOptions,
 } from "./learning-progress-adapter"
+export {
+  buildFormalPath,
+  advanceToNextNode,
+  startPath,
+  getPathStatus,
+} from "./formal-path"
+export type {
+  FormalPathNode,
+  FormalPathNodeStatus,
+  FormalLearningPath,
+  BuildFormalPathInput,
+  AdvancePathInput,
+  AdvancePathResult,
+  FormalPathStatus,
+} from "./formal-path"
 export type {
   TeachingAuditInput,
   TeachingAuditResult,
