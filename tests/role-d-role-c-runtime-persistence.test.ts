@@ -213,17 +213,18 @@ describe("Role D → Role C durable HTTP runtime boundary", () => {
         dataDirectory,
         reviewPort: alwaysPassReviewPort(),
       }
-      const awaitingPath = await continueRoleCAfterSubmission({
+      // Advance flow: when D does not provide a next path node, C proactively
+      // calls B to plan the next node. The deterministic code-lab provider only
+      // supports the K018 gold-standard task, so this advance round will be
+      // blocked by the generation pipeline rather than returning
+      // `awaiting_path_node` to D.
+      const advanceAttempt = await continueRoleCAfterSubmission({
         sessionId: submission.sessionId,
         submissionId: submission.submissionId,
         learnerId: profile.learner_id,
       }, continuationRuntime)
-      expect(awaitingPath).toEqual({
-        status: "awaiting_input",
-        action: "advance",
-        requestId: expect.any(String),
-        requiredInputs: ["nextPathNode"],
-      })
+      expect(advanceAttempt.status).toBe("blocked")
+      expect(advanceAttempt.stage).toBe("generation_review")
 
       const continued = await continueRoleCAfterSubmission({
         sessionId: submission.sessionId,

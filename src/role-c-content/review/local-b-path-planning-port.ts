@@ -87,6 +87,25 @@ export function createLocalBPathPlanningPort(
             "UNSUPPORTED_TARGET",
           )
         }
+        // Advance success path: the learner passed all dimensions and is ready
+        // for the next node. Return a fresh profile snapshot so that the caller
+        // can validate the updated state before proceeding.
+        if (request.failed_dimensions.length === 0) {
+          return {
+            status: "ready",
+            request_id: request.request_id,
+            path_draft: structuredClone(planned.pathNode),
+            profile_snapshot: {
+              ...structuredClone(request.profile_snapshot),
+              profile_version: stableId("PROFILE-ADVANCE", {
+                source_profile_version:
+                  request.profile_snapshot.profile_version,
+                source_spec_id: request.current_spec_id,
+                target_source_ids: planned.pathNode.target_source_ids,
+              }),
+            },
+          }
+        }
         if (prerequisitePlan) {
           const prerequisiteItems = planned.pathNode.target_source_ids.map(
             (sourceId) => localKnowledgeBase.items.find(

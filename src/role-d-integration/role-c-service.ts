@@ -84,6 +84,7 @@ import {
   type ReviewRecoveryAttempt,
   type ReviewRecoverySummary,
   type RoleCContentProvider,
+  type RoleBLearningProgressPort,
   type RoleBPathPlanningPort,
   type RoleDAdaptiveLearningLoopPort,
   type SecureArtifactStore,
@@ -126,6 +127,8 @@ export interface RoleCForRoleDRuntimeOptions {
   learningPersistence?: RoleCLearningPersistence
   /** A identity-based evidence adapter used by recovery and next-path activation. */
   evidenceRefreshPort?: EvidenceRefreshPort
+  /** B progress delivery used to submit completed assessment outcomes to B. */
+  learningProgressPort?: RoleBLearningProgressPort
   /** B path adapter used when a generated candidate needs formal replanning. */
   pathPlanningPort?: RoleBPathPlanningPort
   /** External D receiver. HTTP/local use an acknowledgement-only adapter. */
@@ -568,6 +571,14 @@ export async function submitRoleCAssessment(
     secure_store: persistence.secureStore,
     mastery_store: persistence.masteryStore,
     code_runner: runner,
+    ...(runtime.learningProgressPort
+      ? {
+          learning_progress_delivery: {
+            mode: "required" as const,
+            port: runtime.learningProgressPort,
+          },
+        }
+      : {}),
   })
   return service.processSubmission({
     session_id: input.sessionId,
@@ -736,7 +747,83 @@ export async function continueRoleCAfterSubmission(
     ? structuredClone(input.nextPathNode)
     : undefined
   let nextEvidencePack: RagEvidencePack | undefined
-  if (nextPathNode) {
+  let advanceProfileSnapshot: LearnerProfileSnapshot | undefined
+
+  // Advance flow: when D does not provide a next path node and the completed
+  // submission's feedback action is "advance", proactively call B to plan the
+  // next learning node instead of returning `awaiting_path_node` to D.
+  if (!nextPathNode) {
+    const completedSubmission = await persistence.cycleStore.loadSubmission(
+      input.sessionId,
+      input.submissionId,
+    )
+    if (
+      completedSubmission?.status === "COMPLETED"
+      && completedSubmission.feedback?.final_decision.action === "advance"
+    ) {
+      const replanResult = await pathPlanningPort.replanLearningPath({
+        schema_version: "1.0",
+        request_id: stableId("ADVANCE-REPLAN", {
+          run_id: currentRun.run_id,
+          submission_id: input.submissionId,
+        }),
+        run_id: currentRun.run_id,
+        current_spec_id:
+          currentRun.pipeline_input.generation_spec.spec_id,
+        profile_snapshot: currentRun.profile_snapshot,
+        current_path_node: defineLearningPathNode({
+          ...structuredClone(
+            currentRun.pipeline_input.generation_spec.path_node,
+          ),
+          objectives: structuredClone(
+            currentRun.pipeline_input.generation_spec.targets,
+          ),
+          assessment_blueprint: structuredClone(
+            currentRun.pipeline_input.generation_spec.assessment_blueprint,
+          ),
+        }),
+        failed_dimensions: [],
+        missing_prerequisite_source_ids: [],
+        required_action: "replan_path",
+        fix_scope: "new_spec",
+        review_instruction_ids: [],
+      })
+      if (replanResult.status === "blocked") {
+        return continuationPreparationBlocked(
+          `B 无法规划下一学习节点：${replanResult.reason}`,
+        )
+      }
+      const rawPathNode = replanResult.path_draft
+      const bProfile =
+        replanResult.profile_snapshot ?? currentRun.profile_snapshot
+      if (bProfile.learner_id !== currentRun.profile_snapshot.learner_id) {
+        return continuationPreparationBlocked(
+          "B 返回的新画像属于另一名学习者",
+        )
+      }
+      advanceProfileSnapshot = bProfile
+      nextPathNode = defineLearningPathNode({
+        ...structuredClone(rawPathNode),
+        objectives: rawPathNode.objectives.map((obj) => ({
+          ...obj,
+          required_fact_ids: [...obj.required_fact_ids],
+        })),
+      })
+      const refreshed = await refreshNextPathEvidence(
+        nextPathNode,
+        bProfile,
+        currentRun.run_id,
+        evidenceRefreshPort,
+      )
+      if (!refreshed.ok) {
+        return continuationPreparationBlocked(refreshed.reason)
+      }
+      nextPathNode = refreshed.pathNode
+      nextEvidencePack = refreshed.evidencePack
+    }
+  }
+
+  if (nextPathNode && !nextEvidencePack) {
     const nextProfile = input.nextProfileSnapshot
       ?? currentRun.profile_snapshot
     if (nextProfile.learner_id !== currentRun.profile_snapshot.learner_id) {
@@ -765,9 +852,11 @@ export async function continueRoleCAfterSubmission(
         authenticated_learner_id_hash: input.learnerId,
         ...(nextPathNode ? { next_path_node: nextPathNode } : {}),
         ...(nextEvidencePack ? { next_evidence_pack: nextEvidencePack } : {}),
-        ...(input.nextProfileSnapshot
-          ? { next_profile_snapshot: structuredClone(input.nextProfileSnapshot) }
-          : {}),
+        ...(advanceProfileSnapshot
+          ? { next_profile_snapshot: structuredClone(advanceProfileSnapshot) }
+          : input.nextProfileSnapshot
+            ? { next_profile_snapshot: structuredClone(input.nextProfileSnapshot) }
+            : {}),
         ...(input.nextGenerationAction
           ? { next_generation_action: input.nextGenerationAction }
           : {}),
