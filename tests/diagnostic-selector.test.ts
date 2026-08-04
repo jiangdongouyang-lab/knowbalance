@@ -5,20 +5,21 @@ import { loadKnowledgeBase } from "../src/knowledge/loader"
 describe("diagnostic item selector", () => {
   test("selects diagnostic questions from target, prerequisite, and weak historical sources", async () => {
     const knowledgeBase = await loadKnowledgeBase()
+    const learnerMemory = {
+      schema_version: "1.0",
+      learner_id: "learner-diagnostic",
+      mastery_by_source_id: { K006: 0.25 },
+      mastered_source_ids: [],
+      weak_source_ids: ["K006"],
+      completed_sessions: [],
+      recent_errors: [{ source_id: "K006", pattern: "branch_condition", count: 1 }],
+      updated_at: "2026-08-04T00:00:00.000Z",
+    }
     const selection = selectDiagnosticItems({
       knowledgeBase,
       target_source_ids: ["K018"],
       prerequisite_source_ids: ["K007", "K009"],
-      learner_memory: {
-        schema_version: "1.0",
-        learner_id: "learner-diagnostic",
-        mastery_by_source_id: { K006: 0.25 },
-        mastered_source_ids: [],
-        weak_source_ids: ["K006"],
-        completed_sessions: [],
-        recent_errors: [{ source_id: "K006", pattern: "branch_condition", count: 1 }],
-        updated_at: "2026-08-04T00:00:00.000Z",
-      },
+      learner_memory: learnerMemory,
       max_items: 5,
     })
 

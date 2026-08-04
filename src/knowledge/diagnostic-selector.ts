@@ -1,11 +1,14 @@
 import type { KnowledgeBase, KnowledgeQuizItem } from "./types"
-import type { LearnerMemorySnapshot } from "../orchestration/learner-memory"
+
+export interface DiagnosticLearnerMemoryInput {
+  weak_source_ids: string[]
+}
 
 export interface DiagnosticSelectorInput {
   knowledgeBase: KnowledgeBase
   target_source_ids: string[]
   prerequisite_source_ids: string[]
-  learner_memory?: LearnerMemorySnapshot
+  learner_memory?: DiagnosticLearnerMemoryInput
   max_items: number
 }
 
