@@ -224,6 +224,9 @@ describe("Role D → Role C durable HTTP runtime boundary", () => {
         learnerId: profile.learner_id,
       }, continuationRuntime)
       expect(advanceAttempt.status).toBe("blocked")
+      if (advanceAttempt.status !== "blocked") {
+        throw new Error(JSON.stringify(advanceAttempt))
+      }
       expect(advanceAttempt.stage).toBe("generation_review")
 
       const continued = await continueRoleCAfterSubmission({
