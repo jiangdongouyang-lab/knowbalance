@@ -6,7 +6,7 @@ import { retrieveKnowledge } from "../rag/retriever"
 import type { RagResult } from "../rag/retriever"
 import type { LearnerProfile, RagRequest } from "./types"
 
-// top_k=5 来自联调文档 §7 示例与 scripts/team-integration-demo.ts 的既定值
+// B→A 请求的 top_k 后端策略值，不依赖已下线的旧 D 联调脚本
 export const DEFAULT_TOP_K = 5
 
 // 全组约定的 query 格式：学习者水平：…；已掌握：…；薄弱点：…；学习目标：…

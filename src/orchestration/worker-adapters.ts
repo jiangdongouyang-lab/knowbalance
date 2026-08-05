@@ -661,7 +661,7 @@ function fillRequiredFacts(pathNode: LearningPathNode, evidencePack: ReturnType<
   }
 }
 
-class DeterministicCodeLabRunner implements CodeRunner {
+export class DeterministicCodeLabRunner implements CodeRunner {
   readonly runner_image_digest = DETERMINISTIC_RUNNER_DIGEST
 
   async execute(request: CodeExecutionRequest): Promise<CodeExecutionResult> {

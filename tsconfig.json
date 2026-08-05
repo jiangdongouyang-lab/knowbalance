@@ -9,5 +9,5 @@
     "types": ["bun-types"]
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["src/role-d-ui/**"]
+  "exclude": ["src/role-d-ui-v2/**"]
 }

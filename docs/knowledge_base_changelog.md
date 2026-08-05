@@ -17,7 +17,7 @@
 - 新增 B/C/D 联调说明：`docs/team_integration_guide.md`
 - 新增 B 调 A 的输入协议：`schemas/rag_request.schema.json`
 - 新增 C/D 消费样例：`examples/rag_result_example.json`
-- 新增端到端联调脚本：`scripts/team-integration-demo.ts`
+- 历史端到端联调脚本已下线；当前通过主 Agent持续会话 API 与 `src/role-d-ui-v2` 联调
 
 B/C/D 更新方式：
 
@@ -25,7 +25,7 @@ B/C/D 更新方式：
 git pull origin main
 bun install
 bun run check
-bun scripts/team-integration-demo.ts
+bun run role-d:v2:verify
 ```
 
 ## 当前知识库范围

@@ -56,7 +56,7 @@ export function selectDiagnosticItems(input: DiagnosticSelectorInput): Diagnosti
     }
   }
 
-  if (selected.length < input.max_items) {
+  if (selected.length === 0 && input.target_source_ids.length === 0) {
     for (const item of input.knowledgeBase.items) {
       if (selected.length >= input.max_items) break
       const quiz = item.quizItems.find((candidate) => candidate.type === "choice") ?? item.quizItems[0]
@@ -64,7 +64,7 @@ export function selectDiagnosticItems(input: DiagnosticSelectorInput): Diagnosti
       const key = `${quiz.sourceId}:${quiz.factId}:${quiz.question}`
       if (seen.has(key)) continue
       seen.add(key)
-      selected.push(toCandidate(item.title, item.difficulty, quiz, "fallback_coverage"))
+      selected.push(toCandidate(item.title, item.difficulty, quiz, "unmapped_goal_probe"))
     }
   }
 

@@ -26,8 +26,8 @@ KnowBalance 已经注册 `learning-orchestrator` 主 Agent 和 8 个角色子 Ag
 - `tests/agent-registry.test.ts`：验证 1 primary + 8 subagents。
 - `src/role-b-profile/`：B 画像链路真实实现。
 - `src/role-c-content/`：C 概念、代码实验、测评、审核恢复等真实实现。
-- `src/role-d-integration/` 与 `src/role-d-ui/`：D 集成与前端展示。
-- `scripts/team-integration-demo.ts`：B→A→C→D 联调演示。
+- `src/role-d-integration/` 与 `src/role-d-ui-v2/`：主 Agent边界适配与新版 D展示。
+- `scripts/learning-orchestrator-api.ts`：主 Agent持续会话 HTTP 服务入口。
 - `scripts/role-c-week3-evaluation.ts`：Week3 评测脚本。
 
 ### 2.2 主要缺口

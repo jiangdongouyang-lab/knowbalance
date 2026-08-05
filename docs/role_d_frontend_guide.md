@@ -1,199 +1,71 @@
-# Role D 前端与联调指南
+# Role D 新版前端使用说明
 
-Role D 提供 KnowBalance 的独立 Web 学习应用，负责把本机用户资料、B 学习者画像、A RAG 检索证据及 C 的公开学习资源整合为可操作、可解释、可恢复的学习流程。
-
-## 当前产品入口
-
-1. **首次本机建档**：用户主动填写称呼、专业/年级/职业、Python 了解程度、每周学习时间和接触过的编程语言。
-2. **用户切换**：同一浏览器可创建和切换多个本机用户；这些不是云端账号。
-3. **学习计划单**：每个用户拥有独立计划列表，可新建计划、选择计划继续上次阶段、删除当前计划。
-4. **学习流程**：客观诊断 → 学情画像 → 定制方案 → 学习实操 → 反馈状态。
-
-用户资料与计划资料分开：专业、总体 Python 自评和时间预算属于用户档案；计划名、目标、已学知识、薄弱知识、画像、检索、资源、作答及当前阶段属于单个计划。新建计划不会覆盖旧计划，也不要求重复填写用户背景。
-
-## 真实 A/B/C/D 执行链
-
-- **A：知识与检索**：Python 基础知识库、真实 facts/examples/quiz seeds 和规则检索。当前是关键词、同义词及规则扩展，不是 embedding 服务。
-- **B：画像构建**：`background-collector → self-assessor → objective-diagnostician → profile-builder` 的真实 prompt 与确定性参考实现。B 按 `objective > self > background` 合并证据并记录冲突。
-- **C：资源生成**：`concept-tutor`、`code-lab`、`tiered-evaluator` 通过可恢复审核流水线生成讲义、代码实验和分阶测评。
-- **D：学习交互**：采集用户/计划输入，展示画像、路径、检索证据、C 资源、Agent trace，保存作答和阶段，并提供本地恢复。
-
-浏览器只接收 public artifacts、公开 citations 和 trace。以下安全信息不会进入前端：
-
-- `answer_spec`
-- `hidden_tests`
-- `reference_solution`
-- `correct_option_id`
-- secure artifact references
-
-## 动态入学诊断
-
-D 不再固定只展示一道题，也不会硬编码固定数量：
-
-1. 先检查 A 的 retrieval trace，只有关键词、标题、事实、任务意图等真实语义命中的结果才作为诊断锚点；仅有难度加分的弱结果不会出题；
-2. 如果不足，则沿这些语义锚点的 `prerequisites` 关系补充前置知识题；
-3. 只使用知识库中带真实选项和答案的题；
-4. 有多少有效题就展示多少，最多 5 道；没有语义相关锚点时直接阻止创建并要求更换知识库支持的目标；
-5. 前置扩展在证据抽屉中明确标记，检索分为 0，不伪装成高相关结果。
-
-提交后，所有作答交给 B 的 `ObjectiveDiagnosisEvidence.items`。画像页显示：
-
-- 正确数 / 总题数；
-- 证据是否充分；
-- 当前**教学起点**，并明确不是最终能力评分；
-- 已掌握和优先补强概念；
-- 自评与客观证据冲突。
-
-B 还会用诊断题的 `source_id` 对齐概念表述，避免“循环”和“for 循环”因措辞不同同时出现在已掌握与待补强中。
-
-等级更新保持保守但不再“只降不升”：任一答错仍触发客观封顶；至少 3 道真实客观题全部答对时，教学起点可在自评基础上最多上调一档，且不会超过本轮题目实际覆盖的最高难度。
-
-## C 分阶测评作答
-
-Role D 按 C 返回的动态 `modality` 渲染：
-
-- `mcq`：选项按钮；
-- `true_false`：判断选项；
-- `trace`：代码追踪文本输入；
-- `short_answer`：简答输入；
-- `code`：基于 `starter_code` 的代码编辑区。
-
-所有公开题完成后才允许“提交整套测评”。答案支持：
-
-- 自动保存；
-- 刷新恢复；
-- 切换计划后恢复；
-- JSON 导出与导入；
-- 题目 ID 和选项 ID 外键校验。
-
-当前 D 已把公开作答转换为 C 的 `SubmissionEnvelope`，并通过 `/api/role-c/submit` 消费 C 返回的公开正式评分、逐目标掌握度及 `remediate/reinforce/advance/reprofile` 决策。D 会校验 run/session/learner/form/attempt/submission 身份和响应结构，不在浏览器计算分数，也不会恢复本地缓存或导入文件中的“正式评分”。
-
-当前接线使用本地 Vite dev/preview middleware 作为 D→C HTTP 适配层。模型模式使用 Docker Runner 和 `.tmp/role-c-runtime` 原子文件存储，学习周期可在服务重启后继续。没有配置 Provider 时生成接口明确返回配置缺失。
-
-## 本地用户与计划存储
-
-`localStorage` 使用版本化 workspace：
+当前活动前端只有：
 
 ```text
-LearningWorkspaceState
-├── activeUserId
-├── activePlanId
-├── users[]
-└── plans[]
-    ├── userId
-    ├── title
-    ├── updatedAt
-    └── session (完整 RoleDSession)
+src/role-d-ui-v2
 ```
 
-安全与迁移规则：
+它只调用 learning-orchestrator 主 Agent 的统一持续会话接口，不直接调用 A、B、C 或任何 Worker。
 
-- 旧版 `knowbalance.role-d.session` 单会话会自动迁移成一个本机用户和一个计划；
-- 用户只能选择或删除自己的计划；
-- 计划切换不会串联阶段、答案或 citations；
-- workspace 中计划归属与内部 learner ID 必须一致；身份冲突会拒绝，损坏 workspace 会回退到仍有效的 legacy 会话迁移；
-- 首次进入和刷新后先显示计划单，由用户选择继续哪个计划；
-- 当前没有真实登录、服务端账号或跨设备云同步。
-
-## 进度 JSON
-
-“进度管理”是团队联调、手动备份和换浏览器恢复的低优先级功能：
-
-- 导出当前选中的单个计划；
-- 导入成功后作为当前用户的**新计划**加入计划单，不覆盖其他计划；
-- 导入计划的内部 learner ID 会重新绑定当前本机用户，避免跨用户身份混入；
-- 导入前严格校验格式、版本、嵌套结构、citations、诊断答案和测评答案；伪造 `assessmentGraded` 等正式评分字段会被拒绝；
-- 导入失败不会改变现有计划。
-
-## Week 1 / Week 2 边界
-
-根据项目行动计划：
-
-### Week 1 已完成
-
-- 学习者背景与自评输入；
-- B 画像构建；
-- A 知识检索和可追溯证据；
-- 路径规划；
-- C 真实讲义、代码实验、分阶题；
-- D 本机用户、多计划、断点恢复、资源展示和完整公开题型作答；
-- 成绩统计金标路径端到端跑通。
-
-### Week 2 当前接入状态
-
-- **D 交互**：A/B 审核结果、C 公开正式评分、逐目标掌握度、动态决策、身份校验和跨计划隔离均已接入。
-- **C 后端**：digest-pinned Docker 代码执行、跨重启会话/掌握度、学习进展投递、审核恢复和下一轮生成已实现。
-- **Provider**：模型模式按 B 的正式路径动态生成；确定性 Provider 只用于显式离线回归。
-
-## 运行与验证
-
-```bash
-bun install
-bun run role-d:dev
-bun run check
-bun run role-d:test
-bun x tsc -p src/role-d-ui/tsconfig.json --noEmit
-bun run role-d:build
-bun audit
-```
-
-## 给 B/C 的共享运行步骤
-
-从 GitHub 新克隆后，直接运行：
-
-```bash
-git clone https://github.com/jiangdongouyang-lab/knowbalance.git
-cd knowbalance
-bun install --frozen-lockfile
-bun run role-d:dev -- --host 127.0.0.1 --port 5174
-```
-
-然后打开 `http://127.0.0.1:5174/`。网页壳本身不依赖 API Key 或 Docker；创建学习计划会调用本地 C 接口，未配置 Provider 时返回明确的配置错误。
-
-如果要复现模型 Provider + Docker Runner，再执行：
-
-```bash
-copy .env.role-c.example .env.role-c.local
-```
-
-填写 `.env.role-c.local` 中的 `ROLE_C_MODEL_ENDPOINT`、`ROLE_C_MODEL_ID` 和本机 API Key；安装并启动 Docker 后运行 `bun run docker:role-c:build`、`bun run docker:role-c:doctor`，再重启 Vite。不要提交 `.env.role-c.local`。
-
-联调记录包含运行环境、Provider 模式、runId 和页面终局 reason。模型 Provider + Docker 是通用目标的端到端验收路径。
-
-生产构建位于 `dist/role-d-ui/`。当前 Vite 开发/预览服务提供以下 C 接口，路径常量和数据类型统一定义在 `src/role-d-integration/contracts.ts`：
-
-| 接口 | 用途 |
-|---|---|
-| `POST /api/role-c/generate` | 生成首轮讲义、编程练习和测评 |
-| `POST /api/role-c/submit` | 提交正式测评并取得可信评分和下一步动作 |
-| `POST /api/role-c/continue` | 从已完成提交继续下一轮；需要新路径时返回 `awaiting_input` |
-| `POST /api/role-c/route-anchors` | 提交下一轮锚点题并冻结正式测评路线 |
-
-`continue` 只接收会话、提交、学习者身份，以及可选的 B 新路径/新画像；当前画像、反馈和历史证据由 C 从持久化记录读取，新路径证据由 C 在服务端向 A 刷新。部署纯静态 `dist` 时需要由 C/后端部署等价 API、可信 runner 和持久化存储，不能把 C 的安全逻辑打包进浏览器。
-
-## 主要目录
+## 正确拓扑
 
 ```text
-src/role-d-ui/src/
-├── components/       # 用户建档、用户切换、计划单、阶段组件、详情抽屉
-├── data/             # 明确标注的兼容演示 handoff
-├── domain/           # workspace、session、诊断、进度文件、A/B/C 适配
-├── screens/          # 聚焦式学习阶段页面
-├── test/             # 测试环境
-├── App.tsx
-└── styles.css
+用户 → Role D v2 → learning-orchestrator 主 Agent → 八个 Worker / A-B-C → 主 Agent持久状态 → Role D v2展示
 ```
 
-## 上游兼容
+## 启动
 
-`adaptHandoff()` 同时兼容 camelCase / snake_case，例如：
+终端一：
 
-- `b_profile` / `profile`
-- `a_rag_result` / `rag_result`
-- `workflow_events` / `workflowEvents`
-- `learning_path` / `learningPath`
-- `sourceId` / `source_id`
-- `factId` / `fact_id`
-- `retrievalTrace` / `retrieval_trace`
+```bash
+bun scripts/learning-orchestrator-api.ts --host=127.0.0.1 --port=8787 --data-root=.tmp/role-d-ui-v2-orchestrator
+```
 
-缺少引用的学习资源不会被自动补造引用，而会进入 `evidenceGaps` 并在界面中明确提示。
+终端二：
+
+```bash
+bun run role-d:v2:dev -- --host 127.0.0.1 --port 4175
+```
+
+浏览器打开：
+
+```text
+http://127.0.0.1:4175/
+```
+
+## 验证
+
+```bash
+bun run role-d:v2:test
+bun x tsc -p src/role-d-ui-v2/tsconfig.json --noEmit
+bun run role-d:v2:build
+```
+
+或一次运行：
+
+```bash
+bun run role-d:v2:verify
+```
+
+## Role D运行时边界
+
+Role D只调用：
+
+- `POST /orchestrator/sessions`
+- `GET /orchestrator/sessions/:id`
+- `POST /orchestrator/sessions/:id/commands`
+- `GET /orchestrator/sessions/:id/events`
+
+Role D不负责：
+
+- 生成或挑选专业题目；
+- 构建画像、RAG和学习路径；
+- 直连A/B/C；
+- 编排八个Worker；
+- 本地判分或决定下一步；
+- 保存权威mastery、评分或路径状态。
+
+## 当前联调限制
+
+当前主 Agent持续会话只接受 `deterministic`模式。该限制属于主 Agent后端，不属于Role D。主 Agent提供生产模式后，Role D客户端再移除对应模式参数。
