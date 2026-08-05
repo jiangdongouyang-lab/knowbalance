@@ -7,7 +7,6 @@ import {
   buildGenerationSpec,
   createRoleCAgents,
   defineLearningPathNode,
-  DeterministicCodeLabContentProvider,
   deliverLearningSessionToD,
   InMemoryLearningCycleStore,
   InMemoryMasteryStateStore,
@@ -29,7 +28,17 @@ import {
   type SecureArtifactStore,
 } from "../src/role-c-content"
 import type { LearnerProfile } from "../src/role-b-profile/types"
+import { ROLE_C_PROMPT_MANIFEST_VERSION } from "../src/role-c-content/prompts/common-policy"
+import { ModelBackedRoleCContentProvider } from "../src/role-c-content/providers/model-backed-provider"
+import { modelBackedProviderOptionsFromEnv } from "../src/role-c-content/providers/model-backed-provider-env"
+import { createRoleCModelGatewayFromEnv } from "../src/role-c-content/contracts/model-gateway"
 
+function createProvider() {
+  const gateway = createRoleCModelGatewayFromEnv(process.env)
+  return new ModelBackedRoleCContentProvider(gateway, modelBackedProviderOptionsFromEnv(process.env))
+}
+
+const CURRENT_MODEL_HASH = createRoleCModelGatewayFromEnv(process.env).model_config_hash
 const runnerDigest = `sha256:${"d".repeat(64)}`
 
 class FixtureCodeRunner implements CodeRunner {
@@ -152,14 +161,14 @@ async function readyFixture(runId: string) {
     path_node: path,
     evidence_pack: evidence,
     versions: {
-      prompt_version: "cycle-test-prompts-v1",
-      model_config_hash: "cycle-test-provider-v1",
+      prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+      model_config_hash: CURRENT_MODEL_HASH,
       runner_image_digest: runnerDigest,
     },
     seed: 29,
   })
   if (!built.ok) throw new Error(JSON.stringify(built))
-  const agents = createRoleCAgents(new DeterministicCodeLabContentProvider(), {
+  const agents = createRoleCAgents(createProvider(), {
     code_lab: codeVerifier,
     assessment: assessmentVerifier,
   })

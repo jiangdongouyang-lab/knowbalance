@@ -59,8 +59,7 @@ describe("Role D → Role C durable HTTP runtime boundary", () => {
         runId: "RUN-DURABLE-RUNTIME-RESTART",
         pathNode,
       }, {
-        providerMode: "deterministic",
-        allowDeterministicFallback: true,
+        providerMode: "model",
         dataDirectory,
         reviewPort: alwaysPassReviewPort(),
       })
@@ -208,8 +207,7 @@ describe("Role D → Role C durable HTTP runtime boundary", () => {
         },
       })
       const continuationRuntime = {
-        providerMode: "deterministic" as const,
-        allowDeterministicFallback: true,
+        providerMode: "model" as const,
         dataDirectory,
         reviewPort: alwaysPassReviewPort(),
       }

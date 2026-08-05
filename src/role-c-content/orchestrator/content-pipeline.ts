@@ -956,8 +956,8 @@ function failedResult(
   }
 }
 
-function errorMessage(_error: unknown): string {
-  return "C 内部依赖调用失败"
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : "C 内部依赖调用失败"
 }
 
 function blockedResult(
