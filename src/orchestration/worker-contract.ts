@@ -77,6 +77,8 @@ export function validateWorkerResult(
     })
   }
 
+  validateExecutionEnvelope(invocation, result, errors)
+
   validateContainers(result, errors)
   validateNextState(invocation, result, errors)
 
@@ -85,6 +87,44 @@ export function validateWorkerResult(
   }
 
   return { ok: true, result }
+}
+
+function validateExecutionEnvelope(
+  invocation: WorkerInvocation,
+  result: WorkerResult,
+  errors: WorkerError[],
+): void {
+  if (!isRecord(result.execution)) {
+    errors.push(fatal("EXECUTION_ENVELOPE_INVALID", "execution must be a non-null object"))
+    return
+  }
+
+  if (result.execution.worker !== invocation.worker) {
+    errors.push(fatal(
+      "EXECUTION_WORKER_MISMATCH",
+      `expected execution.worker ${invocation.worker}, received ${String(result.execution.worker)}`,
+    ))
+  }
+
+  if (result.execution.status !== result.status) {
+    errors.push(fatal(
+      "EXECUTION_STATUS_MISMATCH",
+      `expected execution.status ${result.status}, received ${String(result.execution.status)}`,
+    ))
+  }
+
+  if (typeof result.execution.execution_id !== "string" || result.execution.execution_id.trim().length === 0) {
+    errors.push(fatal("EXECUTION_ID_INVALID", "execution.execution_id must be a non-empty string"))
+  }
+
+  const expectedMarker = expectedMarkerForWorker(invocation.worker)
+  if (result.execution.marker !== expectedMarker) {
+    errors.push({
+      code: "EXECUTION_MARKER_MISMATCH",
+      message: `expected execution.marker ${expectedMarker}, received ${String(result.execution.marker)}`,
+      severity: "recoverable",
+    })
+  }
 }
 
 function validateContainers(result: WorkerResult, errors: WorkerError[]): void {

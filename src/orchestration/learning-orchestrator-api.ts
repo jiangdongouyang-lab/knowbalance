@@ -6,22 +6,7 @@ import {
   publicSessionView,
   type InteractiveSessionRecord,
 } from "./interactive-session"
-import type { LearnerRequest, OrchestrationMode } from "./types"
-
-interface RunRequestBody {
-  root_dir?: string
-  run_id?: string
-  session_id?: string
-  mode?: OrchestrationMode
-  learner_request?: LearnerRequest
-}
-
-interface SessionRequestBody {
-  session_id?: string
-  run_id?: string
-  mode?: OrchestrationMode
-  learner_request?: LearnerRequest
-}
+import { validateOrchestratorApiBody, type RunRequestBody, type SessionRequestBody } from "./orchestrator-api-schema"
 
 interface ErrorBody {
   error: {
@@ -67,17 +52,17 @@ export function createLearningOrchestratorApiHandler(
 
       if (request.method === "POST" && url.pathname === "/orchestrator/runs") {
         const body = await parseJson<RunRequestBody>(request)
-        const validationErrors = validateRunRequestBody(body)
-        if (validationErrors.length > 0) {
-          return errorResponse(400, "INVALID_ORCHESTRATOR_REQUEST", "Invalid learning orchestrator request", validationErrors)
+        const validation = validateOrchestratorApiBody("run", body)
+        if (!validation.ok) {
+          return errorResponse(400, "INVALID_ORCHESTRATOR_REQUEST", "Invalid learning orchestrator request", validation.errors)
         }
 
         const result = await runLearningOrchestrator({
           root_dir: dataRoot,
-          run_id: body.run_id,
-          session_id: body.session_id,
-          mode: body.mode!,
-          learner_request: body.learner_request!,
+          run_id: validation.value.run_id,
+          session_id: validation.value.session_id,
+          mode: validation.value.mode!,
+          learner_request: validation.value.learner_request!,
         })
 
         return jsonResponse({
@@ -99,18 +84,18 @@ export function createLearningOrchestratorApiHandler(
       if (request.method === "POST" && url.pathname === "/orchestrator/sessions") {
         const principal = requirePrincipal(request)
         const body = await parseJson<SessionRequestBody>(request)
-        const errors = validateSessionRequestBody(body)
-        if (errors.length > 0) {
-          return errorResponse(400, "INVALID_SESSION_REQUEST", "Invalid learning orchestrator session request", errors)
+        const validation = validateOrchestratorApiBody("session", body)
+        if (!validation.ok) {
+          return errorResponse(400, "INVALID_SESSION_REQUEST", "Invalid learning orchestrator session request", validation.errors)
         }
-        if (body.learner_request!.learner_id !== principal) {
+        if (validation.value.learner_request!.learner_id !== principal) {
           throw new InteractiveSessionError("LEARNER_IDENTITY_MISMATCH", "Authenticated learner does not match learner_request", 403)
         }
         const record = await sessions.create({
-          session_id: body.session_id,
-          run_id: body.run_id,
-          mode: body.mode!,
-          learner_request: body.learner_request!,
+          session_id: validation.value.session_id,
+          run_id: validation.value.run_id,
+          mode: validation.value.mode!,
+          learner_request: validation.value.learner_request!,
           owner_id: principal,
         })
         return jsonResponse(publicSessionView(record), 201)
@@ -134,8 +119,12 @@ export function createLearningOrchestratorApiHandler(
       if (request.method === "POST" && commandMatch) {
         const record = await sessions.load(commandMatch[1]!)
         assertOwner(record, requirePrincipal(request))
-        const command = await parseJson<import("./interactive-session").InteractiveSessionCommand>(request)
-        return jsonResponse(await sessions.command(commandMatch[1]!, command))
+        const body = await parseJson<import("./interactive-session").InteractiveSessionCommand>(request)
+        const validation = validateOrchestratorApiBody("command", body)
+        if (!validation.ok) {
+          return errorResponse(400, "INVALID_COMMAND", "Invalid learning orchestrator command", validation.errors)
+        }
+        return jsonResponse(await sessions.command(commandMatch[1]!, validation.value))
       }
 
       return errorResponse(404, "NOT_FOUND", `No learning-orchestrator route for ${request.method} ${url.pathname}`)
@@ -161,28 +150,6 @@ export function startLearningOrchestratorApiServer(
     hostname: options.hostname ?? "127.0.0.1",
     fetch: createLearningOrchestratorApiHandler({ data_root: options.data_root }),
   })
-}
-
-function validateRunRequestBody(body: RunRequestBody): string[] {
-  const errors: string[] = []
-  if (body.mode !== "scaffold" && body.mode !== "deterministic") errors.push("mode must be scaffold or deterministic")
-  validateLearnerRequest(body.learner_request, errors)
-  return errors
-}
-
-function validateSessionRequestBody(body: SessionRequestBody): string[] {
-  const errors: string[] = []
-  if (body.mode !== "deterministic") errors.push("interactive sessions currently require deterministic mode")
-  validateLearnerRequest(body.learner_request, errors)
-  return errors
-}
-
-function validateLearnerRequest(value: LearnerRequest | undefined, errors: string[]): void {
-  if (!value || typeof value !== "object") {
-    errors.push("learner_request is required")
-  } else if (!value.goal || typeof value.goal !== "string") {
-    errors.push("learner_request.goal is required")
-  }
 }
 
 function requirePrincipal(request: Request): string {

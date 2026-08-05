@@ -99,6 +99,13 @@ export interface WorkerError {
   details?: Record<string, unknown>
 }
 
+export interface WorkerExecutionEnvelope {
+  worker: WorkerName
+  status: "completed" | "blocked" | "failed"
+  execution_id: string
+  marker: string
+}
+
 export interface WorkerInvocation {
   schema_version: "1.0"
   session_id: string
@@ -122,6 +129,7 @@ export interface WorkerResult {
   stage: OrchestrationState
   status: "completed" | "blocked" | "failed"
   marker: string
+  execution: WorkerExecutionEnvelope
   summary: string
   artifacts: Record<string, unknown>
   output_refs: string[]
@@ -160,6 +168,7 @@ export interface TraceEvent {
   output_refs: string[]
   evidence_refs: EvidenceRef[]
   duration_ms?: number
+  result_size_bytes?: number
   error?: WorkerError
   timestamp: string
 }

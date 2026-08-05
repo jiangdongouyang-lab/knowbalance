@@ -382,6 +382,12 @@ function completedResult(
     stage: invocation.stage,
     status: "completed",
     marker: expectedMarkerForWorker(invocation.worker),
+    execution: {
+      worker: invocation.worker,
+      status: "completed",
+      execution_id: `${invocation.run_id}:${invocation.step_index}:${invocation.worker}`,
+      marker: expectedMarkerForWorker(invocation.worker),
+    },
     summary,
     artifacts: {
       ...artifacts,
@@ -469,6 +475,12 @@ function failedResult(
     stage: invocation.stage,
     status: "failed",
     marker: expectedMarkerForWorker(invocation.worker),
+    execution: {
+      worker: invocation.worker,
+      status: "failed",
+      execution_id: `${invocation.run_id}:${invocation.step_index}:${invocation.worker}`,
+      marker: expectedMarkerForWorker(invocation.worker),
+    },
     summary: error.message,
     artifacts: {
       mode: invocation.mode,
