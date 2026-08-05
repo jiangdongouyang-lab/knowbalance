@@ -62,7 +62,7 @@ export function createTieredEvaluatorAgent(
             )
           : { answer_key_verified: false, issues: ["未配置独立 assessment verifier"] }
         const activeVerifier = verifier
-        const repairAfterVerification = provider.repairAssessmentAfterVerification
+        const repairAfterVerification = provider.repairAssessmentAfterVerification?.bind(provider)
         const verificationRepairLimit = activeVerifier
           && repairAfterVerification
           && request.generation_spec.policies.max_semantic_revision >= 1

@@ -19,6 +19,7 @@ import { generateAssessment } from "../role-c-content/agents/tiered-evaluator"
 import { ModelBackedRoleCContentProvider } from "../role-c-content/providers/model-backed-provider"
 import { modelBackedProviderOptionsFromEnv } from "../role-c-content/providers/model-backed-provider-env"
 import { createRoleCModelGatewayFromEnv } from "../role-c-content/contracts/model-gateway"
+import { ROLE_C_PROMPT_MANIFEST_VERSION } from "../role-c-content/prompts/common-policy"
 import { TrustedCodeLabVerifier } from "../role-c-content/validators/code-lab-validator"
 import { TrustedAssessmentVerifier } from "../role-c-content/validators/assessment-validator"
 import type { RagResult, RagResultItem } from "../rag/retriever"
@@ -289,14 +290,15 @@ async function runDeterministicWorkerAdapter(
       rag_version: "deterministic-rag-v1",
     })
     const pathNode = fillRequiredFacts(pathArtifact.value.next_path_node, evidencePack)
+    const gateway = createRoleCModelGatewayFromEnv(process.env)
     const specResult = buildGenerationSpec({
       run_id: invocation.run_id,
       profile_snapshot: profileSnapshot,
       path_node: pathNode,
       evidence_pack: evidencePack,
       versions: {
-        prompt_version: "deterministic-concept-v1",
-        model_config_hash: "deterministic-local-provider",
+        prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+        model_config_hash: gateway.model_config_hash,
         runner_image_digest: DETERMINISTIC_RUNNER_DIGEST,
       },
       seed: 0,

@@ -90,7 +90,6 @@ import {
   type SubmissionEnvelope,
 } from "../role-c-content"
 
-const CONFORMANCE_DIGEST = `sha256:${"d".repeat(64)}`
 const defaultInMemoryLearningPersistence: RoleCLearningPersistence = {
   cycleStore: new InMemoryLearningCycleStore(),
   secureStore: new InMemorySecureArtifactStore(),
@@ -168,10 +167,7 @@ export function createAtomicRoleCLearningPersistence(
 
 export async function resolveRoleCCodeRunner(runtime: Pick<RoleCForRoleDRuntimeOptions, "providerMode" | "runner" | "env" | "dockerRunnerFactory">): Promise<CodeRunner> {
   if (runtime.runner) return runtime.runner
-  if (runtime.providerMode === "model") {
-    return (runtime.dockerRunnerFactory ?? createDockerPythonCodeRunnerFromEnv)(runtime.env ?? process.env)
-  }
-  return new RoleDConformanceRunner()
+  return (runtime.dockerRunnerFactory ?? createDockerPythonCodeRunnerFromEnv)(runtime.env ?? process.env)
 }
 
 export async function generateRoleCForRoleDWithRuntime(
@@ -1453,29 +1449,3 @@ function stageLabel(event: AgentTraceEvent): string {
   return event.event_type === "c.pipeline.ready" ? "C 内容发布" : "C 入口校验"
 }
 
-/** Deterministic contract runner used by Role C's reproducible local reference path. */
-class RoleDConformanceRunner implements CodeRunner {
-  readonly runner_image_digest = CONFORMANCE_DIGEST
-
-  async execute(request: CodeExecutionRequest): Promise<CodeExecutionResult> {
-    const declaredTests = request.test_suite?.tests.map((entry) => entry.test_id) ?? []
-    const testIds = declaredTests.length > 0
-      ? declaredTests
-      : ["AT-O3-BASIC", "AT-O3-SINGLE", "AT-O3-DECIMAL", "AT-O3-FRACTION"]
-    const failed = request.code.includes("return None") || request.code.includes("pass\n")
-      ? testIds
-      : request.code.includes("total = score")
-        ? testIds
-        : request.code.includes("scores[:-1]") || request.code.includes("return 80") || request.code.includes("// count")
-          ? testIds
-          : []
-    return {
-      status: failed.length === 0 ? "passed" : "failed",
-      passed_tests: testIds.length - failed.length,
-      total_tests: testIds.length,
-      score_ratio: testIds.length === 0 ? 0 : (testIds.length - failed.length) / testIds.length,
-      failure_codes: failed.map((testId) => `${testId}:assertion_failed`),
-      runner_image_digest: this.runner_image_digest,
-    }
-  }
-}

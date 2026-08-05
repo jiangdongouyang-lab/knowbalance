@@ -47,6 +47,7 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 【micro_check 即时检测】
 - 考察核心理解而非记忆细节，不能通过"蒙"答对
 - 2-4个选项，每个错误选项对应一个具体的 misconception
+- micro_check_options 每个选项文本必须互不相同；不得出现重复或仅标点差异的选项
 - 题面清晰具体，与 worked_example 使用不同情境
 
 【hints 提示层级】
