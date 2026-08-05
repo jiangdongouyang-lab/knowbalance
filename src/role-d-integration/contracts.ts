@@ -170,6 +170,8 @@ export type RoleCForRoleDResult =
         formId: string
         attemptNo: number
       }
+      /** Exact reviewed public Role C artifacts; secure artifacts are excluded. */
+      reviewedRelease?: RoleCReviewedReleaseDelivery
       audit?: RoleDContentAuditSummary
       recovery?: RoleDReviewRecoverySummary
       finalContext: RoleDFinalContentContext

@@ -32,4 +32,30 @@ describe("diagnostic item selector", () => {
     expect(selection.items.every((item) => item.question.length > 0 && item.selection_reason.length > 0)).toBe(true)
     expect(selection.rationale.join("\n")).toContain("target")
   })
+
+  test("does not fill a focused target to five with unrelated knowledge", async () => {
+    const knowledgeBase = await loadKnowledgeBase()
+    const selection = selectDiagnosticItems({
+      knowledgeBase,
+      target_source_ids: ["K007"],
+      prerequisite_source_ids: ["K002", "K003"],
+      max_items: 5,
+    })
+
+    expect(selection.items.map((item) => item.source_id)).toEqual(["K007", "K002", "K003"])
+    expect(selection.items.every((item) => ["K007", "K002", "K003"].includes(item.source_id))).toBe(true)
+  })
+
+  test("uses an honest broad probe only when a custom goal cannot map to the knowledge base", async () => {
+    const knowledgeBase = await loadKnowledgeBase()
+    const selection = selectDiagnosticItems({
+      knowledgeBase,
+      target_source_ids: [],
+      prerequisite_source_ids: [],
+      max_items: 5,
+    })
+
+    expect(selection.items).toHaveLength(5)
+    expect(selection.items.every((item) => item.selection_reason === "unmapped_goal_probe")).toBe(true)
+  })
 })

@@ -374,6 +374,7 @@ export async function generateRoleCForRoleDWithRuntime(
       formId: assessment.payload!.form_id,
       attemptNo: 1,
     },
+    reviewedRelease: createReviewedReleaseDelivery(pipeline),
     ...(audit ? { audit } : {}),
     recovery: toRoleDRecovery(pipeline.recovery),
     finalContext: {
