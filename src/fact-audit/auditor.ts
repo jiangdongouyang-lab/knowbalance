@@ -3,7 +3,7 @@ import { buildEvidenceIndex, buildEvidenceIndexFromPack } from "./evidence-index
 import type { CheckedClaim, EvidenceIndex, FactAuditConflict, FactAuditInput, FactAuditResult, FactAuditStatus } from "./types"
 
 const EXTERNAL_KNOWLEDGE_TERMS = [
-  "Transformer", "自注意力", "神经网络", "梯度下降", "CNN",
+  "Transformer", "自注意力", "梯度下降", "CNN",
   "Pandas", "NumPy", "matplotlib", "数据框", "DataFrame",
   "λ", "yield",
   "闭包", "作用域", "global", "nonlocal",
@@ -15,7 +15,7 @@ const EXTERNAL_KNOWLEDGE_TERMS = [
   "单元测试", "unittest", "pytest",
   "pip", "虚拟环境", "venv", "conda",
   "git", "版本控制", "GitHub",
-  "AI", "机器学习", "深度学习", "大模型", "LLM",
+  "大模型",
 ]
 const TOKEN_PATTERN = /[A-Za-z]+|[\u4e00-\u9fff]{2,}/g
 
@@ -63,7 +63,8 @@ export function auditGeneratedContent(input: FactAuditInput): FactAuditResult {
       continue
     }
 
-    const externalTerm = EXTERNAL_KNOWLEDGE_TERMS.find((term) => block.text.includes(term))
+    const externalTerm = EXTERNAL_KNOWLEDGE_TERMS.find((term) =>
+      block.text.includes(term) && !isTermCoveredByCitedEvidence(term, block.text, block.citations, evidenceIndex))
     if (externalTerm) {
       checkedClaims.push({
         blockId: block.blockId,
@@ -231,6 +232,18 @@ function resolveAuditEvidence(input: FactAuditInput): {
       issue: "缺少审核证据：必须提供 ragResult 或冻结 evidencePack",
     },
   }
+}
+
+function isTermCoveredByCitedEvidence(
+  term: string,
+  claim: string,
+  citations: { source_id: string; fact_id: string }[],
+  evidenceIndex: EvidenceIndex,
+): boolean {
+  return citations.some((citation) => {
+    const fact = evidenceIndex.get(`${citation.source_id}:${citation.fact_id}`)
+    return Boolean(fact?.content.includes(term) || fact?.source_id && claim.includes(fact.source_id))
+  })
 }
 
 function deriveStatus(checkedClaims: CheckedClaim[]): FactAuditStatus {
