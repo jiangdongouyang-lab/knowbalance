@@ -490,8 +490,7 @@ function alwaysPassRoleCReviewPort(): NonNullable<RoleCForRoleDRuntimeOptions["r
 function roleCRuntime(dataRoot: string): RoleCForRoleDRuntimeOptions {
   const dataDirectory = join(dataRoot, "role-c")
   return {
-    providerMode: "deterministic" as const,
-    allowDeterministicFallback: true,
+    providerMode: "model" as const,
     dataDirectory,
     learningPersistence: createAtomicRoleCLearningPersistence(dataDirectory),
     reviewPort: alwaysPassRoleCReviewPort(),

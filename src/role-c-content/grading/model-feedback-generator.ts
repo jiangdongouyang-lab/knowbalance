@@ -4,7 +4,7 @@ import type { ModelGateway } from "../contracts/model-gateway"
 import {
   EVALUATOR_FEEDBACK_PROMPT_VERSION,
   EVALUATOR_FEEDBACK_SYSTEM_PROMPT,
-} from "../prompts/evaluator-feedback.v1"
+} from "../prompts"
 import { validatePublicArtifactNoSecrets } from "../validators/public-secure-leak-validator"
 import { getRoleCModelOutputSchema, validateRoleCSchema } from "../validators/runtime-schema-validator"
 

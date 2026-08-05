@@ -23,7 +23,6 @@ for (const [index, evaluationCase] of cases.entries()) {
     runId: `${evaluationRunId}-${index + 1}-${evaluationCase.case_id}`,
     runtime: {
       providerMode: args.mode,
-      allowDeterministicFallback: args.mode === "deterministic",
       env,
     },
   }))
@@ -49,9 +48,9 @@ interface CliArgs {
 }
 
 function parseArgs(values: string[]): CliArgs {
-  const mode = option(values, "--mode") ?? "deterministic"
-  if (mode !== "deterministic" && mode !== "model") {
-    throw new Error("--mode 只允许 deterministic 或 model")
+  const mode = option(values, "--mode") ?? "model"
+  if (mode !== "model") {
+    throw new Error("--mode 只允许 model（确定性模板已删除）")
   }
   const caseIds = values
     .filter((value) => value.startsWith("--case-id="))

@@ -5,11 +5,23 @@ import {
   adaptLearnerProfile,
   adaptRagResult,
   buildGenerationSpec,
-  DeterministicConceptContentProvider,
   generateConceptLesson,
+  ModelBackedRoleCContentProvider,
+  modelBackedProviderOptionsFromEnv,
   ROLE_C_PROMPT_MANIFEST_VERSION,
 } from "../src/role-c-content"
+import { createRoleCModelGatewayFromEnv } from "../src/role-c-content/contracts/model-gateway"
 import { buildInitialRoleCContext } from "../src/role-d-integration/initial-learning-path"
+
+function resolveProvider(): ModelBackedRoleCContentProvider {
+  try {
+    const gateway = createRoleCModelGatewayFromEnv(process.env)
+    return new ModelBackedRoleCContentProvider(gateway, modelBackedProviderOptionsFromEnv(process.env))
+  } catch (error) {
+    console.error("模型 Provider 不可用。请复制 .env.role-c.example 为 .env.role-c.local 并配置模型参数。")
+    process.exit(1)
+  }
+}
 
 const profile = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
 const kb = await loadKnowledgeBase()
@@ -47,7 +59,7 @@ const specResult = buildGenerationSpec({
 const conceptArtifact = specResult.ok
   ? await generateConceptLesson(
       { generation_spec: specResult.spec, evidence_pack: evidencePack },
-      new DeterministicConceptContentProvider(),
+      resolveProvider(),
     )
   : undefined
 

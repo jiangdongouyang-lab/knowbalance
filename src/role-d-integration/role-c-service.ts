@@ -45,7 +45,6 @@ import {
   createReviewRecoveryStatusDelivery,
   createRoleCAgents,
   defineLearningPathNode,
-  DeterministicCodeLabContentProvider,
   createDockerPythonCodeRunnerFromEnv,
   InMemoryLearningCycleStore,
   InMemoryMasteryStateStore,
@@ -276,9 +275,10 @@ export async function generateRoleCForRoleDWithRuntime(
     }
   }
 
-  const provider = runtime.provider ?? (modelGateway
-    ? new ModelBackedRoleCContentProvider(modelGateway, modelBackedProviderOptionsFromEnv(runtimeEnv))
-    : new DeterministicCodeLabContentProvider())
+  const provider = runtime.provider ?? new ModelBackedRoleCContentProvider(
+    modelGateway!,
+    modelBackedProviderOptionsFromEnv(runtimeEnv),
+  )
   const agents = createRoleCAgents(provider, {
     code_lab: new TrustedCodeLabVerifier(runner),
     assessment: new TrustedAssessmentVerifier(runner),
@@ -720,12 +720,10 @@ export async function continueRoleCAfterSubmission(
         : "C 的模型 Provider 或 Docker CodeRunner 不可用",
     }
   }
-  const provider = runtime.provider ?? (modelGateway
-    ? new ModelBackedRoleCContentProvider(
-        modelGateway,
-        modelBackedProviderOptionsFromEnv(runtimeEnv),
-      )
-    : new DeterministicCodeLabContentProvider())
+  const provider = runtime.provider ?? new ModelBackedRoleCContentProvider(
+    modelGateway!,
+    modelBackedProviderOptionsFromEnv(runtimeEnv),
+  )
   const agents = createRoleCAgents(provider, {
     code_lab: new TrustedCodeLabVerifier(runner),
     assessment: new TrustedAssessmentVerifier(runner),
@@ -1030,13 +1028,14 @@ export async function routeRoleCAssessmentAnchors(
 function roleCProviderConfigurationIssue(
   runtime: RoleCForRoleDRuntimeOptions,
 ): string | undefined {
-  const explicitOfflineMode = runtime.providerMode === "deterministic"
-    && runtime.allowDeterministicFallback === true
-  return !runtime.provider
-    && runtime.providerMode !== "model"
-    && !explicitOfflineMode
-    ? "C 的通用内容生成模型尚未配置。请设置 ROLE_C_PROVIDER_MODE=model、模型接口地址和模型名称；离线金标模式需显式设置 ROLE_C_PROVIDER_MODE=deterministic。"
-    : undefined
+  if (runtime.provider) return undefined
+  if (runtime.providerMode === "deterministic") {
+    return "确定性离线模板 Provider 已删除。请设置 ROLE_C_PROVIDER_MODE=model、模型接口地址和模型名称。"
+  }
+  if (runtime.providerMode !== "model") {
+    return "C 的通用内容生成模型尚未配置。请设置 ROLE_C_PROVIDER_MODE=model、模型接口地址和模型名称。"
+  }
+  return undefined
 }
 
 function resolveAdaptiveJournal(

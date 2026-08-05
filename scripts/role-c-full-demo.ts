@@ -14,13 +14,14 @@ import {
   deliverDynamicFeedbackToD,
   deliverRoleCToB,
   deliverRoleCToD,
-  DeterministicCodeLabContentProvider,
   executePreparedNextRound,
   InMemoryLearningCycleStore,
   InMemoryMasteryStateStore,
   InMemoryNextRoundExecutionJournal,
   InMemorySecureArtifactStore,
   LearningCycleService,
+  ModelBackedRoleCContentProvider,
+  modelBackedProviderOptionsFromEnv,
   ROLE_C_PROMPT_MANIFEST_VERSION,
   runReviewedCPipeline,
   TrustedAssessmentVerifier,
@@ -31,6 +32,17 @@ import {
   type RoleDPublicDeliveryPort,
   type SubmissionEnvelope,
 } from "../src/role-c-content"
+import { createRoleCModelGatewayFromEnv } from "../src/role-c-content/contracts/model-gateway"
+
+function resolveProvider(): ModelBackedRoleCContentProvider {
+  try {
+    const gateway = createRoleCModelGatewayFromEnv(process.env)
+    return new ModelBackedRoleCContentProvider(gateway, modelBackedProviderOptionsFromEnv(process.env))
+  } catch (error) {
+    console.error("模型 Provider 不可用。请复制 .env.role-c.example 为 .env.role-c.local 并配置模型参数。")
+    process.exit(1)
+  }
+}
 
 const runner = await createDockerPythonCodeRunnerFromEnv()
 const profileFixture = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
@@ -108,7 +120,7 @@ if (!built.ok) {
   process.exit(1)
 }
 
-const provider = new DeterministicCodeLabContentProvider()
+const provider = resolveProvider()
 const agents = createRoleCAgents(provider, {
   code_lab: new TrustedCodeLabVerifier(runner),
   assessment: new TrustedAssessmentVerifier(runner),

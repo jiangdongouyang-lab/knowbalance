@@ -9,7 +9,6 @@ import {
   buildGenerationSpec,
   createRoleCModelGatewayFromEnv,
   defineLearningPathNode,
-  DeterministicConceptContentProvider,
   generateConceptLesson,
   modelBackedProviderOptionsFromEnv,
   ModelBackedRoleCContentProvider,
@@ -105,12 +104,10 @@ try {
     }
   }
 
-  const upstreamConcept = modelConcept?.status === "ready" && modelConcept.payload
-    ? modelConcept
-    : await generateConceptLesson(conceptRequest, new DeterministicConceptContentProvider())
-  if (upstreamConcept.status !== "ready" || !upstreamConcept.payload) {
-    throw new Error("DETERMINISTIC_CONCEPT_FIXTURE_UNAVAILABLE")
+  if (!modelConcept || modelConcept.status !== "ready" || !modelConcept.payload) {
+    throw new Error("模型概念生成失败：无法获取 upstream concept artifact。请确认模型已正确配置且能正常生成内容。")
   }
+  const upstreamConcept = modelConcept
 
   const labRequest = {
     generation_spec: built.spec,

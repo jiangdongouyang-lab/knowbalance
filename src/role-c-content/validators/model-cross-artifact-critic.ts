@@ -3,7 +3,7 @@ import type { ModelGateway } from "../contracts/model-gateway"
 import {
   CROSS_ARTIFACT_CRITIC_PROMPT_VERSION,
   CROSS_ARTIFACT_CRITIC_SYSTEM_PROMPT,
-} from "../prompts/cross-artifact-critic.v1"
+} from "../prompts"
 import { getRoleCModelOutputSchema, validateRoleCSchema } from "./runtime-schema-validator"
 import type {
   AlignmentObjection,

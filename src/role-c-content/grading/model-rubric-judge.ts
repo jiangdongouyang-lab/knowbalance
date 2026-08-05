@@ -1,6 +1,6 @@
 import { contentHash } from "../contracts/common"
 import type { ModelGateway } from "../contracts/model-gateway"
-import { EVALUATOR_GRADER_PROMPT_VERSION, EVALUATOR_GRADER_SYSTEM_PROMPT } from "../prompts/evaluator-grader.v1"
+import { EVALUATOR_GRADER_PROMPT_VERSION, EVALUATOR_GRADER_SYSTEM_PROMPT } from "../prompts"
 import { getRoleCModelOutputSchema, validateRoleCSchema } from "../validators/runtime-schema-validator"
 import type { BlindRubricJudge, BlindRubricJudgeRequest, BlindRubricJudgeResult } from "./grade-submission"
 
