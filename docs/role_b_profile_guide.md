@@ -64,7 +64,7 @@ B 把学习者的自然语言描述变成三份可溯源证据，合成标准画
 出口唯一：`src/role-b-profile/rag-bridge.ts`。
 
 - query 四段格式（全组契约，联调说明 §7）：`学习者水平：…；已掌握：…；薄弱点：…；学习目标：…`，空数组写"无"
-- top_k=5（联调说明 §7 与 team-integration-demo 既定值）
+- top_k=5（B→A 检索请求的后端策略值，与已下线的旧 D 无关）
 - 画像结构对 `schemas/rag_request.schema.json` 的对齐由测试直接读 schema 文件断言——A 改契约时 B 的测试自动报警
 
 ## 6. 运行与验证

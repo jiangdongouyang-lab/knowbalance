@@ -3,12 +3,13 @@ import type { SubmissionAnswer } from "./orchestrator-client"
 export type OrchestratorPage = "goal" | "diagnosis" | "path" | "lesson" | "assessment" | "feedback"
 
 export function pageForSession(session: any): OrchestratorPage {
-  if (session?.status === "blocked" || session?.status === "failed" || session?.feedback) return "feedback"
+  if (session?.status === "blocked" || session?.status === "failed") return "feedback"
   if (session?.waiting_for?.type === "diagnosis_answers" || session?.current_stage === "objective_diagnosis") return "diagnosis"
   if (session?.current_stage === "assessment") {
     if (session?.learning_resources?.concept_lesson || session?.learning_resources?.code_lab) return "lesson"
     return "assessment"
   }
+  if (session?.feedback) return "feedback"
   if (session?.status === "completed" || session?.current_stage === "completed") return "feedback"
   if (session?.profile || session?.formal_path) return "path"
   return "goal"

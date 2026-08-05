@@ -43,5 +43,5 @@ This repository uses one canonical boundary layer to normalize A/B/C/D payloads 
 ## Verification
 
 - `bun run typecheck`
-- `bun test --isolate ./tests/unified-contract.test.ts ./tests/team-integration-assets.test.ts ./tests/role-d-role-c-integration.test.ts`
+- `bun test --isolate ./tests/unified-contract.test.ts ./tests/role-d-role-c-integration.test.ts`
 - `bun run check`

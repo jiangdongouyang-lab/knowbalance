@@ -24,7 +24,7 @@ cd knowbalance
 npm install -g bun
 bun install
 bun run check
-bun scripts/team-integration-demo.ts
+bun run role-d:v2:verify
 ```
 
 已经下载过：
@@ -34,7 +34,7 @@ cd knowbalance
 git pull origin main
 bun install
 bun run check
-bun scripts/team-integration-demo.ts
+bun run role-d:v2:verify
 ```
 
 ## 3. 知识库结构
@@ -48,7 +48,7 @@ knowbalance/
 ├── schemas/rag_result.schema.json     # A 给 C/D 的输出协议
 ├── examples/learner_*.json            # B/C/D 联调画像样例
 ├── examples/rag_result_example.json   # C/D 消费的 RAG 输出样例
-├── scripts/team-integration-demo.ts   # B→A→C→D 端到端联调演示
+├── scripts/learning-orchestrator-api.ts # 主 Agent 持续会话服务入口
 └── docs/knowledge_base_changelog.md   # 知识库更新日志
 ```
 
@@ -122,24 +122,27 @@ D 展示：
 
 让评委看到“为什么推荐这个知识点”。
 
-## 6. 一键联调验证
+## 6. 新版 D 与主 Agent 联调验证
 
-BCD 下载仓库后运行：
+先启动主 Agent：
 
 ```bash
-bun scripts/team-integration-demo.ts
+bun scripts/learning-orchestrator-api.ts --host=127.0.0.1 --port=8787 --data-root=.tmp/role-d-ui-v2-orchestrator
 ```
 
-预期输出是一个 JSON，包含：
+另开一个终端启动新版 D：
 
-```text
-b_profile
-a_rag_result
-c_content_contract
-d_display_contract
+```bash
+bun run role-d:v2:dev -- --host 127.0.0.1 --port 4175
 ```
 
-这说明 B→A→C→D 的数据链路打通。
+浏览器打开 `http://127.0.0.1:4175/`。新版 D只调用主 Agent持续会话接口；不要启动已下线的旧版 D。
+
+验证命令：
+
+```bash
+bun run role-d:v2:verify
+```
 
 ## 7. 更新规则
 

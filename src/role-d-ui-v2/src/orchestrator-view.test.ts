@@ -9,6 +9,11 @@ describe("orchestrator UI state mapping", () => {
     expect(pageForSession({ status: "blocked", current_stage: "blocked" })).toBe("feedback")
   })
 
+  test("routes a new assessment round ahead of the previous round feedback", () => {
+    expect(pageForSession({ feedback: { final_decision: { action: "remediate" } }, current_stage: "assessment", waiting_for: { type: "assessment_answers" }, learning_resources: { concept_lesson: {} } })).toBe("lesson")
+    expect(pageForSession({ feedback: { final_decision: { action: "reinforce" } }, current_stage: "assessment", waiting_for: { type: "assessment_answers" } })).toBe("assessment")
+  })
+
   test("maps public answers to the formal submission contract", () => {
     const items = [
       { item_id: "mcq", modality: "mcq", options: [{ option_id: "A" }] },
