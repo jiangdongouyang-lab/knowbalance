@@ -222,7 +222,7 @@ async function runDeterministicWorkerAdapter(
       profileSnapshot,
       goalSourceIds: rag_result.results.map((item) => item.source_id),
     })
-    const startedPath = await startPathWithCodeLabGoldNode(formalPath)
+    const startedPath = await startPathForDeterministicRuntime(formalPath)
     const pathRagResult = await ensureEvidenceForPathNode(
       rag_result,
       startedPath.nextPathNode,
@@ -607,7 +607,20 @@ function extractCodeLabArtifact(
   return { ok: true, value: artifact as unknown as CodeLabArtifact }
 }
 
-async function startPathWithCodeLabGoldNode(path: FormalLearningPath): Promise<ReturnType<typeof startPath>> {
+async function startPathForDeterministicRuntime(path: FormalLearningPath): Promise<ReturnType<typeof startPath>> {
+  if (shouldUseOfflineScoreProjectGoldNode(path)) {
+    return startPathWithScoreProjectGoldNode(path)
+  }
+  return startPath(path)
+}
+
+function shouldUseOfflineScoreProjectGoldNode(path: FormalLearningPath): boolean {
+  const goal = path.original_goal
+  return /成绩统计|成绩统计器|综合项目/.test(goal)
+    && path.nodes.some((node) => node.target_source_ids.includes("K018"))
+}
+
+async function startPathWithScoreProjectGoldNode(path: FormalLearningPath): Promise<ReturnType<typeof startPath>> {
   const rawGoldNode = await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json() as LearningPathNode
   const updatedPath = structuredClone(path)
   const node = {
@@ -622,12 +635,11 @@ async function startPathWithCodeLabGoldNode(path: FormalLearningPath): Promise<R
     status: "in_progress" as const,
     stage_order: 1,
   }
-  const existingIndex = updatedPath.nodes.findIndex((entry) =>
-    sameOrderedTargets(entry.target_source_ids, node.target_source_ids),
-  )
+  const existingIndex = updatedPath.nodes.findIndex((entry) => entry.target_source_ids.includes("K018"))
   if (existingIndex >= 0) {
-    updatedPath.nodes[existingIndex] = node
-    updatedPath.current_node_index = existingIndex
+    updatedPath.nodes.splice(existingIndex, 1)
+    updatedPath.nodes.unshift(node)
+    updatedPath.current_node_index = 0
   } else {
     updatedPath.nodes.unshift(node)
     updatedPath.current_node_index = 0
@@ -637,7 +649,6 @@ async function startPathWithCodeLabGoldNode(path: FormalLearningPath): Promise<R
     entry.stage_order = nodeIndex + 1
   }
   updatedPath.updated_at = new Date().toISOString()
-
   return {
     nextPathNode: defineLearningPathNode({
       node_id: node.node_id,
@@ -651,10 +662,6 @@ async function startPathWithCodeLabGoldNode(path: FormalLearningPath): Promise<R
     path: updatedPath,
     pathCompleted: false,
   }
-}
-function sameOrderedTargets(actual: string[], expected: string[]): boolean {
-  return actual.length === expected.length
-    && actual.every((sourceId, index) => sourceId === expected[index])
 }
 
 function fillRequiredFacts(pathNode: LearningPathNode, evidencePack: ReturnType<typeof adaptRagResult>): LearningPathNode {

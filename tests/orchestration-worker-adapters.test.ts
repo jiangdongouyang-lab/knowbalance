@@ -7,6 +7,8 @@ import {
 } from "../src/orchestration/worker-adapters"
 import { ORCHESTRATION_WORKER_SEQUENCE } from "../src/orchestration/state-machine"
 import type { OrchestrationStepDefinition, WorkerInvocation } from "../src/orchestration/types"
+import { executeProfileRetrieval } from "../src/role-b-profile/rag-bridge"
+import type { LearnerProfile } from "../src/role-b-profile/types"
 
 function invocationFor(step: OrchestrationStepDefinition, index: number): WorkerInvocation {
   return createScaffoldWorkerInvocation({
@@ -278,6 +280,45 @@ describe("orchestration worker adapters", () => {
     expect(evaluatorArtifacts.assessment_secure.status).toBe("ready")
     expect(evaluatorArtifacts.assessment_secure.artifact_type).toBe("assessment_secure")
     expect(evaluatorArtifacts.assessment_secure.payload?.code_test_suites.length).toBeGreaterThan(0)
+  })
+
+  test("path-planner starts from the resolved custom target instead of a fixed score-project gold node", async () => {
+    const profile: LearnerProfile = {
+      learner_id: "path-conditions",
+      level: "beginner",
+      known_concepts: ["Python 是什么", "变量与赋值", "基本数据类型", "运算符"],
+      weak_concepts: ["条件判断"],
+      goal: "想学条件语句",
+    }
+    const { rag_request } = await executeProfileRetrieval(profile, 8)
+    const pathStep = ORCHESTRATION_WORKER_SEQUENCE[4]
+    const invocation: WorkerInvocation = {
+      ...invocationFor(pathStep, 5),
+      mode: "deterministic",
+      learner_request: { goal: profile.goal, learner_id: profile.learner_id },
+      upstream_artifacts: {
+        "profile-builder": {
+          mode: "deterministic",
+          profile,
+          provenance: { evidence_refs: [], conflicts: [] },
+          rag_request,
+        },
+      },
+      input_refs: ["profile-builder:deterministic-result"],
+    }
+
+    const result = await runWorkerAdapter(invocation)
+
+    expect(validateWorkerResult(invocation, result).ok).toBe(true)
+    expect(result.status).toBe("completed")
+    const artifacts = result.artifacts as {
+      formal_path: { nodes: Array<{ target_source_ids: string[] }> }
+      next_path_node: { target_source_ids: string[] } | null
+      a_rag_result: { results: Array<{ source_id: string }> }
+    }
+    expect(artifacts.next_path_node?.target_source_ids).not.toEqual(["K007", "K009", "K018"])
+    expect(artifacts.formal_path.nodes.flatMap((node) => node.target_source_ids)).toContain("K006")
+    expect(artifacts.a_rag_result.results.map((item) => item.source_id)).toContain("K006")
   })
 
   test("adapter rejects invocations whose worker does not match the current stage", async () => {
