@@ -8,7 +8,6 @@ import {
   adaptRagResult,
   buildGenerationSpec,
   defineLearningPathNode,
-  DeterministicCodeLabContentProvider,
   generateConceptLesson,
   ROLE_C_PROMPT_MANIFEST_VERSION,
   TrustedCodeLabVerifier,
@@ -19,6 +18,7 @@ import {
   type CodeLabRequest,
   type CodeRunner,
 } from "../src/role-c-content"
+import { TestRoleCContentProvider } from "./role-c-test-provider"
 
 const RUNNER_DIGEST = `sha256:${"a".repeat(64)}`
 const learner: LearnerProfile = {
@@ -146,7 +146,7 @@ async function buildFixture(): Promise<{
   })
   if (!built.ok) throw new Error(built.errors.join("；"))
 
-  const provider = new DeterministicCodeLabContentProvider()
+  const provider = new TestRoleCContentProvider()
   const concept = await generateConceptLesson({
     generation_spec: built.spec,
     evidence_pack: evidencePack,

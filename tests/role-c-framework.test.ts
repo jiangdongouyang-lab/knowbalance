@@ -15,8 +15,6 @@ import {
   deliverLearningSessionToD,
   deliverReviewRecoveryStatusToD,
   deliverRoleCToD,
-  DeterministicConceptContentProvider,
-  DeterministicCodeLabContentProvider,
   defineLearningPathNode,
   getRoleCModelOutputSchema,
   InMemorySecureArtifactStore,
@@ -47,6 +45,7 @@ import {
   type SecureArtifact,
   type SecureArtifactStore,
 } from "../src/role-c-content"
+import { TestRoleCContentProvider } from "./role-c-test-provider"
 
 const profile: LearnerProfile = {
   learner_id: "demo_loop_weak",
@@ -1166,18 +1165,11 @@ function passingReviewResult(
 }
 
 function fixtureProvider(): RoleCContentProvider {
-  const deterministicConcept = new DeterministicConceptContentProvider()
-  const deterministicLab = new DeterministicCodeLabContentProvider()
+  const provider = new TestRoleCContentProvider()
   return {
-    async generateConceptLesson(request): Promise<ArtifactDraft<ConceptLessonPayload>> {
-      return deterministicConcept.generateConceptLesson(request)
-    },
-    async generateCodeLab(request): Promise<CodeLabDraft> {
-      return deterministicLab.generateCodeLab(request)
-    },
-    async generateAssessment(request): Promise<AssessmentDraft> {
-      return deterministicLab.generateAssessment(request)
-    },
+    async generateConceptLesson(request) { return provider.generateConceptLesson(request) },
+    async generateCodeLab(request) { return provider.generateCodeLab(request) },
+    async generateAssessment(request) { return provider.generateAssessment(request) },
   }
 }
 

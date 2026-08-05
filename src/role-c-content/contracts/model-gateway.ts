@@ -1,4 +1,28 @@
 import { contentHash } from "./common"
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
+
+/** 在缺少模型配置时尝试加载 .env.role-c.local。显式传入的 env 值优先。 */
+function ensureModelEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  if (env.ROLE_C_MODEL_ENDPOINT && env.ROLE_C_MODEL_ID) return env
+  try {
+    const envPath = resolve(process.cwd(), ".env.role-c.local")
+    const content = readFileSync(envPath, "utf-8")
+    const merged: Record<string, string> = {}
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith("#")) continue
+      const eqIndex = trimmed.indexOf("=")
+      if (eqIndex <= 0) continue
+      const key = trimmed.slice(0, eqIndex).trim()
+      merged[key] = trimmed.slice(eqIndex + 1).trim()
+    }
+    // 显式传入的 env 值覆盖文件中的值
+    return { ...merged, ...env as Record<string, string> }
+  } catch {
+    return env
+  }
+}
 
 /** Vendor-neutral boundary. Prompt/model work can replace this without changing C contracts. */
 export interface ModelGateway {
@@ -240,24 +264,25 @@ export function createRoleCModelGatewayFromEnv(
   env: Record<string, string | undefined> = process.env,
   overrides: Pick<OpenAICompatibleGatewayOptions, "fetch_impl" | "on_usage"> = {},
 ): OpenAICompatibleModelGateway {
-  const endpoint = env.ROLE_C_MODEL_ENDPOINT
-  const model = env.ROLE_C_MODEL_ID
+  const resolvedEnv = ensureModelEnv(env)
+  const endpoint = resolvedEnv.ROLE_C_MODEL_ENDPOINT
+  const model = resolvedEnv.ROLE_C_MODEL_ID
   if (!endpoint || !model) {
     throw new ModelProviderUnavailableError(
-      "模型配置缺失：需要 ROLE_C_MODEL_ENDPOINT 和 ROLE_C_MODEL_ID",
+      "模型配置缺失：需要 ROLE_C_MODEL_ENDPOINT 和 ROLE_C_MODEL_ID。请复制 .env.role-c.example 为 .env.role-c.local 并填入模型参数。",
     )
   }
   return new OpenAICompatibleModelGateway({
     endpoint,
     model,
-    api_key: env.ROLE_C_MODEL_API_KEY,
-    response_format: responseFormatFromEnv(env.ROLE_C_MODEL_RESPONSE_FORMAT),
-    schema_strict: optionalBoolean(env.ROLE_C_MODEL_SCHEMA_STRICT, true),
-    thinking: thinkingFromEnv(env.ROLE_C_MODEL_THINKING),
-    auth_header: env.ROLE_C_MODEL_AUTH_HEADER || "authorization",
-    auth_scheme: env.ROLE_C_MODEL_AUTH_SCHEME ?? "Bearer",
-    timeout_ms: optionalPositiveInteger(env.ROLE_C_MODEL_TIMEOUT_MS, 30_000),
-    max_transport_retries: optionalNonNegativeInteger(env.ROLE_C_MODEL_MAX_RETRIES, 2),
+    api_key: resolvedEnv.ROLE_C_MODEL_API_KEY,
+    response_format: responseFormatFromEnv(resolvedEnv.ROLE_C_MODEL_RESPONSE_FORMAT),
+    schema_strict: optionalBoolean(resolvedEnv.ROLE_C_MODEL_SCHEMA_STRICT, true),
+    thinking: thinkingFromEnv(resolvedEnv.ROLE_C_MODEL_THINKING),
+    auth_header: resolvedEnv.ROLE_C_MODEL_AUTH_HEADER || "authorization",
+    auth_scheme: resolvedEnv.ROLE_C_MODEL_AUTH_SCHEME ?? "Bearer",
+    timeout_ms: optionalPositiveInteger(resolvedEnv.ROLE_C_MODEL_TIMEOUT_MS, 30_000),
+    max_transport_retries: optionalNonNegativeInteger(resolvedEnv.ROLE_C_MODEL_MAX_RETRIES, 2),
     ...overrides,
   })
 }

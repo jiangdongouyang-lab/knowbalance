@@ -12,7 +12,6 @@ import {
   defineLearningPathNode,
   detectEvidenceConflicts,
   deliverRoleCToB,
-  DeterministicCodeLabContentProvider,
   EvidencePhraseRubricJudge,
   executeTrustedReferenceWithRetry,
   executeWithRunnerRetry,
@@ -44,6 +43,7 @@ import {
   type SubmissionEnvelope,
   type TieredEvaluatorRequest,
 } from "../src/role-c-content"
+import { TestRoleCContentProvider } from "./role-c-test-provider"
 
 const DIGEST = `sha256:${"e".repeat(64)}`
 const profile: LearnerProfile = {
@@ -58,7 +58,7 @@ async function golden(seed = 42): Promise<{
   spec: GenerationSpec
   evidence: RagEvidencePack
   request: TieredEvaluatorRequest
-  provider: DeterministicCodeLabContentProvider
+  provider: TestRoleCContentProvider
 }> {
   const rag = await retrieveKnowledge({ query: buildRagRequest(profile).query, learnerLevel: profile.level, topK: 5 })
   const kb = await loadKnowledgeBase()
@@ -81,7 +81,7 @@ async function golden(seed = 42): Promise<{
     seed,
   })
   if (!built.ok) throw new Error(built.errors.join(";"))
-  const provider = new DeterministicCodeLabContentProvider()
+  const provider = new TestRoleCContentProvider()
   const concept = await generateConceptLesson({ generation_spec: built.spec, evidence_pack: evidence }, provider)
   if (concept.status !== "ready") throw new Error("concept fixture unavailable")
   return { spec: built.spec, evidence, provider, request: { generation_spec: built.spec, evidence_pack: evidence, concept_artifact: concept } }
