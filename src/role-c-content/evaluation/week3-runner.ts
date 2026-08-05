@@ -32,7 +32,7 @@ import {
   type ObservableBehavior,
 } from "../index"
 
-export type RoleCWeek3ExecutionMode = "deterministic" | "model"
+export type RoleCWeek3ExecutionMode = "model"
 export type RoleCWeek3ArtifactKind = "lesson" | "lab" | "assessment"
 
 export interface RoleCWeek3PreparedInput {
@@ -230,7 +230,6 @@ export async function runRoleCWeek3Case(
     const runtime: RoleCForRoleDRuntimeOptions = {
       ...options.runtime,
       providerMode: options.executionMode,
-      allowDeterministicFallback: options.executionMode === "deterministic",
       learningPersistence: options.runtime.learningPersistence ?? {
         cycleStore: new InMemoryLearningCycleStore(),
         secureStore: new InMemorySecureArtifactStore(),

@@ -13,9 +13,12 @@ import { buildGenerationSpec } from "../role-c-content/contracts/generation-spec
 import { generateConceptLesson } from "../role-c-content/agents/concept-tutor"
 import { generateCodeLab } from "../role-c-content/agents/code-lab"
 import { generateAssessment } from "../role-c-content/agents/tiered-evaluator"
-import { DeterministicConceptContentProvider } from "../role-c-content/providers/deterministic-concept-provider"
-import { DeterministicCodeLabContentProvider } from "../role-c-content/providers/deterministic-code-lab-provider"
-import { DeterministicAssessmentContentProvider } from "../role-c-content/providers/deterministic-assessment-provider"
+// 确定性模板 Provider 已于 2026-08 删除。
+// 请改用 ModelBackedRoleCContentProvider 并确保模型已配置。
+// 以下为临时占位，抛出明确错误以便迁移。
+import { ModelBackedRoleCContentProvider } from "../role-c-content/providers/model-backed-provider"
+import { modelBackedProviderOptionsFromEnv } from "../role-c-content/providers/model-backed-provider-env"
+import { createRoleCModelGatewayFromEnv } from "../role-c-content/contracts/model-gateway"
 import { TrustedCodeLabVerifier } from "../role-c-content/validators/code-lab-validator"
 import { TrustedAssessmentVerifier } from "../role-c-content/validators/assessment-validator"
 import type { RagResult, RagResultItem } from "../rag/retriever"
@@ -57,6 +60,30 @@ export interface CreateScaffoldWorkerInvocationInput {
 
 const ROLE_B_EVIDENCE_FILE = "examples/learner_evidence_loop_weak.json"
 const DETERMINISTIC_RUNNER_DIGEST = `sha256:${"a".repeat(64)}`
+
+/** 创建 Role C 的模型 Provider。确定性模板已删除，仅支持模型路径。 */
+function resolveRoleCProvider(): { ok: true; provider: ModelBackedRoleCContentProvider } | { ok: false; reason: string } {
+  try {
+    const gateway = createRoleCModelGatewayFromEnv(process.env)
+    return {
+      ok: true,
+      provider: new ModelBackedRoleCContentProvider(gateway, modelBackedProviderOptionsFromEnv(process.env)),
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `无法创建模型 Provider：${error instanceof Error ? error.message : "未知错误"}。请确认 ROLE_C_PROVIDER_MODE=model 且模型接口已配置。`,
+    }
+  }
+}
+
+function resolveRoleCProviderOrFail(): ModelBackedRoleCContentProvider {
+  const resolved = resolveRoleCProvider()
+  if (!resolved.ok) {
+    throw new Error(resolved.reason)
+  }
+  return resolved.provider
+}
 
 interface RoleBEvidenceBundle {
   background: BackgroundEvidence
@@ -285,7 +312,7 @@ async function runDeterministicWorkerAdapter(
     const conceptLesson = await generateConceptLesson({
       generation_spec: specResult.spec,
       evidence_pack: evidencePack,
-    }, new DeterministicConceptContentProvider())
+    }, resolveRoleCProviderOrFail())
     if (conceptLesson.status !== "ready") {
       return failedResult(invocation, {
         code: conceptLesson.blocked_reason?.code ?? conceptLesson.failure_reason?.code ?? "CONCEPT_TUTOR_NOT_READY",
@@ -310,7 +337,7 @@ async function runDeterministicWorkerAdapter(
       generation_spec: conceptArtifact.value.generation_spec,
       evidence_pack: conceptArtifact.value.evidence_pack,
       concept_artifact: conceptArtifact.value.concept_lesson,
-    }, new DeterministicCodeLabContentProvider(), new TrustedCodeLabVerifier(new DeterministicCodeLabRunner()))
+    }, resolveRoleCProviderOrFail(), new TrustedCodeLabVerifier(new DeterministicCodeLabRunner()))
 
     if (pair.public_artifact.status !== "ready" || pair.secure_artifact.status !== "ready") {
       return failedResult(invocation, {
@@ -343,7 +370,7 @@ async function runDeterministicWorkerAdapter(
         objective_ids: codeLabArtifact.value.code_lab_public.payload?.objective_ids ?? [],
         execution_verified: codeLabArtifact.value.code_lab_public.quality.execution_verified === true,
       },
-    }, new DeterministicAssessmentContentProvider(), new TrustedAssessmentVerifier(new DeterministicCodeLabRunner()))
+    }, resolveRoleCProviderOrFail(), new TrustedAssessmentVerifier(new DeterministicCodeLabRunner()))
 
     if (pair.public_artifact.status !== "ready" || pair.secure_artifact.status !== "ready") {
       return failedResult(invocation, {

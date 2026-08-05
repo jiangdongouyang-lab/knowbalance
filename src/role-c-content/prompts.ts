@@ -6,6 +6,11 @@ import {
   ROLE_C_PROMPT_MANIFEST_VERSION,
 } from "./prompts/index"
 
+// Re-export all prompt strings through this module so that consumers
+// can `import { ... } from "../prompts"` without worrying about the
+// prompts.ts vs prompts/index.ts resolution order.
+export * from "./prompts/index"
+
 export const ROLE_C_PROMPT_VERSION = ROLE_C_PROMPT_MANIFEST_VERSION
 export const ROLE_C_WORKER_NAMES = ["concept-tutor", "code-lab", "tiered-evaluator"] as const
 export type RoleCWorkerName = (typeof ROLE_C_WORKER_NAMES)[number]

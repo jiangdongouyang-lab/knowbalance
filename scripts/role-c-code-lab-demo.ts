@@ -8,14 +8,26 @@ import {
   buildGenerationSpec,
   createDockerPythonCodeRunnerFromEnv,
   defineLearningPathNode,
-  DeterministicCodeLabContentProvider,
   generateCodeLab,
   generateConceptLesson,
   InMemorySecureArtifactStore,
+  ModelBackedRoleCContentProvider,
+  modelBackedProviderOptionsFromEnv,
   ROLE_C_PROMPT_MANIFEST_VERSION,
   TrustedCodeLabVerifier,
   type LearningPathNode,
 } from "../src/role-c-content"
+import { createRoleCModelGatewayFromEnv } from "../src/role-c-content/contracts/model-gateway"
+
+function resolveProvider(): ModelBackedRoleCContentProvider {
+  try {
+    const gateway = createRoleCModelGatewayFromEnv(process.env)
+    return new ModelBackedRoleCContentProvider(gateway, modelBackedProviderOptionsFromEnv(process.env))
+  } catch (error) {
+    console.error("模型 Provider 不可用。请复制 .env.role-c.example 为 .env.role-c.local 并配置模型参数。")
+    process.exit(1)
+  }
+}
 
 const runner = await createDockerPythonCodeRunnerFromEnv()
 const profile = (await Bun.file("examples/learner_loop_weak.json").json()) as LearnerProfile
@@ -94,7 +106,7 @@ if (!built.ok) {
     intake: built,
   }
 } else {
-  const provider = new DeterministicCodeLabContentProvider()
+  const provider = resolveProvider()
   const concept = await generateConceptLesson(
     { generation_spec: built.spec, evidence_pack: evidencePack },
     provider,

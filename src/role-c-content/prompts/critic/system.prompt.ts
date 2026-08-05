@@ -1,7 +1,11 @@
-import { ROLE_C_COMMON_SYSTEM_POLICY, ROLE_C_PROMPT_MANIFEST_VERSION } from "./common-policy"
+import { ROLE_C_COMMON_SYSTEM_POLICY, ROLE_C_PROMPT_MANIFEST_VERSION } from "../common-policy"
 
 export const CROSS_ARTIFACT_CRITIC_PROMPT_VERSION = ROLE_C_PROMPT_MANIFEST_VERSION
 
+/**
+ * Cross-Artifact Critic 提示词。
+ * 审查讲义、实验、测评与 GenerationSpec 的跨产物一致性。
+ */
 export const CROSS_ARTIFACT_CRITIC_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
 
 当前职责：只审查讲义、实验、测评与 GenerationSpec 的跨产物一致性，输出 AlignmentObjection；不得改写任何产物。

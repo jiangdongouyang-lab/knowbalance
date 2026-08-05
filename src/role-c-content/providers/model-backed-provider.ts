@@ -29,18 +29,12 @@ import {
   CONCEPT_TUTOR_PROMPT_VERSION,
   CONCEPT_TUTOR_SYSTEM_PROMPT,
   conceptTutorRepairPrompt,
-} from "../prompts/concept-tutor.v1"
-import {
   CODE_LAB_PROMPT_VERSION,
   CODE_LAB_SYSTEM_PROMPT,
   codeLabRepairPrompt,
-} from "../prompts/code-lab.v1"
-import {
   EVALUATOR_AUTHOR_PROMPT_VERSION,
   EVALUATOR_AUTHOR_SYSTEM_PROMPT,
   evaluatorAuthorRepairPrompt,
-} from "../prompts/evaluator-author.v1"
-import {
   ASSESSMENT_PUBLIC_STAGE_SYSTEM_PROMPT,
   ASSESSMENT_SECURE_STAGE_SYSTEM_PROMPT,
   ASSESSMENT_EXECUTION_REPAIR_SYSTEM_PROMPT,
@@ -52,7 +46,7 @@ import {
   CONCEPT_SEGMENT_SYSTEM_PROMPT,
   STAGED_AUTHOR_PROMPT_VERSION,
   stagedRepairPrompt,
-} from "../prompts/staged-authors.v1"
+} from "../prompts"
 import { validateCodeLabDraftStructure, validateCodeLabPublicStage } from "../validators/code-lab-validator"
 import { validateAssessmentDraftStructure, validateAssessmentPublicStage } from "../validators/assessment-validator"
 import { validateConceptLesson } from "../validators/concept-validator"
