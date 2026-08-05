@@ -27,7 +27,7 @@ const baseInvocation: WorkerInvocation = {
 }
 
 function validResult(overrides: Partial<WorkerResult> = {}): WorkerResult {
-  return {
+  const result: WorkerResult = {
     schema_version: "1.0",
     run_id: "RUN-001",
     step_index: 1,
@@ -35,6 +35,12 @@ function validResult(overrides: Partial<WorkerResult> = {}): WorkerResult {
     stage: "intake_ready",
     status: "completed",
     marker: "[executed:background-collector]",
+    execution: {
+      worker: "background-collector",
+      status: "completed",
+      execution_id: "EXEC-BACKGROUND-001",
+      marker: "[executed:background-collector]",
+    },
     summary: "background evidence collected",
     artifacts: {
       background_evidence: {
@@ -47,6 +53,13 @@ function validResult(overrides: Partial<WorkerResult> = {}): WorkerResult {
     errors: [],
     ...overrides,
   }
+  result.execution = overrides.execution ?? {
+    worker: result.worker,
+    status: result.status,
+    execution_id: "EXEC-BACKGROUND-001",
+    marker: result.marker,
+  }
+  return result
 }
 
 describe("orchestration worker contract", () => {
@@ -86,6 +99,11 @@ describe("orchestration worker contract", () => {
           message: "expected marker [executed:profile-builder], received [executed:background-collector]",
           severity: "recoverable",
         },
+        {
+          code: "EXECUTION_WORKER_MISMATCH",
+          message: "expected execution.worker background-collector, received profile-builder",
+          severity: "fatal",
+        },
       ],
     })
   })
@@ -100,6 +118,11 @@ describe("orchestration worker contract", () => {
           message: "expected marker [executed:background-collector], received ",
           severity: "recoverable",
         },
+        {
+          code: "EXECUTION_MARKER_MISMATCH",
+          message: "expected execution.marker [executed:background-collector], received ",
+          severity: "recoverable",
+        },
       ],
     })
 
@@ -110,6 +133,11 @@ describe("orchestration worker contract", () => {
         {
           code: "MARKER_MISMATCH",
           message: "expected marker [executed:background-collector], received [executed:profile-builder]",
+          severity: "recoverable",
+        },
+        {
+          code: "EXECUTION_MARKER_MISMATCH",
+          message: "expected execution.marker [executed:background-collector], received [executed:profile-builder]",
           severity: "recoverable",
         },
       ],

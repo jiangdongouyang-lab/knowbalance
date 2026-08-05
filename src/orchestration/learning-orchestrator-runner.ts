@@ -49,6 +49,7 @@ export async function runLearningOrchestrator(
   let learnerMemoryRef: string | undefined
   const persistenceEvents: PersistenceEvent[] = []
   const clarificationRequests: ClarificationRequest[] = []
+  const encoder = new TextEncoder()
   upstreamArtifacts = {
     ...upstreamArtifacts,
     "learner-memory": learnerMemory,
@@ -128,6 +129,7 @@ export async function runLearningOrchestrator(
     })
     const finalInvocation = { ...invocation, mode: input.mode }
 
+    const workerStartedAt = now()
     await record({
       step_index: stepIndex,
       event_type: "worker_invoked",
@@ -140,6 +142,9 @@ export async function runLearningOrchestrator(
     })
 
     const workerResult = await runWorkerAdapter(finalInvocation)
+    const workerFinishedAt = now()
+    const workerDurationMs = Math.max(0, Date.parse(workerFinishedAt) - Date.parse(workerStartedAt))
+    const workerResultSizeBytes = encoder.encode(JSON.stringify(workerResult)).byteLength
     const validation = validateWorkerResult(finalInvocation, workerResult)
     if (!validation.ok) {
       const error = validation.errors[0]
@@ -160,7 +165,7 @@ export async function runLearningOrchestrator(
       return finish()
     }
 
-    await recordWorkerTerminal(stepIndex, state, workerResult)
+    await recordWorkerTerminal(stepIndex, state, workerResult, workerDurationMs, workerResultSizeBytes)
 
     if (workerResult.status === "blocked") {
       blockedStage = state
@@ -261,6 +266,8 @@ export async function runLearningOrchestrator(
     stepIndex: number,
     currentState: OrchestrationState,
     workerResult: WorkerResult,
+    durationMs: number,
+    resultSizeBytes: number,
   ): Promise<void> {
     await record({
       step_index: stepIndex,
@@ -275,6 +282,8 @@ export async function runLearningOrchestrator(
       input_refs: inputRefs,
       output_refs: workerResult.output_refs,
       evidence_refs: workerResult.evidence_refs,
+      duration_ms: durationMs,
+      result_size_bytes: resultSizeBytes,
       error: workerResult.errors[0],
     })
   }
