@@ -1,9 +1,26 @@
+import { MODERN_AI_KNOWLEDGE_BASE } from "./modern-ai"
 import { PYTHON_BASIC_KNOWLEDGE_BASE } from "./python-basic"
+import { PYTHON_PROGRAMMING_KNOWLEDGE_BASE } from "./python-programming"
 import type { KnowledgeBase } from "./types"
 
 export async function loadKnowledgeBase(): Promise<KnowledgeBase> {
-  validateKnowledgeBase(PYTHON_BASIC_KNOWLEDGE_BASE)
-  return PYTHON_BASIC_KNOWLEDGE_BASE
+  const merged: KnowledgeBase = {
+    module: "KnowBalance课程知识库",
+    version: "0.6.0",
+    updatedAt: "2026-08-05",
+    sources: unique([
+      ...PYTHON_BASIC_KNOWLEDGE_BASE.sources,
+      ...PYTHON_PROGRAMMING_KNOWLEDGE_BASE.sources,
+      ...MODERN_AI_KNOWLEDGE_BASE.sources,
+    ]),
+    items: [
+      ...PYTHON_BASIC_KNOWLEDGE_BASE.items,
+      ...PYTHON_PROGRAMMING_KNOWLEDGE_BASE.items,
+      ...MODERN_AI_KNOWLEDGE_BASE.items,
+    ],
+  }
+  validateKnowledgeBase(merged)
+  return merged
 }
 
 function validateKnowledgeBase(knowledgeBase: KnowledgeBase): void {
@@ -21,6 +38,10 @@ function validateKnowledgeBase(knowledgeBase: KnowledgeBase): void {
       }
     }
   }
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values)]
 }
 
 export type { KnowledgeBase, KnowledgeFact, KnowledgeItem, KnowledgeDifficulty } from "./types"
