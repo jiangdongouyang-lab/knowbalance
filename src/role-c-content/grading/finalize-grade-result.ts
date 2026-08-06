@@ -1,9 +1,12 @@
 import { finalizeDraft, invalidOutputEnvelope } from "../agents/harness"
 import type {
   AssessmentSecureArtifact,
+  AssessmentSecurePayload,
   GradeFeedback,
+  GradeItemResult,
   GradeResultArtifact,
   GradeResultPayload,
+  RevealedAnswer,
 } from "../contracts/artifacts"
 import {
   aggregateObjectiveResults,
@@ -83,7 +86,11 @@ export function finalizeGradeResult(input: FinalizeGradeResultInput): GradeResul
       confidence: finalDecision.confidence,
       reason_codes: [...finalDecision.reason_codes],
     },
-    feedback: buildGradeFeedback(frozenScore, input.formative ? "formative" : "summative"),
+    feedback: buildGradeFeedback(
+      frozenScore,
+      input.formative ? "formative" : "summative",
+      input.assessment_secure.payload,
+    ),
   }
   return finalizeDraft({
     spec: input.spec,
@@ -146,6 +153,21 @@ export async function finalizeGradeResultWithFeedback(
   } catch {
     return baseline
   }
+  const baselinePayload = baseline.payload
+  const securePayload = input.assessment_secure.payload
+  if (securePayload) {
+    // Answer disclosure is deterministic; the wording model never authors answer keys.
+    feedback = {
+      ...feedback,
+      item_feedback: feedback.item_feedback.map((entry) => {
+        const item = baselinePayload.item_results.find((result) =>
+          result.item_id === entry.item_id)
+        return item
+          ? { ...entry, ...withRevealedAnswer(item, securePayload) }
+          : entry
+      }),
+    }
+  }
   const payload: GradeResultPayload = { ...structuredClone(baseline.payload), feedback }
   const identityDecision = input.recommendation ?? decideRoundAction({
     raw_score: payload.raw_score,
@@ -176,7 +198,11 @@ export async function finalizeGradeResultWithFeedback(
 type FrozenScore = Readonly<Pick<GradeResultPayload,
   "submission_id" | "form_id" | "raw_score" | "max_score" | "evidence_score" | "item_results">>
 
-export function buildGradeFeedback(score: FrozenScore, mode: GradeFeedback["mode"]): GradeFeedback {
+export function buildGradeFeedback(
+  score: FrozenScore,
+  mode: GradeFeedback["mode"],
+  securePayload?: AssessmentSecurePayload,
+): GradeFeedback {
   const correctCount = score.item_results.filter((item) => item.raw_score === item.max_score).length
   return {
     generated_after_score_freeze: true,
@@ -189,9 +215,56 @@ export function buildGradeFeedback(score: FrozenScore, mode: GradeFeedback["mode
         feedback_code: item.feedback_code,
         message: feedbackMessage(item.feedback_code, mode, item.misconception_tags, fullScore),
         next_step: feedbackNextStep(item.feedback_code, item.objective_id, fullScore),
+        ...(securePayload ? withRevealedAnswer(item, securePayload) : {}),
       }
     }),
   }
+}
+
+/** Maps the secure answer key onto post-submission feedback; never present in static public artifacts. */
+export function withRevealedAnswer(
+  item: GradeItemResult,
+  secure: AssessmentSecurePayload,
+): { revealed_answer: RevealedAnswer } | Record<string, never> {
+  const secureItem = secure.items.find((entry) => entry.item_id === item.item_id)
+  if (!secureItem) return {}
+  if (secureItem.modality === "mcq" || secureItem.modality === "true_false") {
+    return secureItem.correct_option_id
+      ? { revealed_answer: { kind: "choice", option_id: secureItem.correct_option_id } }
+      : {}
+  }
+  const spec = secureItem.answer_spec
+  if (spec.kind === "exact_set") {
+    return { revealed_answer: { kind: "text", accepted: [...spec.accepted] } }
+  }
+  if (spec.kind === "numeric") {
+    return {
+      revealed_answer: {
+        kind: "numeric",
+        target: spec.target,
+        ...(spec.unit ? { unit: spec.unit } : {}),
+      },
+    }
+  }
+  if (spec.kind === "concept_rubric") {
+    return {
+      revealed_answer: {
+        kind: "rubric",
+        criteria: spec.criteria.map((criterion) => ({
+          description: criterion.description,
+          required_evidence: [...criterion.required_evidence],
+        })),
+      },
+    }
+  }
+  if (spec.kind === "code") {
+    const suite = secure.code_test_suites.find((entry) =>
+      entry.test_suite_id === spec.test_suite_id)
+    return suite
+      ? { revealed_answer: { kind: "code", code: suite.reference_solution } }
+      : {}
+  }
+  return {}
 }
 
 function feedbackMessage(code: string, mode: GradeFeedback["mode"], misconceptions: string[], fullScore: boolean): string {

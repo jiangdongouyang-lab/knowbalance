@@ -50,10 +50,12 @@ function generationStrategy(value: string | undefined): "staged" | "monolithic" 
   throw new Error("ROLE_C_MODEL_GENERATION_STRATEGY 只允许 staged 或 monolithic")
 }
 
-function repairAttempts(value: string | undefined): 0 | 1 {
-  if (value === undefined || value === "" || value === "1") return 1
+function repairAttempts(value: string | undefined): 0 | 1 | 2 {
+  if (value === undefined || value === "") return 1
+  if (value === "2") return 2
+  if (value === "1") return 1
   if (value === "0") return 0
-  throw new Error("ROLE_C_MODEL_MAX_REPAIR_ATTEMPTS 只允许 0 或 1")
+  throw new Error("ROLE_C_MODEL_MAX_REPAIR_ATTEMPTS 只允许 0、1 或 2")
 }
 
 function temperature(value: string | undefined, name: string): number {

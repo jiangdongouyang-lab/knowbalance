@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { handleLearningOrchestratorApiRequest } from "../src/orchestration/learning-orchestrator-api"
+// 真实模型 + Docker 代码执行依赖：默认跳过，RUN_INTEGRATION_TESTS=1 时运行。
+const runIntegration = process.env.RUN_INTEGRATION_TESTS === "1"
 
 const tempRoots: string[] = []
 
@@ -16,7 +18,7 @@ afterEach(async () => {
   await Promise.all(tempRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-describe("learning orchestrator HTTP API", () => {
+describe.skipIf(!runIntegration)("learning orchestrator HTTP API", () => {
   test("reports health for external callers", async () => {
     const response = await handleLearningOrchestratorApiRequest(new Request("http://localhost/health"))
     expect(response.status).toBe(200)

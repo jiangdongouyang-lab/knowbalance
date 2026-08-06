@@ -70,7 +70,7 @@ function resolveRoleCProvider(): { ok: true; provider: ModelBackedRoleCContentPr
       ok: true,
       provider: new ModelBackedRoleCContentProvider(gateway, {
         ...modelBackedProviderOptionsFromEnv(process.env),
-        max_repair_attempts: 1,
+        max_repair_attempts: 2,
         concept_group_size: 1,
       }),
     }

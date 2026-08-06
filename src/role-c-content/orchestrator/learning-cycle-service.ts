@@ -1291,7 +1291,11 @@ export class LearningCycleService {
         grade: SubmissionGrade
         feedback: DynamicFeedbackResult
       }
-      session = await this.completeSession(session, completedRecord)
+      session = await this.completeSession(
+        session,
+        completedRecord,
+        readyAssessment(run).payload!.submission_policy.max_attempts,
+      )
       return {
         status: "completed",
         completion: await this.restoreCompletion(completedRecord),
@@ -1316,9 +1320,15 @@ export class LearningCycleService {
       }
     }
     if (session.latest_feedback_id) {
-      return blocked(input.submission.submission_id, "SESSION_ALREADY_COMPLETED", [
-        `会话已完成，最新反馈为 ${session.latest_feedback_id}`,
-      ])
+      const maxAttempts = readyAssessment(run).payload!.submission_policy.max_attempts
+      // 已完成作答后仅放行"下一次作答"（attempt_no 与 session 推进一致）且未达上限；
+      // 同一 attempt 的重复提交（并发输家重试）仍按已完成拒绝。
+      if (session.session_state.attempt_no > maxAttempts
+        || input.submission.attempt_no !== session.session_state.attempt_no) {
+        return blocked(input.submission.submission_id, "SESSION_ALREADY_COMPLETED", [
+          `会话已完成，${maxAttempts} 次作答机会已用完`,
+        ])
+      }
     }
 
     if (!record) {
@@ -1365,6 +1375,8 @@ export class LearningCycleService {
     const claim = await this.claimSession(
       session.session_id,
       input.submission.submission_id,
+      readyAssessment(run).payload!.submission_policy.max_attempts,
+      input.submission.attempt_no,
     )
     if (!claim.ok) {
       if ("completed_feedback_id" in claim) {
@@ -1554,6 +1566,7 @@ export class LearningCycleService {
       session = await this.completeSession(
         session,
         record as LearningSubmissionRecord & { feedback: DynamicFeedbackResult },
+        readyAssessment(run).payload!.submission_policy.max_attempts,
       )
     }
 
@@ -2020,6 +2033,8 @@ export class LearningCycleService {
   private async claimSession(
     sessionId: string,
     submissionId: string,
+    maxAttempts: number,
+    submissionAttemptNo: number,
   ): Promise<
     | { ok: true; session: LearningSessionRecord }
     | { ok: false; active_submission_id: string }
@@ -2031,7 +2046,10 @@ export class LearningCycleService {
         throw new LearningCycleServiceError("PERSISTENCE_ERROR", "学习会话在提交处理中消失")
       }
       if (current.latest_feedback_id) {
-        return { ok: false, completed_feedback_id: current.latest_feedback_id }
+        if (current.session_state.attempt_no > maxAttempts
+          || submissionAttemptNo !== current.session_state.attempt_no) {
+          return { ok: false, completed_feedback_id: current.latest_feedback_id }
+        }
       }
       if (current.active_submission_id) {
         return current.active_submission_id === submissionId
@@ -2081,12 +2099,14 @@ export class LearningCycleService {
   private async completeSession(
     session: LearningSessionRecord,
     record: LearningSubmissionRecord & { feedback: DynamicFeedbackResult },
+    maxAttempts: number,
   ): Promise<LearningSessionRecord> {
     for (let attempt = 1; attempt <= 4; attempt += 1) {
       const latest = await this.dependencies.cycle_store.loadSession(session.session_id)
         ?? session
       if (latest.latest_feedback_id
-        && latest.latest_feedback_id !== record.feedback.feedback_id) {
+        && latest.latest_feedback_id !== record.feedback.feedback_id
+        && latest.session_state.attempt_no > maxAttempts) {
         throw new LearningCycleServiceError(
           "PERSISTENCE_ERROR",
           "学习会话已绑定另一份完成反馈",
@@ -2104,7 +2124,8 @@ export class LearningCycleService {
         return latest
       }
       const repeatExposure = { ...latest.repeat_exposure_by_item }
-      if (!latest.latest_feedback_id) {
+      const isNewAttempt = latest.latest_feedback_id !== record.feedback.feedback_id
+      if (isNewAttempt) {
         for (const answer of record.submission.answers) {
           repeatExposure[answer.item_id] = (repeatExposure[answer.item_id] ?? 0) + 1
         }
@@ -2114,6 +2135,9 @@ export class LearningCycleService {
         active_submission_id: undefined,
         latest_feedback_id: record.feedback.feedback_id,
         repeat_exposure_by_item: repeatExposure,
+        session_state: isNewAttempt
+          ? { ...latest.session_state, attempt_no: latest.session_state.attempt_no + 1 }
+          : latest.session_state,
         revision: latest.revision + 1,
       }
       try {

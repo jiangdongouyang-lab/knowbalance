@@ -97,7 +97,7 @@ export interface ModelBackedProviderOptions {
   /** Staged is the production path; monolithic remains available for compatibility and benchmarks. */
   generation_strategy?: "staged" | "monolithic"
   /** Production defaults to one targeted repair; diagnostics may explicitly disable it. */
-  max_repair_attempts?: 0 | 1
+  max_repair_attempts?: 0 | 1 | 2
   concept_temperature?: number
   concept_max_tokens?: number
   concept_group_size?: number
@@ -142,7 +142,7 @@ interface CodeLabPublicSafetyRepairPatch {
 /** Model-backed Provider. Stages are internal; public Role C contracts remain unchanged. */
 export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
   private readonly generationStrategy: "staged" | "monolithic"
-  private readonly maxRepairAttempts: 0 | 1
+  private readonly maxRepairAttempts: 0 | 1 | 2
   private readonly conceptTemperature: number
   private readonly conceptMaxTokens: number
   private readonly conceptGroupSize: number
@@ -1712,7 +1712,8 @@ function trustedReferenceFailureTestIds(
       return separator >= 0 ? entry.slice(separator + 1).split(/[、,]/) : []
     })
   return new Set(failureCodes.flatMap((entry) => {
-    const separator = entry.lastIndexOf(":")
+    // failure_codes 格式：<test_id>:<reason>[:expected=...:actual=...]，取首个冒号前的 test_id。
+    const separator = entry.indexOf(":")
     if (separator <= 0) return []
     return [entry.slice(0, separator)]
   }))
@@ -1744,7 +1745,7 @@ function validationIssues(report: { issues: Array<{ path: string; message: strin
 }
 
 function boundedRepairs(
-  configured: 0 | 1,
+  configured: 0 | 1 | 2,
   request: ConceptTutorRequest | CodeLabRequest,
 ): number {
   return Math.min(configured, request.generation_spec.policies.max_semantic_revision)
