@@ -20,7 +20,8 @@
     "docker:role-c:doctor": "bun scripts/role-c-docker-doctor.ts",
     "test:role-c:docker": "bun scripts/role-c-docker-smoke.ts && bun scripts/role-c-code-lab-demo.ts && bun scripts/role-c-full-demo.ts",
     "test:role-c:real": "bun scripts/role-c-real-model-smoke.ts",
-    "test:role-c:regenerate": "bun -e \"import { clearRoleCFixtureCache } from \"./tests/helpers/role-c-fixture-cache\"; clearRoleCFixtureCache(); console.log(\"fixture cache cleared\")\""
+    "test:role-c:regenerate": "bun -e \"import { clearRoleCFixtureCache } from \"./tests/helpers/role-c-fixture-cache\"; clearRoleCFixtureCache(); console.log(\"fixture cache cleared\")\"",
+    "accept:role-c:adaptation": "bun scripts/role-c-adaptation-acceptance.ts"
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.20",
