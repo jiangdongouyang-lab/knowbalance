@@ -16,6 +16,7 @@ import type { AgentTraceEvent, LearningEvidenceEvent, ProfileDriftSuggestion } f
 import type { LearnerProfileSnapshot, LearningPathNode } from "./profile-adapter"
 import type { DynamicFeedbackResult } from "./dynamic-feedback"
 import type { ReviewedCPipelineResult } from "../review/types"
+import type { NextRoundGenerationContext } from "../agents/types"
 import type { ReviewRecoveryPublicResult } from "../review/run-recoverable-pipeline"
 import type {
   RoleBPathPlanningRequest,
@@ -86,6 +87,16 @@ export interface RoleCDeliveryAck {
   status: RoleCDeliveryStatus
 }
 
+/** 本轮生成相对上一轮的适配信息（由 next_round_context 确定性拼装，非模型输出）。 */
+export interface RoleCAdaptationInfo {
+  adaptation_action: "remediate" | "reinforce" | "advance"
+  target_objective_ids: string[]
+  /** 上一轮反馈指出的具体误区；主 Agent 传入 misconception_tags 后自动透传。 */
+  addressed_misconception_tags: string[]
+  adaptation_summary: string
+  source_feedback_refs: string[]
+}
+
 export interface RoleCReviewedReleaseDelivery {
   schema_version: SchemaVersion
   delivery_kind: "reviewed_release"
@@ -101,6 +112,8 @@ export interface RoleCReviewedReleaseDelivery {
     AssessmentPublicArtifact,
   ]
   trace_events: [AgentTraceEvent, ...AgentTraceEvent[]]
+  /** 仅当本轮由上一轮决策触发（remediate/reinforce/advance）时存在。 */
+  adaptation?: RoleCAdaptationInfo
 }
 
 export type RoleCLearningSessionHandoff =
@@ -304,6 +317,7 @@ function reviewedRelease(pipeline: ReviewedCPipelineResult): {
 /** Builds the exact validated public envelope used by HTTP and delivery ports. */
 export function createReviewedReleaseDelivery(
   pipeline: ReviewedCPipelineResult,
+  nextRoundContext?: NextRoundGenerationContext,
 ): RoleCReviewedReleaseDelivery {
   const reviewed = reviewedRelease(pipeline)
   const runId = reviewed.run_id
@@ -329,6 +343,7 @@ export function createReviewedReleaseDelivery(
   const finalReview = pipeline.review_reports.at(-1)
   if (!finalReview) throw new Error("ROLE_C_D_DELIVERY_REVIEW_MISSING")
   const traceEvents = structuredClone(trace) as [AgentTraceEvent, ...AgentTraceEvent[]]
+  const adaptation = buildAdaptationInfo(nextRoundContext)
   const body = {
     schema_version: C_SCHEMA_VERSION,
     delivery_kind: "reviewed_release" as const,
@@ -339,6 +354,7 @@ export function createReviewedReleaseDelivery(
     final_review_hash: contentHash(finalReview),
     artifacts: structuredClone(artifacts),
     trace_events: traceEvents,
+    ...(adaptation ? { adaptation } : {}),
   }
   const delivery: RoleCReviewedReleaseDelivery = {
     ...body,
@@ -346,6 +362,33 @@ export function createReviewedReleaseDelivery(
   }
   assertOutboundSchema("reviewed_release_delivery.schema.json", delivery)
   return delivery
+}
+
+/**
+ * 确定性拼装本轮适配信息（非模型输出）：
+ * adaptation_action/focus → 目标；misconception_tags 由主 Agent 传入后透传；
+ * summary 为模板文案；source_feedback_refs 来自上一轮反馈引用。
+ */
+function buildAdaptationInfo(
+  nextRoundContext: NextRoundGenerationContext | undefined,
+): RoleCAdaptationInfo | undefined {
+  if (!nextRoundContext) return undefined
+  const targetList = [...nextRoundContext.focus_objective_ids]
+  const summary = nextRoundContext.action === "remediate"
+    ? `本轮针对目标 ${targetList.join("、")} 进行针对性补救：拆解步骤、补基础、针对误区重新讲解，并新出纠错与基础导向题目。`
+    : nextRoundContext.action === "reinforce"
+      ? `本轮对目标 ${targetList.join("、")} 进行巩固强化：变式与迁移练习，难度适当提高，并新出变式导向题目。`
+      : `本轮继续推进目标 ${targetList.join("、")}。`
+  return {
+    adaptation_action: nextRoundContext.action,
+    target_objective_ids: targetList,
+    addressed_misconception_tags: [...(nextRoundContext.misconception_tags ?? [])],
+    adaptation_summary: summary,
+    source_feedback_refs: [
+      nextRoundContext.prior_feedback_ref,
+      nextRoundContext.trigger_grade_artifact_id,
+    ].filter((ref): ref is string => Boolean(ref)),
+  }
 }
 
 function reviewedReleaseDeliveryIdentity(

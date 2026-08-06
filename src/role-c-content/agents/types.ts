@@ -20,6 +20,8 @@ export interface NextRoundGenerationContext {
   action: "remediate" | "reinforce" | "advance"
   focus_objective_ids: string[]
   reason_codes: string[]
+  /** 上一轮反馈指出的具体误区标签；主 Agent 传入后用于定向补救与 adaptation 回传。 */
+  misconception_tags?: string[]
 }
 
 export interface ConceptTutorRequest {

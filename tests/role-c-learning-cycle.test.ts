@@ -27,6 +27,10 @@ import {
   type SubmissionEnvelope,
   type SecureArtifactStore,
 } from "../src/role-c-content"
+import { createReviewedReleaseDelivery } from "../src/role-c-content/contracts/external-api"
+import { generateConceptLesson } from "../src/role-c-content/agents/concept-tutor"
+import { generateAssessment } from "../src/role-c-content/agents/tiered-evaluator"
+import { contentHash } from "../src/role-c-content/contracts/common"
 import type { AssessmentItemSecure, AssessmentSecureArtifact } from "../src/role-c-content/contracts/artifacts"
 import type { SecureArtifact } from "../src/role-c-content/security/secure-artifact-store"
 import type { LearnerProfile } from "../src/role-b-profile/types"
@@ -1407,4 +1411,87 @@ describe("role C formal learning cycle", () => {
       "learner-cycle-hash",
     ))?.feedback_id).toBeDefined()
   })
+
+  test("attaches adaptation info to reviewed release from next round context", async () => {
+    const fixture = await readyFixture("RUN-CYCLE-ADAPTATION")
+    const remediateContext = {
+      request_id: "REQ-ADAPT-R",
+      parent_spec_id: fixture.pipelineInput.generation_spec.spec_id,
+      prior_feedback_ref: "FB-R-1",
+      trigger_grade_artifact_id: "GRADE-R-1",
+      action: "remediate" as const,
+      focus_objective_ids: ["O1"],
+      reason_codes: ["round_accuracy_below_remediation_threshold"],
+      misconception_tags: ["integer_division", "skips_last_element"],
+    }
+    const delivery = createReviewedReleaseDelivery(
+      fixture.pipelineResult,
+      remediateContext,
+    )
+    expect(delivery.adaptation).toMatchObject({
+      adaptation_action: "remediate",
+      target_objective_ids: ["O1"],
+      addressed_misconception_tags: ["integer_division", "skips_last_element"],
+      source_feedback_refs: ["FB-R-1", "GRADE-R-1"],
+    })
+    expect(delivery.adaptation?.adaptation_summary).toContain("针对性补救")
+
+    const reinforceDelivery = createReviewedReleaseDelivery(
+      fixture.pipelineResult,
+      { ...remediateContext, action: "reinforce", reason_codes: ["round_accuracy_below_reinforce_threshold"] },
+    )
+    expect(reinforceDelivery.adaptation?.adaptation_action).toBe("reinforce")
+    expect(reinforceDelivery.adaptation?.adaptation_summary).toContain("巩固强化")
+    expect(reinforceDelivery.adaptation?.adaptation_summary).not.toContain("针对性补救")
+
+    // 无 next_round_context（首轮生成）时不带 adaptation
+    const initial = createReviewedReleaseDelivery(fixture.pipelineResult)
+    expect(initial.adaptation).toBeUndefined()
+  })
+
+  test("generates distinct content for remediate vs reinforce", async () => {
+    const fixture = await readyFixture("RUN-CYCLE-VARIANT-DIFF")
+    const provider = createProvider()
+    const baseRequest = {
+      generation_spec: fixture.pipelineInput.generation_spec,
+      evidence_pack: fixture.pipelineInput.evidence_pack,
+    }
+    const remediateContext = {
+      request_id: "REQ-VARIANT-R",
+      parent_spec_id: fixture.pipelineInput.generation_spec.spec_id,
+      prior_feedback_ref: "FB-V-R",
+      trigger_grade_artifact_id: "GRADE-V-R",
+      action: "remediate" as const,
+      focus_objective_ids: ["O1"],
+      reason_codes: ["round_accuracy_below_remediation_threshold"],
+      misconception_tags: ["integer_division"],
+    }
+    const reinforceContext = { ...remediateContext, action: "reinforce" as const, reason_codes: ["round_accuracy_below_reinforce_threshold"] }
+
+    const remediateLesson = await generateConceptLesson(
+      { ...baseRequest, next_round_context: remediateContext },
+      provider,
+    )
+    const reinforceLesson = await generateConceptLesson(
+      { ...baseRequest, next_round_context: reinforceContext },
+      provider,
+    )
+    const remediateAssessment = await provider.generateAssessment({
+      ...baseRequest,
+      concept_artifact: remediateLesson,
+      next_round_context: remediateContext,
+    })
+    const reinforceAssessment = await provider.generateAssessment({
+      ...baseRequest,
+      concept_artifact: reinforceLesson,
+      next_round_context: reinforceContext,
+    })
+    const lessonDiffers = contentHash(remediateLesson.payload)
+      !== contentHash(reinforceLesson.payload)
+    const assessmentDiffers = contentHash(remediateAssessment.public_draft.payload)
+      !== contentHash(reinforceAssessment.public_draft.payload)
+    console.error("VARIANT-DIFF lesson:", lessonDiffers, "assessment:", assessmentDiffers)
+    expect(lessonDiffers).toBe(true)
+    expect(assessmentDiffers).toBe(true)
+  }, { timeout: 300000 })
 })
