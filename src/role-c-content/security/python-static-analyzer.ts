@@ -83,7 +83,18 @@ export function analyzePythonSource(
     }
   }
   for (const [pattern, code] of DANGEROUS_PATTERNS) {
-    if (pattern.test(source)) issues.push(issue(code, `源码命中禁止能力：${code}`))
+    // 逐行扫描并报告具体行号与命中的 token，让修复轮次能准确定位并移除该用法。
+    const lines = source.split(/\r?\n/)
+    for (let index = 0; index < lines.length; index += 1) {
+      const match = pattern.exec(lines[index]!)
+      if (match) {
+        issues.push(issue(
+          code,
+          `源码第 ${index + 1} 行命中禁止能力：${match[0]}（请移除该用法）`,
+        ))
+        break
+      }
+    }
   }
   if (contract.execution_mode === "function") {
     const entryPoint = contract.entry_point

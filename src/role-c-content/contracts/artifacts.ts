@@ -368,11 +368,30 @@ export interface RubricCriterionResult {
   evidence_excerpt?: string
 }
 
+/**
+ * Correct-answer disclosure attached to post-submission feedback only. The
+ * static public assessment artifact never carries answers; learners see them
+ * only after a trusted score exists for their own submission.
+ */
+export type RevealedAnswer =
+  | { kind: "choice"; option_id: string }
+  | { kind: "text"; accepted: string[] }
+  | { kind: "numeric"; target: number; unit?: string }
+  | {
+      kind: "rubric"
+      criteria: Array<{
+        description: string
+        required_evidence: string[]
+      }>
+    }
+  | { kind: "code"; code: string }
+
 export interface GradeFeedbackItem {
   item_id: string
   feedback_code: string
   message: string
   next_step: string
+  revealed_answer?: RevealedAnswer
 }
 
 export interface GradeFeedback {

@@ -28,11 +28,16 @@ import {
   type SecureArtifactStore,
 } from "../src/role-c-content"
 import type { AssessmentItemSecure, AssessmentSecureArtifact } from "../src/role-c-content/contracts/artifacts"
+import type { SecureArtifact } from "../src/role-c-content/security/secure-artifact-store"
 import type { LearnerProfile } from "../src/role-b-profile/types"
 import { ROLE_C_PROMPT_MANIFEST_VERSION } from "../src/role-c-content/prompts/common-policy"
 import { ModelBackedRoleCContentProvider } from "../src/role-c-content/providers/model-backed-provider"
 import { modelBackedProviderOptionsFromEnv } from "../src/role-c-content/providers/model-backed-provider-env"
 import { createRoleCModelGatewayFromEnv } from "../src/role-c-content/contracts/model-gateway"
+import {
+  loadCachedRoleCFixture,
+  saveCachedRoleCFixture,
+} from "./helpers/role-c-fixture-cache"
 
 function createProvider() {
   const gateway = createRoleCModelGatewayFromEnv(process.env)
@@ -126,7 +131,24 @@ const passingReviewPort: ContentReviewPort = {
   },
 }
 
-async function readyFixture(runId: string) {
+/**
+ * 学习循环测试共享同一个真实模型生成的 run（concept + lab + assessment）。
+ * 首次运行真实生成并写入 .tmp/role-c-fixtures/ 缓存；之后全部读缓存，
+ * 秒级加载且不受模型输出波动影响。生成质量验证由
+ * scripts/role-c-real-model-smoke.ts 承担。
+ *
+ * 单飞锁：并发测试同时请求时只有第一次真正生成/加载，其余等待同一结果。
+ */
+type CycleFixture = Awaited<ReturnType<typeof buildSharedCycleFixture>>
+let sharedCycleFixture: Promise<CycleFixture> | undefined
+
+function readyFixture(_runId: string): Promise<CycleFixture> {
+  if (!sharedCycleFixture) sharedCycleFixture = buildSharedCycleFixture()
+  return sharedCycleFixture
+}
+
+async function buildSharedCycleFixture() {
+  const runId = "RUN-CYCLE-SHARED"
   const profile: LearnerProfile = {
     learner_id: "learner-cycle",
     level: "basic",
@@ -157,7 +179,7 @@ async function readyFixture(runId: string) {
   })
   const snapshot = adaptLearnerProfile(profile, { profile_version: "profile-cycle-v1" })
   const built = buildGenerationSpec({
-    run_id: runId,
+    run_id: `RUN-CYCLE-SHARED`,
     profile_snapshot: snapshot,
     path_node: path,
     evidence_pack: evidence,
@@ -169,21 +191,66 @@ async function readyFixture(runId: string) {
     seed: 29,
   })
   if (!built.ok) throw new Error(JSON.stringify(built))
-  const agents = createRoleCAgents(createProvider(), {
-    code_lab: codeVerifier,
-    assessment: assessmentVerifier,
-  })
+
+  const cacheKey = `cycle-shared-${ROLE_C_PROMPT_MANIFEST_VERSION}-${CURRENT_MODEL_HASH.slice(0, 8)}`
+  const cached = loadCachedRoleCFixture(cacheKey)
+
   const secureStore = new InMemorySecureArtifactStore()
-  const pipelineInput = { generation_spec: built.spec, evidence_pack: evidence }
-  const pipelineResult = await runReviewedCPipeline(
-    pipelineInput,
-    agents,
-    secureStore,
-    { review_port: passingReviewPort },
-  )
-  if (pipelineResult.status !== "ready" || !pipelineResult.public_artifacts.assessment?.payload) {
-    throw new Error(JSON.stringify(pipelineResult))
+  let pipelineInput: { generation_spec: typeof built.spec; evidence_pack: typeof evidence }
+  let pipelineResult: Awaited<ReturnType<typeof runReviewedCPipeline>>
+
+  if (cached) {
+    pipelineInput = cached.pipeline_input as typeof pipelineInput
+    pipelineResult = cached.pipeline_result as typeof pipelineResult
+    const cachedArtifacts = cached.secure_artifacts as SecureArtifact[]
+    if (pipelineResult.secure_refs.length > 0 && cachedArtifacts.length > 0) {
+      const refs = await secureStore.putBatch(cachedArtifacts, {
+        principal: "role-c-pipeline",
+        run_id: built.spec.run_id,
+      })
+      pipelineResult = { ...pipelineResult, secure_refs: refs }
+    }
+  } else {
+    pipelineInput = { generation_spec: built.spec, evidence_pack: evidence }
+    const agents = createRoleCAgents(createProvider(), {
+      code_lab: codeVerifier,
+      assessment: assessmentVerifier,
+    })
+    // 真实模型生成有少量随机失败（如 code-lab secure 阶段），失败时自动重跑一次。
+    pipelineResult = await runReviewedCPipeline(
+      pipelineInput,
+      agents,
+      secureStore,
+      { review_port: passingReviewPort },
+    )
+    if (pipelineResult.status !== "ready"
+      || !pipelineResult.public_artifacts.assessment?.payload) {
+      pipelineResult = await runReviewedCPipeline(
+        pipelineInput,
+        agents,
+        secureStore,
+        { review_port: passingReviewPort },
+      )
+    }
+    if (pipelineResult.status !== "ready"
+      || !pipelineResult.public_artifacts.assessment?.payload) {
+      throw new Error(JSON.stringify(pipelineResult))
+    }
+    const secureArtifacts = []
+    for (const ref of pipelineResult.secure_refs) {
+      secureArtifacts.push(await secureStore.get(ref, {
+        principal: "role-c-pipeline",
+        run_id: built.spec.run_id,
+      }))
+    }
+    saveCachedRoleCFixture(cacheKey, {
+      pipeline_input: pipelineInput,
+      pipeline_result: pipelineResult,
+      secure_artifacts: secureArtifacts,
+      snapshot,
+    })
   }
+
   let secureAssessment: NonNullable<AssessmentSecureArtifact["payload"]> | null = null
   for (const ref of pipelineResult.secure_refs) {
     const artifact = await secureStore.get(ref, {
@@ -201,6 +268,7 @@ async function readyFixture(runId: string) {
 async function fullScoreSubmission(
   fixture: Awaited<ReturnType<typeof readyFixture>>,
   submissionId = "SUB-CYCLE-01",
+  attemptNo = 1,
 ): Promise<SubmissionEnvelope> {
   const assessment = fixture.pipelineResult.public_artifacts.assessment!
   const securePayload = fixture.secureAssessment
@@ -225,7 +293,7 @@ async function fullScoreSubmission(
     run_id: fixture.pipelineInput.generation_spec.run_id,
     learner_id_hash: "learner-cycle-hash",
     form_id: assessment.payload!.form_id,
-    attempt_no: 1,
+    attempt_no: attemptNo,
     answers,
   }
 }
@@ -298,7 +366,7 @@ async function serviceFixture(
   const session = await service.openTrustedPreselectedSession({
     routing_policy: "trusted_preselected_v1",
     session_id: `SESSION-${runId}`,
-    run_id: runId,
+    run_id: fixture.pipelineInput.generation_spec.run_id,
     authenticated_learner_id_hash: "learner-cycle-hash",
     attempt_no: 1,
     required_item_ids: requiredItemIds,
@@ -1241,5 +1309,90 @@ describe("role C formal learning cycle", () => {
     )).toBe(true)
     expect(JSON.stringify(result.completion.feedback)).not.toContain("\"alpha\"")
     expect(JSON.stringify(result.completion.feedback)).not.toContain("processed_artifact_ids")
+  })
+
+  test("reveals correct answers only inside post-submission feedback", async () => {
+    const fixture = await serviceFixture("RUN-CYCLE-REVEALED")
+    const assessment = fixture.assessment.payload!
+    const submission = await fullScoreSubmission(fixture, "SUB-REVEALED")
+    const result = await fixture.service.processSubmissionInternal({
+      session_id: fixture.session.session_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      submission,
+    })
+    expect(result.status).toBe("completed")
+    if (result.status !== "completed") return
+    const feedback = result.completion.feedback.grade_result.payload!.feedback
+    const secureById = new Map(fixture.secureAssessment!.items.map((item) => [item.item_id, item]))
+    expect(feedback.item_feedback.length).toBeGreaterThan(0)
+    for (const item of assessment.items) {
+      const entry = feedback.item_feedback.find((fb) => fb.item_id === item.item_id)!
+      expect(entry.revealed_answer).toBeDefined()
+      const secureItem = secureById.get(item.item_id)!
+      if (item.modality === "mcq" || item.modality === "true_false") {
+        expect(entry.revealed_answer).toMatchObject({
+          kind: "choice",
+          option_id: secureItem.correct_option_id,
+        })
+      } else if (item.modality === "code") {
+        expect(entry.revealed_answer).toMatchObject({ kind: "code" })
+        expect(typeof (entry.revealed_answer as { code: string }).code).toBe("string")
+      } else {
+        const spec = secureItem.answer_spec
+        if (spec.kind === "numeric") {
+          expect(entry.revealed_answer).toMatchObject({ kind: "numeric", target: spec.target })
+        } else if (spec.kind === "exact_set") {
+          expect(entry.revealed_answer).toMatchObject({ kind: "text", accepted: spec.accepted })
+        } else {
+          expect(entry.revealed_answer).toMatchObject({ kind: "rubric" })
+        }
+      }
+    }
+    // 静态公开测评产物绝不能含答案
+    expect(JSON.stringify(assessment)).not.toContain("correct_option_id")
+    expect(JSON.stringify(assessment)).not.toContain("answer_spec")
+  })
+
+  test("allows same-form retries up to max_attempts then locks the session", async () => {
+    const fixture = await serviceFixture("RUN-CYCLE-RETRY")
+    const maxAttempts = fixture.assessment.payload!.submission_policy.max_attempts
+    expect(maxAttempts).toBe(3)
+    let latestFeedbackId: string | undefined
+    for (let attemptNo = 1; attemptNo <= maxAttempts; attemptNo += 1) {
+      const submission = await fullScoreSubmission(
+        fixture,
+        `SUB-RETRY-${attemptNo}`,
+        attemptNo,
+      )
+      const result = await fixture.service.processSubmissionInternal({
+        session_id: fixture.session.session_id,
+        authenticated_learner_id_hash: "learner-cycle-hash",
+        submission,
+      })
+      expect(result.status).toBe("completed")
+      if (result.status !== "completed") return
+      expect(result.completion.feedback.feedback_id).not.toBe(latestFeedbackId)
+      latestFeedbackId = result.completion.feedback.feedback_id
+      expect(latestFeedbackId).toBeDefined()
+    }
+    const exhausted = await fixture.service.processSubmissionInternal({
+      session_id: fixture.session.session_id,
+      authenticated_learner_id_hash: "learner-cycle-hash",
+      submission: await fullScoreSubmission(fixture, "SUB-RETRY-EXHAUSTED"),
+    })
+    expect(exhausted).toMatchObject({
+      status: "blocked",
+      code: "SESSION_ALREADY_COMPLETED",
+    })
+    expect((await fixture.service.getResult(
+      fixture.session.session_id,
+      "SUB-RETRY-1",
+      "learner-cycle-hash",
+    ))?.feedback_id).toBeDefined()
+    expect((await fixture.service.getResult(
+      fixture.session.session_id,
+      "SUB-RETRY-3",
+      "learner-cycle-hash",
+    ))?.feedback_id).toBeDefined()
   })
 })

@@ -6,6 +6,9 @@ import {
   runLearningOrchestrator,
 } from "../src/orchestration/learning-orchestrator-runner"
 
+// 真实模型 + Docker 代码执行依赖：默认跳过，RUN_INTEGRATION_TESTS=1 时运行。
+const runIntegration = process.env.RUN_INTEGRATION_TESTS === "1"
+
 const temporaryRoots: string[] = []
 
 afterEach(async () => {
@@ -20,7 +23,7 @@ async function tempRoot(): Promise<string> {
   return root
 }
 
-describe("learning orchestrator runner", () => {
+describe.skipIf(!runIntegration)("learning orchestrator runner", () => {
   test("runs the full scaffold workflow through eight workers and writes audit artifacts", async () => {
     const root = await tempRoot()
 

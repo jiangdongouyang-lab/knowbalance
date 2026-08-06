@@ -693,7 +693,8 @@ function evaluateHarnessResults(
       continue
     }
     const reason = result.outcome === "returned"
-      ? "assertion_failed"
+      // 附带 expected/actual 差异，让执行修复轮能定位是预期值算错还是实现写错。
+      ? `assertion_failed:expected=${JSON.stringify(test.expected)}:actual=${JSON.stringify(result.actual)}`
       : result.outcome === "runtime_error"
         ? `runtime_${result.error_type}`
         : result.outcome

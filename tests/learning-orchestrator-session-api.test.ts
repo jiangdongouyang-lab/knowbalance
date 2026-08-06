@@ -3,6 +3,8 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { createLearningOrchestratorApiHandler } from "../src/orchestration/learning-orchestrator-api"
+// 真实模型 + Docker 代码执行依赖：默认跳过，RUN_INTEGRATION_TESTS=1 时运行。
+const runIntegration = process.env.RUN_INTEGRATION_TESTS === "1"
 
 const roots: string[] = []
 
@@ -49,7 +51,7 @@ async function createSession(handle: (request: Request) => Promise<Response>) {
   return { response, body: await json(response) }
 }
 
-describe("learning orchestrator persistent session HTTP API", () => {
+describe.skipIf(!runIntegration)("learning orchestrator persistent session HTTP API", () => {
   test("binds every session route to the authenticated learner", async () => {
     const { handle } = await fixture()
     const ownerHeaders = { "content-type": "application/json", authorization: "Bearer learner-interactive-001" }

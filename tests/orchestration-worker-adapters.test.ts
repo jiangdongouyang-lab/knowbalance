@@ -176,7 +176,8 @@ describe("orchestration worker adapters", () => {
     expect(artifacts.next_path_node?.target_source_ids).not.toEqual(["K007", "K009", "K018"])
   })
 
-  test("deterministic mode completes path-planner and concept-tutor with real C concept artifact", async () => {
+  test.skipIf(process.env.RUN_INTEGRATION_TESTS !== "1")(
+    "deterministic mode completes path-planner and concept-tutor with real C concept artifact", async () => {
     const { upstream_artifacts, input_refs } = await runDeterministicRoleBPrefix()
     const pathStep = ORCHESTRATION_WORKER_SEQUENCE[4]
     const invocation: WorkerInvocation = {
