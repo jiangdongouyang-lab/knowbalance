@@ -1,4 +1,4 @@
-import type { RoleDSession, RoleCDecisionView, RoleCFeedbackView } from "./types"
+import type { RoleDSession, RoleCDecisionView, RoleCFeedbackView, RoleCAction } from "./types"
 
 type AssessmentItem = NonNullable<RoleDSession["artifacts"][number]["items"]>[number]
 
@@ -34,7 +34,7 @@ export interface RoleCFeedbackPayload {
     revision: number
   }>
   final_decision: {
-    action: RoleCDecisionView
+    action: RoleCAction
     basis: "round_accuracy" | "profile_drift"
     confidence: number
     reason_codes: string[]
@@ -229,8 +229,8 @@ function normalizeFeedback(feedback: RoleCFeedbackPayload): RoleCFeedbackView {
   }
 }
 
-export function updatePath(path: RoleDSession["path"], decision: RoleCDecisionView): RoleDSession["path"] {
-  if (decision !== "advance") return path
+export function updatePath(path: RoleDSession["path"], action: RoleCAction): RoleDSession["path"] {
+  if (action !== "advance") return path
   const currentIndex = path.findIndex((node) => node.status === "current")
   if (currentIndex < 0) return path
   const nextIndex = path.findIndex((node, index) => index > currentIndex && node.status === "upcoming")

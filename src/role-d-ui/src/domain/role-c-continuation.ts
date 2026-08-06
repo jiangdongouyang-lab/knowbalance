@@ -5,7 +5,7 @@ import type {
   RenderBlock,
 } from "../../../role-c-content/contracts/artifacts"
 import type { CitationRef } from "../../../role-c-content/contracts/common"
-import type { LearningArtifactView } from "./types"
+import type { LearningArtifactView, CitationView } from "./types"
 import type { LearnerProfileSnapshot, LearningPathNode } from "../../../role-c-content/contracts/profile-adapter"
 import type { RagEvidencePack } from "../../../role-c-content/contracts/evidence-pack"
 import type { RoleDGeneratedArtifact, RoleDWorkflowEvent } from "../../../role-d-integration/contracts"
@@ -266,9 +266,9 @@ function renderCodeLab(payload: NonNullable<CodeLabPublicArtifact["payload"]>): 
   return [...instructions, "Starter code:", payload.starter_code, ...tests].join("\n\n")
 }
 
-function simplifyCitations(citations: CitationRef[]): RoleDPublicCitation[] {
+function simplifyCitations(citations: CitationRef[]): CitationView[] {
   return [...new Map(citations.map((citation) => [
     `${citation.source_id}:${citation.fact_id}`,
-    { source_id: citation.source_id, fact_id: citation.fact_id },
+    { sourceId: citation.source_id, factId: citation.fact_id },
   ])).values()]
 }
