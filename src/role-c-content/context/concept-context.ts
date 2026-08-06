@@ -20,7 +20,9 @@ export interface ConceptTutorModelInput {
     examples: EvidenceExample[]
   }>
   upstream: {
-    next_round_context?: ConceptTutorRequest["next_round_context"]
+    next_round_context?: ConceptTutorRequest["next_round_context"] & {
+      teaching_strategy?: "reduce_load" | "same_difficulty_new_variant" | "hold_current_path"
+    }
     revision_objections?: ConceptTutorRequest["revision_objections"]
     external_revision_round?: ConceptTutorRequest["external_revision_round"]
   }
@@ -76,9 +78,7 @@ export function buildConceptTutorModelInput(
     },
     evidence,
     upstream: {
-      ...(nextRoundContext
-        ? { next_round_context: nextRoundContext }
-        : {}),
+      ...(nextRoundContext ? { next_round_context: nextRoundContext } : {}),
       ...(request.revision_objections ? { revision_objections: structuredClone(request.revision_objections) } : {}),
       ...(request.external_revision_round !== undefined
         ? { external_revision_round: request.external_revision_round }

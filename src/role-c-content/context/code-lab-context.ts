@@ -30,7 +30,9 @@ export interface CodeLabModelInput {
     }>
     misconceptions: NonNullable<CodeLabRequest["concept_artifact"]["payload"]>["misconceptions"]
   }
-  next_round_context?: CodeLabRequest["next_round_context"]
+  next_round_context?: CodeLabRequest["next_round_context"] & {
+    teaching_strategy?: "reduce_load" | "same_difficulty_new_variant" | "hold_current_path"
+  }
   revision_objections?: CodeLabRequest["revision_objections"]
   external_revision_round?: CodeLabRequest["external_revision_round"]
 }
