@@ -170,6 +170,9 @@ export type RoleCForRoleDResult =
         sessionId: string
         formId: string
         attemptNo: number
+        /** 锚点路由请求与锚点题（锚点模式生成时存在，D 据此进入锚点阶段）。 */
+        routing_request_id?: string
+        anchor_item_ids?: string[]
       }
       /** Exact reviewed public Role C artifacts; secure artifacts are excluded. */
       reviewedRelease?: RoleCReviewedReleaseDelivery

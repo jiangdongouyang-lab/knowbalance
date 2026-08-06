@@ -44,7 +44,7 @@ function validateCommandBody(value: Record<string, unknown>): OrchestratorApiSch
   if (typeof value.command_id !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(value.command_id)) {
     errors.push("command_id is required and must be safe")
   }
-  if (!["submit_diagnosis_answers", "submit_assessment_answers", "retry"].includes(String(value.type))) {
+  if (!["submit_diagnosis_answers", "submit_anchor_answers", "submit_assessment_answers", "retry"].includes(String(value.type))) {
     errors.push("Unsupported command type")
   }
   return errors.length > 0 ? { ok: false, errors } : { ok: true, value: value as unknown as InteractiveSessionCommand }
