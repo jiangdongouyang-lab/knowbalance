@@ -341,7 +341,12 @@ function containsExpectedSecret(
   if (tokens.length === 0) return false
   const secret = tokens.join("")
   if (secret.length === 0) return false
+  // 纯数字等低熵标量是教学文本的高频词汇（"预期输出为 20"），语义关系判定会
+  // 大面积误报；仅保留代码字面量检测（public 示例代码中出现 return 20 才是真泄漏）。
+  const lowEntropyScalar = tokens.every((token) =>
+    /^\d+(?:\.\d+)?$/u.test(token))
   return publicStrings.some((text) => {
+    if (lowEntropyScalar) return containsCodeReturnLiteral(text, value)
     const compact = normalizeSemanticText(text)
     const escaped = escapeRegExp(secret)
     const explicitRelations = [

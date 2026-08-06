@@ -421,14 +421,13 @@
           "maxItems": 64,
           "items": {
             "type": "object",
-            "required": ["test_id", "input", "expected", "comparison"],
+            "required": ["test_id", "input", "expected"],
             "properties": {
               "test_id": { "type": "string", "minLength": 1 },
               "input": {},
               "expected": {},
-              "comparison": { "$ref": "#/$defs/test_comparison" }
-            },
-            "additionalProperties": false
+              "comparison": { "$ref": "#/$defs/lenient_test_comparison" }
+            }
           }
         },
         "mutation_repairs": {
@@ -444,8 +443,7 @@
             "additionalProperties": false
           }
         }
-      },
-      "additionalProperties": false
+      }
     },
     "starter_repair_patch": {
       "type": "object",
@@ -454,6 +452,15 @@
         "starter_code": { "type": "string", "minLength": 1, "maxLength": 20000 }
       },
       "additionalProperties": false
+    },
+    "lenient_test_comparison": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string" },
+        "abs_tolerance": { "type": "number" },
+        "rel_tolerance": { "type": "number" },
+        "tolerance": { "type": "number" }
+      }
     },
     "secure_author_payload": {
       "type": "object",
@@ -466,14 +473,13 @@
           "maxItems": 64,
           "items": {
             "type": "object",
-            "required": ["input", "expected", "comparison", "misconception_tag"],
+            "required": ["input", "expected", "misconception_tag"],
             "properties": {
               "input": {},
               "expected": {},
-              "comparison": { "$ref": "#/$defs/test_comparison" },
+              "comparison": { "$ref": "#/$defs/lenient_test_comparison" },
               "misconception_tag": { "type": "string", "minLength": 1 }
-            },
-            "additionalProperties": false
+            }
           }
         },
         "mutation_variants": {
@@ -485,12 +491,10 @@
             "properties": {
               "code": { "type": "string", "minLength": 1, "maxLength": 20000 },
               "misconception_tag": { "type": "string", "minLength": 1 }
-            },
-            "additionalProperties": false
+            }
           }
         }
-      },
-      "additionalProperties": false
+      }
     },
     "secure_payload": {
       "type": "object",

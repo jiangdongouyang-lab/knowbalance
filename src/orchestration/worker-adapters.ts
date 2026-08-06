@@ -68,7 +68,11 @@ function resolveRoleCProvider(): { ok: true; provider: ModelBackedRoleCContentPr
     const gateway = createRoleCModelGatewayFromEnv(process.env)
     return {
       ok: true,
-      provider: new ModelBackedRoleCContentProvider(gateway, modelBackedProviderOptionsFromEnv(process.env)),
+      provider: new ModelBackedRoleCContentProvider(gateway, {
+        ...modelBackedProviderOptionsFromEnv(process.env),
+        max_repair_attempts: 1,
+        concept_group_size: 1,
+      }),
     }
   } catch (error) {
     return {
@@ -339,7 +343,7 @@ async function runDeterministicWorkerAdapter(
       generation_spec: conceptArtifact.value.generation_spec,
       evidence_pack: conceptArtifact.value.evidence_pack,
       concept_artifact: conceptArtifact.value.concept_lesson,
-    }, resolveRoleCProviderOrFail(), new TrustedCodeLabVerifier(new DeterministicCodeLabRunner()))
+    }, resolveRoleCProviderOrFail(), new TrustedCodeLabVerifier(new SubprocessCodeRunner()))
 
     if (pair.public_artifact.status !== "ready" || pair.secure_artifact.status !== "ready") {
       return failedResult(invocation, {
@@ -372,7 +376,7 @@ async function runDeterministicWorkerAdapter(
         objective_ids: codeLabArtifact.value.code_lab_public.payload?.objective_ids ?? [],
         execution_verified: codeLabArtifact.value.code_lab_public.quality.execution_verified === true,
       },
-    }, resolveRoleCProviderOrFail(), new TrustedAssessmentVerifier(new DeterministicCodeLabRunner()))
+    }, resolveRoleCProviderOrFail(), new TrustedAssessmentVerifier(new SubprocessCodeRunner()))
 
     if (pair.public_artifact.status !== "ready" || pair.secure_artifact.status !== "ready") {
       return failedResult(invocation, {
@@ -690,36 +694,40 @@ function fillRequiredFacts(pathNode: LearningPathNode, evidencePack: ReturnType<
   }
 }
 
-export class DeterministicCodeLabRunner implements CodeRunner {
+export class SubprocessCodeRunner implements CodeRunner {
   readonly runner_image_digest = DETERMINISTIC_RUNNER_DIGEST
 
   async execute(request: CodeExecutionRequest): Promise<CodeExecutionResult> {
     const tests = request.test_suite?.tests ?? []
-    const allIds = tests.map((entry) => entry.test_id)
-    if (request.code.includes("return None")) return failed(allIds, allIds)
-    if (request.code.includes("total = score")) return failed(allIds, ["HT-O1-ALL"])
-    if (request.code.includes("scores[:-1]")) return failed(allIds, ["HT-O2-MIXED", "HT-COUNT-LAST_ITEM"])
-    if (request.code.includes("return 80")) return failed(allIds, ["HT-O2-SINGLE", "HT-O2-MIXED"])
-    if (request.code.includes("// count")) return failed(allIds, ["HT-O3-FRACTION"])
-    if (request.code.includes("if score >= 60:")) return failed(allIds, ["HT-COUNT-CUSTOM_MARK"])
-    if (request.code.includes("if score < pass_mark:")) return failed(allIds, ["HT-COUNT-BOUNDARY"])
-    if (request.code.includes("if score >= pass_mark:") && request.code.includes("count += 1")) return passed(allIds.length)
-    return passed(allIds.length)
-  }
-}
+    if (tests.length === 0) return { status: "passed", passed_tests: 0, total_tests: 0, score_ratio: 1, failure_codes: [], runner_image_digest: this.runner_image_digest }
 
-function passed(total: number): CodeExecutionResult {
-  return { status: "passed", passed_tests: total, total_tests: total, score_ratio: 1, failure_codes: [], runner_image_digest: DETERMINISTIC_RUNNER_DIGEST }
-}
-
-function failed(allIds: string[], failedIds: string[]): CodeExecutionResult {
-  return {
-    status: "failed",
-    passed_tests: Math.max(0, allIds.length - failedIds.length),
-    total_tests: allIds.length,
-    score_ratio: allIds.length === 0 ? 0 : Math.max(0, allIds.length - failedIds.length) / allIds.length,
-    failure_codes: failedIds.map((id) => `${id}: assertion_failed`),
-    runner_image_digest: DETERMINISTIC_RUNNER_DIGEST,
+    const entryPoint = request.test_suite?.execution_contract.entry_point ?? "solution"
+    const testIds = tests.map((t) => t.test_id)
+    const failed: string[] = []
+    for (const test of tests) {
+      try {
+        const input = test.input as { args?: unknown[]; kwargs?: Record<string, unknown> }
+        const args = Array.isArray(input?.args) ? input.args.map((a) => JSON.stringify(a)).join(", ") : ""
+        const code = `import json\n${request.code}\n\nprint(json.dumps(${entryPoint}(${args})))`
+        const proc = Bun.spawnSync(["python3", "-c", code], { stdout: "pipe", stderr: "pipe", timeout: 5000 })
+        if (proc.exitCode !== 0) { failed.push(test.test_id); continue }
+        const output = new TextDecoder().decode(proc.stdout).trim()
+        const expected = JSON.stringify(test.expected)
+        // Numeric tolerance: parse both as float and compare
+        const outNum = Number(output); const expNum = Number(expected)
+        if (!isNaN(outNum) && !isNaN(expNum)) {
+          if (Math.abs(outNum - expNum) > 1e-6) failed.push(test.test_id)
+        } else if (output !== expected) { failed.push(test.test_id) }
+      } catch { failed.push(test.test_id) }
+    }
+    return {
+      status: failed.length === 0 ? "passed" : "failed",
+      passed_tests: testIds.length - failed.length,
+      total_tests: testIds.length,
+      score_ratio: testIds.length === 0 ? 0 : (testIds.length - failed.length) / testIds.length,
+      failure_codes: failed.map((id) => `${id}: assertion_failed`),
+      runner_image_digest: this.runner_image_digest,
+    }
   }
 }
 

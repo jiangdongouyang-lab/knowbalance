@@ -27,6 +27,7 @@ import {
   type SubmissionEnvelope,
   type SecureArtifactStore,
 } from "../src/role-c-content"
+import type { AssessmentItemSecure, AssessmentSecureArtifact } from "../src/role-c-content/contracts/artifacts"
 import type { LearnerProfile } from "../src/role-b-profile/types"
 import { ROLE_C_PROMPT_MANIFEST_VERSION } from "../src/role-c-content/prompts/common-policy"
 import { ModelBackedRoleCContentProvider } from "../src/role-c-content/providers/model-backed-provider"
@@ -183,33 +184,76 @@ async function readyFixture(runId: string) {
   if (pipelineResult.status !== "ready" || !pipelineResult.public_artifacts.assessment?.payload) {
     throw new Error(JSON.stringify(pipelineResult))
   }
-  return { pipelineInput, pipelineResult, secureStore, snapshot }
+  let secureAssessment: NonNullable<AssessmentSecureArtifact["payload"]> | null = null
+  for (const ref of pipelineResult.secure_refs) {
+    const artifact = await secureStore.get(ref, {
+      principal: "role-c-pipeline",
+      run_id: built.spec.run_id,
+    })
+    if (artifact.artifact_type === "assessment_secure") {
+      secureAssessment = artifact.payload
+    }
+  }
+  if (!secureAssessment) throw new Error("secure assessment artifact missing")
+  return { pipelineInput, pipelineResult, secureStore, snapshot, secureAssessment }
 }
 
-function fullScoreSubmission(runId: string, formId: string, submissionId = "SUB-CYCLE-01"): SubmissionEnvelope {
+async function fullScoreSubmission(
+  fixture: Awaited<ReturnType<typeof readyFixture>>,
+  submissionId = "SUB-CYCLE-01",
+): Promise<SubmissionEnvelope> {
+  const assessment = fixture.pipelineResult.public_artifacts.assessment!
+  const securePayload = fixture.secureAssessment
+  const secureById = new Map(securePayload!.items.map((item) => [item.item_id, item]))
+  const answers: SubmissionEnvelope["answers"] = assessment.payload!.items.map((item) => {
+    const secureItem = secureById.get(item.item_id)!
+    if (item.modality === "mcq" || item.modality === "true_false") {
+      return { item_id: item.item_id, selected_option_id: secureItem.correct_option_id!, hint_level_used: 0 }
+    }
+    if (item.modality === "code") {
+      return {
+        item_id: item.item_id,
+        code_response: codeAnswerFor(item.starter_code ?? ""),
+        hint_level_used: 0,
+      }
+    }
+    return { item_id: item.item_id, text_response: textAnswerFor(secureItem), hint_level_used: 0 }
+  })
   return {
     schema_version: "1.0",
     submission_id: submissionId,
-    run_id: runId,
+    run_id: fixture.pipelineInput.generation_spec.run_id,
     learner_id_hash: "learner-cycle-hash",
-    form_id: formId,
+    form_id: assessment.payload!.form_id,
     attempt_no: 1,
-    answers: [
-      { item_id: "ITEM-O1-T1-MCQ", selected_option_id: "opt_iterate", hint_level_used: 0 },
-      { item_id: "ITEM-O2-T1-TF", selected_option_id: "opt_true", hint_level_used: 0 },
-      { item_id: "ITEM-O1-T2-TRACE", text_response: "8", hint_level_used: 0 },
-      {
-        item_id: "ITEM-O2-T2-SHORT",
-        text_response: "列表保存一组成绩并保持顺序，程序可逐项处理。",
-        hint_level_used: 0,
-      },
-      {
-        item_id: "ITEM-O3-T3-CODE",
-        code_response: "def average_score(scores):\n    total = 0\n    for score in scores:\n        total += score\n    return total / len(scores)",
-        hint_level_used: 0,
-      },
-    ],
+    answers,
   }
+}
+
+function textAnswerFor(secureItem: AssessmentItemSecure): string {
+  const spec = secureItem.answer_spec
+  if (spec.kind === "exact_set") return spec.accepted[0] ?? ""
+  if (spec.kind === "numeric") return String(spec.target)
+  if (spec.kind === "code") return ""
+  return spec.criteria.flatMap((criterion) => criterion.required_evidence).join("，")
+}
+
+function codeAnswerFor(starterCode: string): string {
+  const signature = starterCode.match(
+    /^(?:async\s+)?def\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\):/m,
+  )?.[0] ?? "def solution():"
+  return `${signature}\n    return sum(scores) / len(scores)`
+}
+
+function wrongOptionId(
+  fixture: Awaited<ReturnType<typeof readyFixture>>,
+  itemId: string,
+): string {
+  const assessment = fixture.pipelineResult.public_artifacts.assessment!
+  const item = assessment.payload!.items.find((entry) => entry.item_id === itemId)
+  const secureItem = fixture.secureAssessment!.items.find((entry) => entry.item_id === itemId)
+  return item?.options?.find((option) => option.option_id !== secureItem?.correct_option_id)
+    ?.option_id ?? ""
 }
 
 async function serviceFixture(
@@ -282,11 +326,10 @@ describe("role C formal learning cycle", () => {
       learner_id_hash: "learner-cycle-hash",
     })
     const assessment = fixture.pipelineResult.public_artifacts.assessment!
-    const full = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      assessment.payload!.form_id,
+    const full = await fullScoreSubmission(
+      fixture,
       "SUB-ANCHOR-FINAL",
-    )
+      )
     const anchorIds = assessment.payload!.routing.anchor_item_ids
     const anchorSubmission: SubmissionEnvelope = {
       ...structuredClone(full),
@@ -395,7 +438,10 @@ describe("role C formal learning cycle", () => {
     expect(replay).toEqual(routed)
 
     const changedAnchor = structuredClone(anchorSubmission)
-    changedAnchor.answers[0]!.selected_option_id = "opt_stop"
+    changedAnchor.answers[0]!.selected_option_id = wrongOptionId(
+      fixture,
+      changedAnchor.answers[0]!.item_id,
+    )
     expect(await service.routeAssessmentAnchors({
       routing_request_id: "ROUTING-CYCLE-ANCHOR",
       session_id: opened.session_id,
@@ -419,7 +465,7 @@ describe("role C formal learning cycle", () => {
     const tamperedFinal = structuredClone(finalSubmission)
     tamperedFinal.submission_id = "SUB-ANCHOR-TAMPERED"
     tamperedFinal.answers.find((answer) =>
-      answer.item_id === anchorIds[0])!.selected_option_id = "opt_stop"
+      answer.item_id === anchorIds[0])!.selected_option_id = wrongOptionId(fixture, anchorIds[0]!)
     expect(await service.processSubmissionInternal({
       session_id: opened.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -439,10 +485,9 @@ describe("role C formal learning cycle", () => {
 
   test("resolves named secure artifacts and completes full-score grading", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-FULL")
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
-    )
+    const submission = await fullScoreSubmission(
+      fixture,
+      )
     const result = await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -526,11 +571,10 @@ describe("role C formal learning cycle", () => {
       undefined,
       port,
     )
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-B-DELIVERY",
-    )
+      )
 
     const first = await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
@@ -563,11 +607,10 @@ describe("role C formal learning cycle", () => {
 
   test("prepares the next round only from a persisted completed submission", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-TRUSTED-NEXT")
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-TRUSTED-NEXT",
-    )
+      )
     const trustedInput = {
       session_id: fixture.session.session_id,
       submission_id: submission.submission_id,
@@ -612,11 +655,10 @@ describe("role C formal learning cycle", () => {
 
   test("deduplicates concurrent identical submissions and updates mastery once", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-CONCURRENT")
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-CONCURRENT",
-    )
+      )
     const outcomes = await Promise.all(Array.from({ length: 10 }, () =>
       fixture.service.processSubmissionInternal({
         session_id: fixture.session.session_id,
@@ -645,11 +687,10 @@ describe("role C formal learning cycle", () => {
       new InMemoryMasteryStateStore(),
       new FixtureCodeRunner(30),
     )
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-PRINCIPAL-ISOLATION",
-    )
+      )
     const legitimate = fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: submission.learner_id_hash,
@@ -709,11 +750,10 @@ describe("role C formal learning cycle", () => {
       required_item_ids: requiredItemIds,
       revealed_hint_levels: Object.fromEntries(requiredItemIds.map((itemId) => [itemId, 0])),
     })
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-SECURE-RETRY",
-    )
+      )
     failNextGraderRead = true
     await expect(service.processSubmissionInternal({
       session_id: session.session_id,
@@ -768,11 +808,10 @@ describe("role C formal learning cycle", () => {
 
   test("replays a completed submission even when the caller repeats its original session revision", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-REPLAY")
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-REPLAY",
-    )
+      )
     const first = await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -797,11 +836,10 @@ describe("role C formal learning cycle", () => {
 
   test("replays the frozen completion after mastery and grader versions advance", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-FROZEN-REPLAY")
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-FROZEN-REPLAY",
-    )
+      )
     const first = await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -872,11 +910,10 @@ describe("role C formal learning cycle", () => {
       new FixtureCodeRunner(),
       cycleStore,
     )
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-OUTBOX",
-    )
+      )
     await expect(fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -902,11 +939,10 @@ describe("role C formal learning cycle", () => {
 
   test("uses distinct cryptographic mastery identities when sessions reuse a client submission ID", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-CROSS-SESSION")
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-REUSED",
-    )
+      )
     const first = await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -945,16 +981,14 @@ describe("role C formal learning cycle", () => {
       new InMemoryMasteryStateStore(),
       new FixtureCodeRunner(30),
     )
-    const first = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const first = await fullScoreSubmission(
+      fixture,
       "SUB-SESSION-A",
-    )
-    const second = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+      )
+    const second = await fullScoreSubmission(
+      fixture,
       "SUB-SESSION-B",
-    )
+      )
     const outcomes = await Promise.all([
       fixture.service.processSubmissionInternal({
         session_id: fixture.session.session_id,
@@ -998,11 +1032,10 @@ describe("role C formal learning cycle", () => {
       mastery_store: fixture.masteryStore,
       code_runner: runner,
     })
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-MULTI-INSTANCE",
-    )
+      )
     const outcomes = await Promise.all([
       fixture.service.processSubmissionInternal({
         session_id: fixture.session.session_id,
@@ -1045,11 +1078,10 @@ describe("role C formal learning cycle", () => {
       code_runner: runner,
       submission_lease_ms: 1_000,
     })
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-LEASE-HEARTBEAT",
-    )
+      )
     const first = fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -1075,11 +1107,10 @@ describe("role C formal learning cycle", () => {
 
   test("rejects reuse of a submission ID with different content", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-CONFLICT")
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-CONFLICT",
-    )
+      )
     expect((await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
@@ -1122,11 +1153,10 @@ describe("role C formal learning cycle", () => {
       required_item_ids: ids,
       revealed_hint_levels: Object.fromEntries(ids.map((id) => [id, 0])),
     })
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-BLOCKED",
-    )
+      )
     const result = await service.processSubmissionInternal({
       session_id: session.session_id,
       authenticated_learner_id_hash: submission.learner_id_hash,
@@ -1149,12 +1179,13 @@ describe("role C formal learning cycle", () => {
 
   test("does not expose hidden code-test identifiers in public feedback", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-HIDDEN-ID")
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-HIDDEN-ID",
-    )
-    submission.answers.find((answer) => answer.item_id === "ITEM-O3-T3-CODE")!.code_response =
+      )
+    const codeItemId = fixture.assessment.payload!.items
+      .find((item) => item.modality === "code")!.item_id
+    submission.answers.find((answer) => answer.item_id === codeItemId)!.code_response =
       "def average_score(scores):\n    return 0"
     const result = await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
@@ -1189,11 +1220,10 @@ describe("role C formal learning cycle", () => {
       expected_revision: 0,
     })))
     const fixture = await serviceFixture("RUN-CYCLE-DRIFT", masteryStore)
-    const submission = fullScoreSubmission(
-      fixture.pipelineInput.generation_spec.run_id,
-      fixture.assessment.payload!.form_id,
+    const submission = await fullScoreSubmission(
+      fixture,
       "SUB-DRIFT",
-    )
+      )
     const result = await fixture.service.processSubmissionInternal({
       session_id: fixture.session.session_id,
       authenticated_learner_id_hash: "learner-cycle-hash",
