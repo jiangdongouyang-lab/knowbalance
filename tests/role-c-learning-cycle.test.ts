@@ -1353,6 +1353,18 @@ describe("role C formal learning cycle", () => {
     expect(JSON.stringify(assessment)).not.toContain("answer_spec")
   })
 
+  test("attaches immediate-feedback answers to every lesson micro check", async () => {
+    const fixture = await readyFixture("RUN-CYCLE-MICRO-CHECK")
+    const checks = fixture.pipelineResult.public_artifacts.concept_lesson?.payload?.micro_checks ?? []
+    expect(checks.length).toBeGreaterThan(0)
+    for (const check of checks) {
+      const optionIds = new Set((check.options ?? []).map((option) => option.option_id))
+      expect(check.answer_option_id).toBeDefined()
+      expect(optionIds.has(check.answer_option_id!)).toBe(true)
+      expect(check.answer_explanation?.trim().length).toBeGreaterThan(0)
+    }
+  })
+
   test("allows same-form retries up to max_attempts then locks the session", async () => {
     const fixture = await serviceFixture("RUN-CYCLE-RETRY")
     const maxAttempts = fixture.assessment.payload!.submission_policy.max_attempts

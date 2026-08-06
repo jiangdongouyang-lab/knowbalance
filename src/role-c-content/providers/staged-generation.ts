@@ -39,6 +39,10 @@ export interface ConceptSegmentAuthorPayload {
     misconception: string
     micro_check_prompt: string
     micro_check_options: string[]
+    /** 正确选项的原文（必须与 micro_check_options 中某项完全一致）。 */
+    micro_check_answer: string
+    /** 点击后的解析文本。 */
+    micro_check_explanation: string
     hints: string[]
     summary: string
   }>
@@ -254,8 +258,36 @@ export function validateConceptSegmentAuthorAgainstRequest(
     if (new Set(normalizedOptions).size !== normalizedOptions.length) {
       issues.push(`objectives[${index}].micro_check_options 不得重复`)
     }
+    if (!entry.micro_check_answer?.trim()) {
+      issues.push(`objectives[${index}].micro_check_answer 必须指定正确选项的原文`)
+    } else if (!normalizedOptions.includes(
+      entry.micro_check_answer.trim().toLocaleLowerCase(),
+    )) {
+      issues.push(`objectives[${index}].micro_check_answer 必须与某个 micro_check_options 完全一致`)
+    }
+    if (!entry.micro_check_explanation?.trim()) {
+      issues.push(`objectives[${index}].micro_check_explanation 不能为空`)
+    }
   })
   return issues
+}
+
+/** 解析 author 提供的正确选项文本，返回物化后的即时反馈答案字段。 */
+function withMicroCheckAnswer(
+  authored: ConceptSegmentAuthorPayload["objectives"][number],
+  identity: { spec_id: string; objective_id: string; source_id: string },
+): { answer_option_id: string; answer_explanation: string } | Record<string, never> {
+  const optionIndex = authored.micro_check_options.findIndex((option) =>
+    option.trim().toLocaleLowerCase()
+      === authored.micro_check_answer?.trim().toLocaleLowerCase())
+  if (optionIndex < 0) return {}
+  return {
+    answer_option_id: stableId("CONCEPT-CHECK-OPTION", {
+      ...identity,
+      option_index: optionIndex,
+    }),
+    answer_explanation: authored.micro_check_explanation.trim(),
+  }
 }
 
 /**
@@ -340,6 +372,7 @@ export function materializeConceptSegmentAuthorPayload(
         label: String.fromCharCode(65 + optionIndex),
         text: text.trim(),
       })),
+      ...withMicroCheckAnswer(authored, identity),
       citations: citations.map((citation) => ({
         ...citation,
         relation: "derived_from" as const,
@@ -764,6 +797,10 @@ export function normalizeCodeLabSecureAuthorPayloadLenient(
     }
     if (executionMode === "function") {
       test.input = coerceFunctionInvocation(test.input)
+    } else {
+      // stdin_stdout 模式：模型常按函数习惯写 args 封装，必须转换为 stdin 文本，
+      // 否则 harness 无输入、reference 无输出，可信执行必然失败。
+      test.input = asStandardInput(test.input)
     }
   }
   return normalized
@@ -1424,6 +1461,9 @@ function namespaceConceptPayload(payload: ConceptLessonPayload, index: number): 
     if (clone.block_type === "quiz") {
       clone.item_id = `${prefix}-${clone.item_id}`
       clone.options = clone.options?.map((option) => ({ ...option, option_id: `${prefix}-${option.option_id}` }))
+      if (clone.answer_option_id) {
+        clone.answer_option_id = `${prefix}-${clone.answer_option_id}`
+      }
     }
     return clone
   }
@@ -1769,6 +1809,21 @@ function deduplicate(citations: CitationRef[]): CitationRef[] {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)]
+}
+
+/** Converts model-authored inputs into the stdin text contract used by stdin_stdout mode. */
+export function asStandardInput(input: unknown): string {
+  if (typeof input === "string") return input
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    return input === undefined || input === null ? "" : `${String(input)}\n`
+  }
+  const envelope = input as { args?: unknown[]; kwargs?: Record<string, unknown> }
+  if (!Array.isArray(envelope.args)) return `${JSON.stringify(input)}\n`
+  const lines = [
+    ...envelope.args,
+    ...Object.values(envelope.kwargs ?? {}),
+  ].map((value) => typeof value === "string" ? value : JSON.stringify(value))
+  return lines.length > 0 ? `${lines.join("\n")}\n` : ""
 }
 
 function finiteNumber(value: unknown): number | undefined {

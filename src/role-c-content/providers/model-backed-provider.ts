@@ -73,6 +73,7 @@ import {
   mapWithConcurrency,
   mergeConceptSegments,
   canonicalizeTestComparison,
+  asStandardInput,
   normalizeAssessmentPair,
   normalizeCodeLabSecure,
   normalizeCodeLabSecureAuthorPayloadLenient,
@@ -1586,20 +1587,6 @@ function normalizeFunctionReturnSemantics(source: string): string {
     (_line, indentation: string, expression: string) =>
       `${indentation}return ${expression}`,
   )
-}
-
-function asStandardInput(input: unknown): string {
-  if (typeof input === "string") return input
-  if (!input || typeof input !== "object" || Array.isArray(input)) {
-    return input === undefined || input === null ? "" : `${String(input)}\n`
-  }
-  const envelope = input as { args?: unknown[]; kwargs?: Record<string, unknown> }
-  if (!Array.isArray(envelope.args)) return `${JSON.stringify(input)}\n`
-  const lines = [
-    ...envelope.args,
-    ...Object.values(envelope.kwargs ?? {}),
-  ].map((value) => typeof value === "string" ? value : JSON.stringify(value))
-  return lines.length > 0 ? `${lines.join("\n")}\n` : ""
 }
 
 function normalizePrintedStdoutExpectations(

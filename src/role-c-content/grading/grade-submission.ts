@@ -82,11 +82,13 @@ export class EvidencePhraseRubricJudge implements BlindRubricJudge {
       criteria: request.criteria.map((criterion) => {
         const matched = criterion.required_evidence.filter((phrase) => response.includes(normalizeComparable(phrase)))
         const ratio = criterion.required_evidence.length === 0 ? 0 : matched.length / criterion.required_evidence.length
-        const status = hasContradiction || ratio === 0 ? "unmet" : ratio === 1 ? "met" : "uncertain"
+        // 确定性短语判定：部分匹配按"未满足"评分（0 分 + 教学反馈），
+        // 而不是 needs_review——主链路没有人工复核通道，uncertain 只留给模型 judge。
+        const status = hasContradiction || ratio < 1 ? "unmet" : "met"
         return {
           criterion_id: criterion.criterion_id,
           status,
-          confidence: hasContradiction ? 0.9 : ratio === 0 || ratio === 1 ? 0.85 : 0.55,
+          confidence: hasContradiction ? 0.9 : ratio === 0 || ratio === 1 ? 0.85 : 0.7,
           evidence_excerpt: matched.length > 0 ? request.response.slice(0, 160) : undefined,
         }
       }),
