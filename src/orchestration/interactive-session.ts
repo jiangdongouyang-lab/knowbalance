@@ -522,8 +522,8 @@ async function continueAfterAssessment(
   dataRoot: string,
 ): Promise<InteractiveSessionRecord> {
   const answers = command.payload?.answers
-  if (!Array.isArray(answers)) {
-    throw new InteractiveSessionError("INVALID_COMMAND", "submit_assessment_answers requires payload.answers array", 400)
+  if (!assertSubmissionAnswers(answers, "submit_assessment_answers")) {
+    throw new InteractiveSessionError("INVALID_COMMAND", "submit_assessment_answers requires answers array", 400)
   }
   const record = structuredClone(original)
   const roleC = record.private.role_c
@@ -606,12 +606,14 @@ async function continueAfterAssessment(
   record.current_stage = "assessment"
   record.waiting_for = null
   record.private.next_round_context = nextRoundContext ?? null
+  const backgroundStartedAt = new Date().toISOString()
+  record.updated_at = backgroundStartedAt
   record.events.push(event(
     record.session_id,
     "session_updated",
     "assessment",
     `round ${record.round_no} generation started in background`,
-    record.updated_at,
+    backgroundStartedAt,
     "tiered-evaluator",
   ))
   return record
@@ -854,8 +856,8 @@ async function continueAfterAnchorAnswers(
   dataRoot: string,
 ): Promise<InteractiveSessionRecord> {
   const answers = command.payload?.answers
-  if (!Array.isArray(answers)) {
-    throw new InteractiveSessionError("INVALID_COMMAND", "submit_anchor_answers requires payload.answers array", 400)
+  if (!assertSubmissionAnswers(answers, "submit_anchor_answers")) {
+    throw new InteractiveSessionError("INVALID_COMMAND", "submit_anchor_answers requires answers array", 400)
   }
   const record = structuredClone(original)
   const roleC = record.private.role_c
@@ -1011,6 +1013,18 @@ function mergeAnchorAnswers(
     ...structuredClone(anchorAnswers),
     ...structuredClone(submitted).filter((answer) => !anchorById.has(answer.item_id)),
   ]
+}
+
+/** 校验提交答案数组的元素形状（item_id 必须存在且安全）。 */
+function assertSubmissionAnswers(answers: unknown, commandType: string): answers is SubmissionAnswer[] {
+  if (!Array.isArray(answers) || answers.some((entry) => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return true
+    const itemId = (entry as { item_id?: unknown }).item_id
+    return typeof itemId !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(itemId)
+  })) {
+    throw new InteractiveSessionError("INVALID_COMMAND", `${commandType} requires answers array with valid item_id entries`, 400)
+  }
+  return true
 }
 
 /** 锚点答案是否逐项一致（顺序无关）。 */
