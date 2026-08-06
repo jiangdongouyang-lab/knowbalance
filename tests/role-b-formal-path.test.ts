@@ -544,6 +544,10 @@ describe("advanceToNextNode", () => {
 
     // 第一个节点被标记为 blocked
     expect(result.path.nodes[0].status).toBe("blocked")
+    // 画像漂移不推进路径：节点索引不变，返回当前节点等待重新诊断
+    expect(result.path.current_node_index).toBe(0)
+    expect(result.nextPathNode?.node_id).toBe(result.path.nodes[0].node_id)
+    expect(result.pathCompleted).toBe(false)
   })
 })
 

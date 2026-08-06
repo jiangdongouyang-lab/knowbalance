@@ -158,8 +158,24 @@ export function advanceToNextNode(input: AdvancePathInput): AdvancePathResult {
         pathCompleted: false,
       }
     } else {
-      // reprofile: 也标记当前节点 blocked
+      // reprofile：画像漂移，不前进节点；标记 blocked 由调用方触发重新诊断。
       currentNode.status = "blocked"
+      updatedPath.profile_snapshot = updatedProfileSnapshot
+      const stayNode: LearningPathNode = {
+        schema_version: currentNode.schema_version,
+        node_id: currentNode.node_id,
+        target_source_ids: [...currentNode.target_source_ids],
+        prerequisite_source_ids: [...currentNode.prerequisite_source_ids],
+        goal: currentNode.goal,
+        objectives: currentNode.objectives.map((obj) => ({ ...obj })),
+        assessment_blueprint: { ...currentNode.assessment_blueprint },
+      }
+      return {
+        nextPathNode: stayNode,
+        nextProfileSnapshot: updatedProfileSnapshot,
+        path: updatedPath,
+        pathCompleted: false,
+      }
     }
   }
 

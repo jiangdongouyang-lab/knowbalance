@@ -358,18 +358,17 @@ export async function generateRoleCForRoleDWithRuntime(
   const finalSpec = readyContext.pipeline_input.generation_spec
   const learningSessionId = `C-${finalSpec.run_id}-SESSION-1`
   const assessment = pipeline.public_artifacts.assessment!
-  const requiredItemIds = assessment.payload!.items.map((item) => item.item_id)
-  await cycleService.openTrustedPreselectedSession({
+  const routingRequestId = `ROUTING-${finalSpec.run_id}`
+  const anchorItemIds = assessment.payload!.routing.anchor_item_ids
+  await cycleService.openAnchorFirstSession({
+    routing_request_id: routingRequestId,
     session_id: learningSessionId,
     run_id: finalSpec.run_id,
     authenticated_learner_id_hash: input.profile.learner_id,
     attempt_no: 1,
-    required_item_ids: requiredItemIds,
-    revealed_hint_levels: Object.fromEntries(requiredItemIds.map((itemId) => [itemId, 0])),
     profile_expectations_by_objective: Object.fromEntries(
       finalSpec.targets.map((target) => [target.objective_id, "weak" as const]),
     ),
-    routing_policy: "trusted_preselected_v1",
   })
   return {
     status: "ready",
@@ -380,6 +379,8 @@ export async function generateRoleCForRoleDWithRuntime(
       sessionId: learningSessionId,
       formId: assessment.payload!.form_id,
       attemptNo: 1,
+      routing_request_id: routingRequestId,
+      anchor_item_ids: [...anchorItemIds],
     },
     reviewedRelease: createReviewedReleaseDelivery(pipeline, input.next_round_context),
     ...(audit ? { audit } : {}),

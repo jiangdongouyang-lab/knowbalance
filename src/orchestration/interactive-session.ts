@@ -17,6 +17,7 @@ import type { DynamicFeedbackResult, ObjectiveRoundResult } from "../role-c-cont
 import {
   createAtomicRoleCLearningPersistence,
   generateRoleCForRoleDWithRuntime,
+  routeRoleCAssessmentAnchors,
   submitRoleCAssessment,
   type RoleCForRoleDRuntimeOptions,
 } from "../role-d-integration/role-c-service"
@@ -65,8 +66,18 @@ export interface InteractiveSessionRecord {
   current_stage: InteractiveStage
   round_no: number
   waiting_for: null | {
-    type: "diagnosis_answers" | "assessment_answers" | "clarification_answer"
+    type: "diagnosis_answers" | "anchor_answers" | "assessment_answers" | "clarification_answer"
     items: unknown[]
+  }
+  /** 锚点路由状态：生成后为 ANCHOR_PENDING，锚点提交后为 ROUTE_LOCKED。 */
+  anchor_routing: null | {
+    phase: "ANCHOR_PENDING" | "ROUTE_LOCKED"
+    routing_request_id: string
+    anchor_item_ids: string[]
+    route_id?: string
+    action?: "remediate" | "reinforce" | "advance"
+    anchor_score_ratio?: number
+    required_item_ids?: string[]
   }
   worker_ledger: PublicWorkerLedgerEntry[]
   profile: unknown | null
@@ -86,6 +97,8 @@ export interface InteractiveSessionRecord {
     diagnosis_answers: Record<string, string> | null
     diagnosis_items: PublicDiagnosisItem[]
     upstream_artifacts: Record<string, unknown>
+    /** 评分后暂存给后台生成的下一轮上下文；生成完成即清空。 */
+    next_round_context: NextRoundGenerationContext | null
     role_c_generation_attempt: number
     role_c: null | {
       data_directory: string
@@ -114,7 +127,7 @@ export interface CreateInteractiveSessionInput {
 
 export interface InteractiveSessionCommand {
   command_id: string
-  type: "submit_diagnosis_answers" | "submit_assessment_answers" | "retry"
+  type: "submit_diagnosis_answers" | "submit_anchor_answers" | "submit_assessment_answers" | "retry"
   payload?: {
     answers?: Record<string, string> | SubmissionAnswer[]
   }
@@ -203,11 +216,12 @@ export class InteractiveSessionStore {
       learning_resources: { concept_lesson: null, code_lab: null },
       assessment: null,
       adaptation: null,
+      anchor_routing: null,
       feedback: null,
       blocked_reason: null,
       events,
       processed_commands: {},
-      private: { diagnosis_answer_key: answerKey, diagnosis_answers: null, diagnosis_items: diagnosisItems, upstream_artifacts: {}, role_c_generation_attempt: 0, role_c: null },
+      private: { diagnosis_answer_key: answerKey, diagnosis_answers: null, diagnosis_items: diagnosisItems, upstream_artifacts: {}, next_round_context: null, role_c_generation_attempt: 0, role_c: null },
       created_at: now,
       updated_at: now,
     }
@@ -251,11 +265,23 @@ export class InteractiveSessionStore {
         throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not waiting for diagnosis answers", 409)
       }
       updated = await continueAfterDiagnosis(record, command, this.data_root)
+    } else if (command.type === "submit_anchor_answers") {
+      if (record.status !== "waiting_for_user" || record.waiting_for?.type !== "anchor_answers") {
+        throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not waiting for anchor answers", 409)
+      }
+      updated = await continueAfterAnchorAnswers(record, command, this.data_root)
     } else if (command.type === "submit_assessment_answers") {
       if (record.status !== "waiting_for_user" || record.waiting_for?.type !== "assessment_answers") {
         throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not waiting for assessment answers", 409)
       }
       updated = await continueAfterAssessment(record, command, this.data_root)
+      // 评分已返回；下一轮内容后台生成，完成后写回会话（前端轮询状态）。
+      if (updated.status === "running" && updated.private.next_round_context) {
+        void this.generateNextRoundInBackground(
+          sessionId,
+          updated.private.next_round_context,
+        )
+      }
     } else {
       if (record.status !== "blocked" && record.status !== "failed") {
         throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not blocked and cannot be retried", 409)
@@ -276,6 +302,62 @@ export class InteractiveSessionStore {
     const temporary = `${path}.${process.pid}.${Date.now()}.tmp`
     await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, "utf8")
     await rename(temporary, path)
+  }
+
+  /**
+   * 后台生成下一轮内容（不占命令锁）。生成中会话为 running 状态，
+   * 其他命令会被拒绝；完成后写回 round 2 内容与 adaptation。
+   */
+  private async generateNextRoundInBackground(
+    sessionId: string,
+    nextRoundContext: NextRoundGenerationContext,
+  ): Promise<void> {
+    try {
+      const current = await this.load(sessionId)
+      const record = structuredClone(current)
+      const path = record.formal_path as FormalLearningPath | null
+      const node = record.current_path_node as LearningPathNode | null
+      if (!path || !node) throw new Error("next round generation missing path or node")
+      const next = await generateFormalRoleCRound(
+        record,
+        path,
+        node,
+        this.data_root,
+        nextRoundContext,
+      )
+      if (!next.ok) {
+        record.status = "blocked"
+        record.current_stage = "blocked"
+        record.blocked_reason = next.reason
+        record.events.push(event(record.session_id, "session_blocked", "blocked", next.reason, new Date().toISOString()))
+        record.updated_at = new Date().toISOString()
+        await this.save(record)
+        return
+      }
+      applyFormalRoleCRound(record, next)
+      record.private.next_round_context = null
+      record.updated_at = new Date().toISOString()
+      record.events.push(event(
+        record.session_id,
+        "waiting_for_user",
+        "assessment",
+        `round ${record.round_no} waiting for assessment answers`,
+        record.updated_at,
+        "tiered-evaluator",
+      ))
+      await this.save(record)
+    } catch (error) {
+      try {
+        const current = await this.load(sessionId)
+        current.status = "failed"
+        current.current_stage = "failed"
+        current.blocked_reason = error instanceof Error
+          ? error.message
+          : "next round generation failed"
+        current.updated_at = new Date().toISOString()
+        await this.save(current)
+      } catch { /* 后台失败时不再二次写入 */ }
+    }
   }
 
   private async withSessionLock<T>(sessionId: string, action: () => Promise<T>): Promise<T> {
@@ -446,6 +528,10 @@ async function continueAfterAssessment(
     })),
   }
   record.events.push(event(record.session_id, "command_received", "assessment", "Role C accepted and graded assessment answers", new Date().toISOString(), "tiered-evaluator"))
+  // 画像漂移：不推进路径、不生成下一轮，回到诊断阶段重建学习者画像。
+  if (outcome.feedback.final_decision.action === "reprofile") {
+    return resetToDiagnosisPhase(record, dataRoot)
+  }
   const advance = advanceToNextNode({
     path,
     updatedProfileSnapshot: path.profile_snapshot,
@@ -470,25 +556,19 @@ async function continueAfterAssessment(
     roleC.run_id,
     `NRC-${record.session_id}-R${record.round_no}`,
   )
-  const next = await generateFormalRoleCRound(
-    record,
-    advance.path,
-    advance.nextPathNode,
-    dataRoot,
-    nextRoundContext,
-  )
-  if (!next.ok) {
-    record.status = "blocked"
-    record.current_stage = "blocked"
-    record.waiting_for = null
-    record.blocked_reason = next.reason
-    record.events.push(event(record.session_id, "session_blocked", "blocked", next.reason, new Date().toISOString()))
-    record.updated_at = new Date().toISOString()
-    return record
-  }
-  applyFormalRoleCRound(record, next)
-  record.updated_at = new Date().toISOString()
-  record.events.push(event(record.session_id, "waiting_for_user", "assessment", `round ${record.round_no} waiting for assessment answers`, record.updated_at, "tiered-evaluator"))
+  // 提交响应先返回评分反馈：下一轮内容在后台生成，前端轮询会话状态。
+  record.status = "running"
+  record.current_stage = "assessment"
+  record.waiting_for = null
+  record.private.next_round_context = nextRoundContext ?? null
+  record.events.push(event(
+    record.session_id,
+    "session_updated",
+    "assessment",
+    `round ${record.round_no} generation started in background`,
+    record.updated_at,
+    "tiered-evaluator",
+  ))
   return record
 }
 
@@ -499,6 +579,8 @@ interface FormalRoleCRound {
     session_id: string
     form_id: string
     attempt_no: number
+    routing_request_id?: string
+    anchor_item_ids?: string[]
   }
   concept_lesson: unknown
   code_lab: unknown
@@ -621,6 +703,12 @@ async function generateFormalRoleCRound(
       session_id: result.learningSession.sessionId,
       form_id: result.learningSession.formId,
       attempt_no: result.learningSession.attemptNo,
+      ...(result.learningSession.routing_request_id
+        ? {
+            routing_request_id: result.learningSession.routing_request_id,
+            anchor_item_ids: [...(result.learningSession.anchor_item_ids ?? [])],
+          }
+        : {}),
     },
     concept_lesson: conceptLesson,
     code_lab: codeLab,
@@ -645,9 +733,22 @@ function applyFormalRoleCRound(record: InteractiveSessionRecord, round: FormalRo
   }
   record.status = "waiting_for_user"
   record.current_stage = "assessment"
-  record.waiting_for = {
-    type: "assessment_answers",
-    items: assessmentItems(round.assessment),
+  if (round.learning_session.routing_request_id
+    && round.learning_session.anchor_item_ids?.length) {
+    record.anchor_routing = {
+      phase: "ANCHOR_PENDING",
+      routing_request_id: round.learning_session.routing_request_id,
+      anchor_item_ids: [...round.learning_session.anchor_item_ids],
+    }
+    record.waiting_for = {
+      type: "anchor_answers",
+      items: anchorItemsOf(record.assessment, round.learning_session.anchor_item_ids),
+    }
+  } else {
+    record.waiting_for = {
+      type: "assessment_answers",
+      items: assessmentItems(round.assessment),
+    }
   }
 }
 
@@ -675,9 +776,98 @@ export function bindPathNodeFactsForRoleC(
 }
 
 function assessmentItems(assessment: unknown): unknown[] {
-  if (!assessment || typeof assessment !== "object" || !("items" in assessment)) return []
-  const items = (assessment as { items?: unknown }).items
-  return Array.isArray(items) ? items : []
+  if (!assessment || typeof assessment !== "object") return []
+  const record = assessment as Record<string, unknown>
+  if (Array.isArray(record.items)) return record.items
+  const payload = record.payload
+  if (payload && typeof payload === "object") {
+    const items = (payload as Record<string, unknown>).items
+    if (Array.isArray(items)) return items
+  }
+  return []
+}
+
+function anchorItemsOf(assessment: unknown, anchorItemIds: string[]): unknown[] {
+  const all = assessmentItems(assessment)
+  const idSet = new Set(anchorItemIds)
+  return all.filter((item) =>
+    typeof item === "object" && item !== null && "item_id" in item
+      ? idSet.has((item as { item_id: string }).item_id)
+      : false)
+}
+
+/**
+ * 锚点作答提交：C 评分锚点并冻结路由，返回按路由揭示的题目集合。
+ * 后续正式提交必须使用路由后的题目。
+ */
+async function continueAfterAnchorAnswers(
+  original: InteractiveSessionRecord,
+  command: InteractiveSessionCommand,
+  dataRoot: string,
+): Promise<InteractiveSessionRecord> {
+  const answers = command.payload?.answers
+  if (!Array.isArray(answers)) {
+    throw new InteractiveSessionError("INVALID_COMMAND", "submit_anchor_answers requires payload.answers array", 400)
+  }
+  const record = structuredClone(original)
+  const roleC = record.private.role_c
+  const routing = record.anchor_routing
+  if (!roleC || !routing || routing.phase !== "ANCHOR_PENDING") {
+    throw new InteractiveSessionError("SESSION_ARTIFACT_MISSING", "Anchor routing is missing or already locked", 409)
+  }
+  const anchorIds = routing.anchor_item_ids
+  const answerIds = answers.map((answer: { item_id: string }) => answer.item_id)
+  const issues = [
+    ...anchorIds.filter((id) => !answerIds.includes(id)).map((id) => `missing anchor answer ${id}`),
+    ...answerIds.filter((id) => !anchorIds.includes(id)).map((id) => `unknown anchor item ${id}`),
+  ]
+  if (issues.length > 0) {
+    throw new InteractiveSessionError("INVALID_ANCHOR_ANSWERS", "Anchor answers do not match the requested items", 400, issues)
+  }
+  const outcome = await routeRoleCAssessmentAnchors({
+    routingRequestId: routing.routing_request_id,
+    sessionId: roleC.session_id,
+    runId: roleC.run_id,
+    learnerId: roleC.learner_id,
+    formId: roleC.form_id,
+    attemptNo: roleC.attempt_no,
+    submissionId: `SUB-${record.session_id}-R${record.round_no}-ANCHOR-${command.command_id}`,
+    answers: structuredClone(answers),
+  }, roleCRuntime(dataRoot))
+  if (outcome.status !== "routed") {
+    record.status = "blocked"
+    record.current_stage = "blocked"
+    record.blocked_reason = outcome.status === "needs_review"
+      ? `anchor assessment requires review: ${outcome.unresolved_anchor_item_ids.join(",")}`
+      : `anchor routing blocked: ${outcome.issues.join("；")}`
+    record.events.push(event(record.session_id, "session_blocked", "blocked", record.blocked_reason, new Date().toISOString()))
+    record.updated_at = new Date().toISOString()
+    return record
+  }
+  record.anchor_routing = {
+    ...routing,
+    phase: "ROUTE_LOCKED",
+    route_id: outcome.route_id,
+    action: outcome.action,
+    anchor_score_ratio: outcome.anchor_score_ratio,
+    required_item_ids: [...outcome.required_item_ids],
+  }
+  record.waiting_for = {
+    type: "assessment_answers",
+    items: assessmentItems(record.assessment)
+      .filter((item) => typeof item === "object" && item !== null && "item_id" in item
+        ? outcome.required_item_ids.includes((item as { item_id: string }).item_id)
+        : false),
+  }
+  record.events.push(event(
+    record.session_id,
+    "session_updated",
+    "assessment",
+    `anchor route locked (${outcome.action}, ratio ${outcome.anchor_score_ratio})`,
+    new Date().toISOString(),
+  ))
+  record.updated_at = new Date().toISOString()
+  return record
 }
 
 async function generateRoundArtifacts(
@@ -744,6 +934,73 @@ async function generateRoundArtifacts(
     conceptArtifacts: upstreamArtifacts["concept-tutor"] as { concept_lesson: unknown },
     codeArtifacts: upstreamArtifacts["code-lab"] as { code_lab_public: unknown },
     assessmentArtifacts: upstreamArtifacts["tiered-evaluator"] as { assessment_public: AssessmentPublicArtifact; assessment_secure: AssessmentSecureArtifact },
+  }
+}
+
+/**
+ * 画像漂移（reprofile）后重置会话到诊断阶段：重新出诊断题、清空画像/
+ * 路径/内容，学习者重答后走完整首轮流程（新画像 → 新路径 → 新内容）。
+ */
+async function resetToDiagnosisPhase(
+  record: InteractiveSessionRecord,
+  dataRoot: string,
+): Promise<InteractiveSessionRecord> {
+  const now = new Date().toISOString()
+  const knowledgeBase = await loadKnowledgeBase()
+  const goalSpec = resolveLearningGoalSpec(record.learner_request.learning_goal_spec ?? {
+    mode: "custom_goal",
+    custom_goal: record.learner_request.goal,
+  })
+  const learnerId = record.learner_request.learner_id ?? record.session_id
+  const learnerMemory = await loadLearnerMemory(dataRoot, learnerId)
+  const targetItems = knowledgeBase.items.filter((item) => goalSpec.mapped_source_ids.includes(item.sourceId))
+  const selection = selectDiagnosticItems({
+    knowledgeBase,
+    target_source_ids: goalSpec.mapped_source_ids,
+    prerequisite_source_ids: [...new Set(targetItems.flatMap((item) => item.prerequisites))],
+    learner_memory: learnerMemory,
+    max_items: 5,
+  })
+  const diagnosisItems: PublicDiagnosisItem[] = selection.items.map((item, index) => ({
+    item_id: `DIAG-${index + 1}-${item.source_id}`,
+    source_id: item.source_id,
+    fact_id: item.fact_id,
+    concept: item.concept,
+    difficulty: item.difficulty,
+    question: item.question,
+    options: item.options ? [...item.options] : undefined,
+  }))
+  const answerKey = Object.fromEntries(selection.items.map((item, index) => [diagnosisItems[index]!.item_id, item.answer]))
+  return {
+    ...structuredClone(record),
+    status: "waiting_for_user",
+    current_stage: "objective_diagnosis",
+    round_no: 1,
+    waiting_for: { type: "diagnosis_answers", items: diagnosisItems },
+    profile: null,
+    formal_path: null,
+    current_path_node: null,
+    rag_result: null,
+    learning_resources: { concept_lesson: null, code_lab: null },
+    assessment: null,
+    adaptation: null,
+    feedback: null,
+    blocked_reason: null,
+    private: {
+      ...record.private,
+      diagnosis_items: diagnosisItems,
+      diagnosis_answer_key: answerKey,
+      diagnosis_answers: null,
+      upstream_artifacts: {},
+      next_round_context: null,
+      role_c_generation_attempt: 0,
+      role_c: null,
+    },
+    events: [
+      ...record.events,
+      event(record.session_id, "session_updated", "objective_diagnosis", "画像漂移，重新诊断以重建学习者画像", now),
+    ],
+    updated_at: now,
   }
 }
 
@@ -925,7 +1182,7 @@ function validateCommand(command: InteractiveSessionCommand): void {
   if (!command || typeof command !== "object" || !/^[A-Za-z0-9_-]{1,120}$/.test(command.command_id ?? "")) {
     throw new InteractiveSessionError("INVALID_COMMAND", "command_id is required and must be safe", 400)
   }
-  if (!["submit_diagnosis_answers", "submit_assessment_answers", "retry"].includes(command.type)) {
+  if (!["submit_diagnosis_answers", "submit_anchor_answers", "submit_assessment_answers", "retry"].includes(command.type)) {
     throw new InteractiveSessionError("INVALID_COMMAND", "Unsupported command type", 400)
   }
 }
