@@ -54,7 +54,7 @@ export function createCodeLabAgent(
           ? await verifier.verifyCodeLab(request, structuredClone(draft))
           : { execution_verified: false, issues: ["未配置独立 code-lab verifier"] }
         const activeVerifier = verifier
-        const repairAfterVerification = provider.repairCodeLabAfterVerification
+        const repairAfterVerification = provider.repairCodeLabAfterVerification?.bind(provider)
         const verificationRepairLimit = activeVerifier
           && repairAfterVerification
           && request.generation_spec.policies.max_semantic_revision >= 1

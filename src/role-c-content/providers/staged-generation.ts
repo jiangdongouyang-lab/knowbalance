@@ -204,6 +204,33 @@ export function splitConceptRequest(
   })
 }
 
+/**
+ * Tolerates json_object-mode concept authoring sloppiness that the deterministic
+ * plan checks would otherwise reject: duplicated quiz options and surplus hints.
+ * Genuine deficits (fewer than two options, fewer than three hints) stay failing.
+ */
+export function normalizeConceptSegmentAuthorPayloadLenient(
+  payload: ConceptSegmentAuthorPayload,
+): ConceptSegmentAuthorPayload {
+  const normalized = structuredClone(payload)
+  for (const entry of normalized.objectives) {
+    const seen = new Set<string>()
+    const deduped = entry.micro_check_options.filter((option) => {
+      const key = option.trim().toLocaleLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    if (deduped.length >= 2) {
+      entry.micro_check_options = deduped.length > 4 ? deduped.slice(0, 4) : deduped
+    }
+    if (entry.hints.length > 3) {
+      entry.hints = entry.hints.slice(0, 3)
+    }
+  }
+  return normalized
+}
+
 export function validateConceptSegmentAuthorAgainstRequest(
   request: ConceptTutorRequest,
   payload: ConceptSegmentAuthorPayload,
@@ -712,6 +739,84 @@ export function validateCodeLabSecureAgainstPlan(
     })
   }
   return issues
+}
+
+/**
+ * Tolerates json_object-mode authoring sloppiness that would otherwise fail the
+ * staged gate: sloppy comparison objects, string-typed numeric expected values,
+ * bare (non-envelope) function inputs, and surplus hidden tests. The strict
+ * materialized draft and the trusted runner still own semantic correctness.
+ */
+export function normalizeCodeLabSecureAuthorPayloadLenient(
+  payload: CodeLabSecureAuthorPayload,
+  plan: CodeLabSecurePlan,
+  executionMode: CodeLabPublicPayload["execution_contract"]["execution_mode"],
+): CodeLabSecureAuthorPayload {
+  const normalized = structuredClone(payload)
+  if (normalized.hidden_tests.length > plan.hidden_tests.length) {
+    normalized.hidden_tests = normalized.hidden_tests.slice(0, plan.hidden_tests.length)
+  }
+  for (const test of normalized.hidden_tests) {
+    test.comparison = canonicalizeTestComparison(test.comparison as unknown, test.expected)
+    if (test.comparison.kind === "numeric" && typeof test.expected === "string") {
+      const coerced = Number(test.expected.trim())
+      if (Number.isFinite(coerced)) test.expected = coerced
+    }
+    if (executionMode === "function") {
+      test.input = coerceFunctionInvocation(test.input)
+    }
+  }
+  return normalized
+}
+
+/** Maps model-authored comparison shapes onto the strict TestComparison contract. */
+export function canonicalizeTestComparison(value: unknown, expected: unknown): TestComparison {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const record = value as Record<string, unknown>
+    const kind = typeof record.kind === "string" ? record.kind : undefined
+    if (kind === "exact") return { kind: "exact" }
+    if (kind === "numeric") {
+      const tolerance = finiteNumber(record.tolerance)
+      const abs = finiteNumber(record.abs_tolerance)
+        ?? finiteNumber(record.absTolerance)
+        ?? tolerance
+        ?? 1e-9
+      const rel = finiteNumber(record.rel_tolerance)
+        ?? finiteNumber(record.relTolerance)
+        ?? tolerance
+        ?? 1e-9
+      return { kind: "numeric", abs_tolerance: abs, rel_tolerance: rel }
+    }
+  }
+  return typeof expected === "number"
+    || (typeof expected === "string" && Number.isFinite(Number(expected.trim())))
+    ? { kind: "numeric", abs_tolerance: 1e-9, rel_tolerance: 1e-9 }
+    : { kind: "exact" }
+}
+
+/**
+ * Wraps bare model-authored inputs into the {"args": [...], "kwargs": {}} call
+ * envelope required by function-mode execution. Bare objects with a single key
+ * (e.g. {"scores": [...]}) are treated as one named parameter whose value is
+ * passed positionally; multi-key objects remain a single dict argument.
+ */
+export function coerceFunctionInvocation(input: unknown): unknown {
+  if (input === null || input === undefined) return { args: [], kwargs: {} }
+  if (Array.isArray(input)) return { args: [input], kwargs: {} }
+  if (typeof input !== "object") return { args: [input], kwargs: {} }
+  const record = input as Record<string, unknown>
+  const keys = Object.keys(record)
+  if (keys.length === 0) return { args: [], kwargs: {} }
+  if (isFunctionInvocationEnvelope(record)) return input
+  const kwargs = typeof record.kwargs === "object"
+    && record.kwargs !== null
+    && !Array.isArray(record.kwargs)
+    ? record.kwargs
+    : {}
+  if (keys.length === 1 && keys[0] !== "kwargs") {
+    return { args: [record[keys[0]!]], kwargs }
+  }
+  return { args: [record], kwargs: {} }
 }
 
 export function validateCodeLabSecureAuthorAgainstPlan(
@@ -1664,6 +1769,10 @@ function deduplicate(citations: CitationRef[]): CitationRef[] {
 
 function unique<T>(values: T[]): T[] {
   return [...new Set(values)]
+}
+
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined
 }
 
 function isFunctionInvocationEnvelope(value: unknown): boolean {

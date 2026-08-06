@@ -1,9 +1,30 @@
 import type { ModelBackedProviderOptions } from "./model-backed-provider"
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
+
+function resolveEnv(env: Record<string, string | undefined>): Record<string, string | undefined> {
+  try {
+    const envPath = resolve(process.cwd(), ".env.role-c.local")
+    const content = readFileSync(envPath, "utf-8")
+    const merged: Record<string, string> = {}
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim()
+      if (!trimmed || trimmed.startsWith("#")) continue
+      const eqIndex = trimmed.indexOf("=")
+      if (eqIndex <= 0) continue
+      merged[trimmed.slice(0, eqIndex).trim()] = trimmed.slice(eqIndex + 1).trim()
+    }
+    return { ...merged, ...env as Record<string, string> }
+  } catch {
+    return env
+  }
+}
 
 /** One parser shared by the HTTP service and diagnostics so both use identical generation limits. */
 export function modelBackedProviderOptionsFromEnv(
   env: Record<string, string | undefined>,
 ): ModelBackedProviderOptions {
+  env = resolveEnv(env)
   return {
     generation_strategy: generationStrategy(env.ROLE_C_MODEL_GENERATION_STRATEGY),
     max_repair_attempts: repairAttempts(env.ROLE_C_MODEL_MAX_REPAIR_ATTEMPTS),

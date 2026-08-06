@@ -72,8 +72,11 @@ import {
   materializeCodeLabSecureAuthorPayload,
   mapWithConcurrency,
   mergeConceptSegments,
+  canonicalizeTestComparison,
   normalizeAssessmentPair,
   normalizeCodeLabSecure,
+  normalizeCodeLabSecureAuthorPayloadLenient,
+  normalizeConceptSegmentAuthorPayloadLenient,
   splitConceptRequest,
   validateAssessmentPublicAuthorAgainstPlan,
   validateAssessmentSecureAuthorAgainstPublic,
@@ -218,19 +221,23 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
             payload,
           )
           if (!schema.ok) return validationIssues(schema)
+          const lenientAuthor = normalizeConceptSegmentAuthorPayloadLenient(payload)
           const planIssues = validateConceptSegmentAuthorAgainstRequest(
             segment,
-            payload,
+            lenientAuthor,
           )
           if (planIssues.length > 0) return planIssues
           return validationIssues(validateConceptLesson({
-            payload: materializeConceptSegmentAuthorPayload(segment, payload),
+            payload: materializeConceptSegmentAuthorPayload(segment, lenientAuthor),
             spec: segment.generation_spec,
             evidence: segment.evidence_pack,
           }))
         },
       })
-      return materializeConceptSegmentAuthorPayload(segment, authored)
+      return materializeConceptSegmentAuthorPayload(
+        segment,
+        normalizeConceptSegmentAuthorPayloadLenient(authored),
+      )
     })
     const payload = mergeConceptSegments(request, payloads)
     const validation = validateConceptLesson({
@@ -347,7 +354,11 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         const schema = validateRoleCSchemaFragment("code_lab_draft.schema.json", "/$defs/secure_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
         const normalizedAuthor = normalizeCodeLabSecureAuthorPayload(
-          payload,
+          normalizeCodeLabSecureAuthorPayloadLenient(
+            payload,
+            securePlan,
+            normalizedPublic.execution_contract.execution_mode,
+          ),
           normalizedPublic.execution_contract,
         )
         const authorIssues = validateCodeLabSecureAuthorAgainstPlan(
@@ -373,7 +384,11 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       },
     })
     const normalizedSecureAuthorPayload = normalizeCodeLabSecureAuthorPayload(
-      secureAuthorPayload,
+      normalizeCodeLabSecureAuthorPayloadLenient(
+        secureAuthorPayload,
+        securePlan,
+        normalizedPublic.execution_contract.execution_mode,
+      ),
       normalizedPublic.execution_contract,
     )
     let securePayload = materializeCodeLabSecureAuthorPayload(
@@ -1498,6 +1513,11 @@ function normalizeCodeLabExecutionRepairPatch(
     structuredClone(test.input),
   ]))
   normalized.hidden_test_repairs.forEach((test) => {
+    test.comparison = canonicalizeTestComparison(test.comparison as unknown, test.expected)
+    if (test.comparison.kind === "numeric" && typeof test.expected === "string") {
+      const coerced = Number(test.expected.trim())
+      if (Number.isFinite(coerced)) test.expected = coerced
+    }
     const input = contract.execution_mode === "function"
       ? normalizeEmptyFunctionInvocation(test.input)
       : asStandardInput(test.input)

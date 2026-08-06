@@ -105,7 +105,10 @@ try {
   }
 
   if (!modelConcept || modelConcept.status !== "ready" || !modelConcept.payload) {
-    throw new Error("模型概念生成失败：无法获取 upstream concept artifact。请确认模型已正确配置且能正常生成内容。")
+    const detail = authorResults.concept
+    throw new Error(
+      `模型概念生成失败：无法获取 upstream concept artifact。请确认模型已正确配置且能正常生成内容。\n${JSON.stringify(detail, null, 2)}`,
+    )
   }
   const upstreamConcept = modelConcept
 

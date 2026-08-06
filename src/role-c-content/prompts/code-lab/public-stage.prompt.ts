@@ -33,8 +33,9 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 
 【starter_code 起始代码】
 - 提供函数签名和必要导入，用 TODO 注释标出需要完成的部分
-- 核心逻辑留空（pass 或 raise NotImplementedError），但骨架足以让学习者上手
-- 不得包含可直接通过测试的完整实现
+- 核心逻辑必须留空（函数体写 pass 或 raise NotImplementedError("TODO")），不得包含任何实际计算或返回逻辑
+- 绝对不可：写 return 语句返回计算结果、写完整的循环体或条件判断、写任何可能通过测试的代码
+- 宁可太简单被安全门禁退回，也不可写出接近答案的代码
 
 【public_test 公开测试】
 - 第一个测试覆盖最基本情况，让学习者快速获得正向反馈
