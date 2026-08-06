@@ -14,6 +14,13 @@ export interface CreateSessionInput {
   learningGoalSpec?: LearningGoalSpecInput
 }
 
+export interface ProviderConfigurationView {
+  configured: boolean
+  provider_mode: "model"
+  endpoint: string
+  model_id: string
+}
+
 export type SubmissionAnswer =
   | { item_id: string; selected_option_id: string; hint_level_used: number }
   | { item_id: string; text_response: string; hint_level_used: number }
@@ -41,6 +48,20 @@ export async function createOrchestratorSession(
         learning_goal_spec: input.learningGoalSpec,
       },
     }),
+  })
+}
+
+export async function getProviderConfiguration(fetcher: Fetcher = fetch): Promise<ProviderConfigurationView> {
+  return publicRequestJson("/orchestrator/provider-config", fetcher)
+}
+
+export async function saveProviderConfiguration(
+  input: { endpoint: string; modelId: string; apiKey: string },
+  fetcher: Fetcher = fetch,
+): Promise<ProviderConfigurationView> {
+  return publicRequestJson("/orchestrator/provider-config", fetcher, {
+    method: "PUT",
+    body: JSON.stringify({ endpoint: input.endpoint, model_id: input.modelId, api_key: input.apiKey }),
   })
 }
 
@@ -100,7 +121,17 @@ async function requestJson(path: string, learnerId: string, fetcher: Fetcher, in
   const headers = new Headers(init.headers)
   headers.set("authorization", `Bearer ${learnerId}`)
   if (init.body !== undefined) headers.set("content-type", "application/json")
-  const response = await fetcher(path, { ...init, headers })
+  return executeJson(path, fetcher, { ...init, headers })
+}
+
+async function publicRequestJson(path: string, fetcher: Fetcher, init: RequestInit = {}): Promise<any> {
+  const headers = new Headers(init.headers)
+  if (init.body !== undefined) headers.set("content-type", "application/json")
+  return executeJson(path, fetcher, { ...init, headers })
+}
+
+async function executeJson(path: string, fetcher: Fetcher, init: RequestInit): Promise<any> {
+  const response = await fetcher(path, init)
   const payload: any = await response.json().catch(() => ({ error: { code: "INVALID_RESPONSE", message: "主 Agent返回了无效响应" } }))
   if (!response.ok) {
     throw new OrchestratorClientError(

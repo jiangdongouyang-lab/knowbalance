@@ -56,18 +56,6 @@ export function selectDiagnosticItems(input: DiagnosticSelectorInput): Diagnosti
     }
   }
 
-  if (selected.length === 0 && input.target_source_ids.length === 0) {
-    for (const item of input.knowledgeBase.items) {
-      if (selected.length >= input.max_items) break
-      const quiz = item.quizItems.find((candidate) => candidate.type === "choice") ?? item.quizItems[0]
-      if (!quiz) continue
-      const key = `${quiz.sourceId}:${quiz.factId}:${quiz.question}`
-      if (seen.has(key)) continue
-      seen.add(key)
-      selected.push(toCandidate(item.title, item.difficulty, quiz, "unmapped_goal_probe"))
-    }
-  }
-
   return {
     items: selected,
     coverage: {
@@ -75,7 +63,9 @@ export function selectDiagnosticItems(input: DiagnosticSelectorInput): Diagnosti
       prerequisite_source_ids: [...input.prerequisite_source_ids],
       weak_source_ids: [...weakSourceIds],
     },
-    rationale: buckets.map((bucket) => `${bucket.label}: ${bucket.sourceIds.join(",") || "none"}`),
+    rationale: buckets.map((bucket) => `${bucket.label}: ${bucket.sourceIds.join(",") || "none"}`).concat(
+      selected.length === 0 ? ["没有可用的 A 题库映射，D 不补题"] : [],
+    ),
   }
 }
 

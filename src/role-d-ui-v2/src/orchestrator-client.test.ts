@@ -3,6 +3,8 @@ import {
   createOrchestratorSession,
   getOrchestratorEvents,
   getOrchestratorSession,
+  getProviderConfiguration,
+  saveProviderConfiguration,
   submitAssessmentAnswers,
   submitDiagnosisAnswers,
 } from "./orchestrator-client"
@@ -72,5 +74,28 @@ describe("orchestrator browser client", () => {
       { command_id: "CMD-DIAG-1", type: "submit_diagnosis_answers", payload: { answers: { "DIAG-1": "A" } } },
       { command_id: "CMD-ASSESS-1", type: "submit_assessment_answers", payload: { answers: [{ item_id: "ITEM-1", selected_option_id: "A", hint_level_used: 0 }] } },
     ])
+  })
+
+  test("reads and saves provider configuration without a learner authorization header", async () => {
+    const { calls, fetcher } = fakeFetch([
+      { configured: false, provider_mode: "model", endpoint: "", model_id: "" },
+      { configured: true, provider_mode: "model", endpoint: "https://api.deepseek.com/chat/completions", model_id: "deepseek-chat" },
+    ])
+    await getProviderConfiguration(fetcher)
+    await saveProviderConfiguration({
+      endpoint: "https://api.deepseek.com/chat/completions",
+      modelId: "deepseek-chat",
+      apiKey: "secret",
+    }, fetcher)
+    expect(calls.map((call) => call.url)).toEqual([
+      "/orchestrator/provider-config",
+      "/orchestrator/provider-config",
+    ])
+    expect(new Headers(calls[0]!.init?.headers).has("authorization")).toBe(false)
+    expect(JSON.parse(String(calls[1]!.init?.body))).toEqual({
+      endpoint: "https://api.deepseek.com/chat/completions",
+      model_id: "deepseek-chat",
+      api_key: "secret",
+    })
   })
 })

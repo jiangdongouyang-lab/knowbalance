@@ -46,7 +46,7 @@ describe("diagnostic item selector", () => {
     expect(selection.items.every((item) => ["K007", "K002", "K003"].includes(item.source_id))).toBe(true)
   })
 
-  test("uses an honest broad probe only when a custom goal cannot map to the knowledge base", async () => {
+  test("does not invent or borrow questions when a custom goal has no authored A coverage", async () => {
     const knowledgeBase = await loadKnowledgeBase()
     const selection = selectDiagnosticItems({
       knowledgeBase,
@@ -55,7 +55,7 @@ describe("diagnostic item selector", () => {
       max_items: 5,
     })
 
-    expect(selection.items).toHaveLength(5)
-    expect(selection.items.every((item) => item.selection_reason === "unmapped_goal_probe")).toBe(true)
+    expect(selection.items).toHaveLength(0)
+    expect(selection.rationale.join("\n")).toContain("没有可用的 A 题库映射")
   })
 })

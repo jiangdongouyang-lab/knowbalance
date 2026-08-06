@@ -4,6 +4,12 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { InteractiveSessionRepository } from "../src/orchestration/interactive-session-repository"
 import { validateOrchestratorApiBody } from "../src/orchestration/orchestrator-api-schema"
+import {
+  bindPathNodeFactsForRoleC,
+  interactiveSessionProductionBoundary,
+  resolveRoleCKnowledgeBaseVersion,
+  roleCRoundRunId,
+} from "../src/orchestration/interactive-session"
 
 const roots: string[] = []
 
@@ -12,6 +18,51 @@ afterEach(async () => {
 })
 
 describe("main agent session architecture", () => {
+  test("runs C once through the reviewed production boundary", () => {
+    expect(interactiveSessionProductionBoundary()).toEqual({
+      adapter_workers: ["profile-builder", "path-planner"],
+      reviewed_role_c_workers: ["concept-tutor", "code-lab", "tiered-evaluator"],
+      review_port: "local-ab-content-review",
+    })
+  })
+
+  test("uses a fresh C generation identity on retry without changing the learning round", () => {
+    expect(roleCRoundRunId("RUN-001", 1, 0)).toBe("RUN-001-R1-C1")
+    expect(roleCRoundRunId("RUN-001", 1, 1)).toBe("RUN-001-R1-C2")
+  })
+
+  test("uses A's live knowledge-base version for every reviewed C round", async () => {
+    expect(await resolveRoleCKnowledgeBaseVersion()).toBe("0.6.0")
+    expect(await resolveRoleCKnowledgeBaseVersion()).not.toBe("python-basics-v1")
+  })
+
+  test("binds B path objectives to A facts before invoking Role C", () => {
+    const node = bindPathNodeFactsForRoleC({
+      schema_version: "1.0",
+      node_id: "NODE-K001",
+      target_source_ids: ["K001"],
+      prerequisite_source_ids: [],
+      goal: "理解 Python 是什么",
+      objectives: [{
+        objective_id: "OBJ-K001",
+        source_id: "K001",
+        required_fact_ids: [],
+        observable_behavior: "recognize",
+        importance: "core",
+      }],
+      assessment_blueprint: {
+        tier_1_count: 1,
+        tier_2_count: 1,
+        tier_3_count: 1,
+        required_modalities: ["mcq", "short_answer", "code"],
+      },
+    }, {
+      results: [{ source_id: "K001", facts: [{ fact_id: "K001-F1" }] }],
+    } as any)
+
+    expect(node.objectives[0]?.required_fact_ids).toEqual(["K001-F1"])
+  })
+
   test("isolates session persistence behind a repository", async () => {
     const root = await mkdtemp(join(tmpdir(), "session-repository-"))
     roots.push(root)

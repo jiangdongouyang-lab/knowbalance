@@ -33,6 +33,9 @@ export function validateCodeLabPublicStage(
   if (!schema.ok) return { ok: false, issues: schema.issues, citations: [], objective_coverage: 0 }
 
   const issues: ValidationIssue[] = [...validatePublicArtifactNoSecrets(publicPayload).issues]
+  for (const message of validateExecutionContractResultSemantics(publicPayload.execution_contract)) {
+    issues.push(issue("invalid_execution_result_contract", "$.execution_contract.output_contract", message))
+  }
   const targetIds = new Set(request.generation_spec.targets.map((target) => target.objective_id))
   const coreTargets = request.generation_spec.targets.filter((target) => target.importance === "core")
   const blocks = uniqueMap(publicPayload.instructions, "block_id", "$.instructions", issues)
@@ -130,6 +133,12 @@ export function validateCodeLabDraftStructure(
   }
   for (const test of securePayload.hidden_tests) {
     if (!targetIds.has(test.objective_id)) issues.push(issue("unknown_hidden_test_objective", `$.hidden_tests.${test.test_id}`, `隐藏测试包含 Spec 外 objective ${test.objective_id}`))
+    for (const message of validateHiddenTestComparisonCompatibility(test.comparison, test.expected)) {
+      issues.push(issue("invalid_test_comparison", `$.hidden_tests.${test.test_id}.comparison`, message))
+    }
+    for (const message of validateHiddenTestExpectedAgainstOutputContract(publicPayload.execution_contract.output_contract, test.expected)) {
+      issues.push(issue("invalid_expected_type", `$.hidden_tests.${test.test_id}.expected`, message))
+    }
   }
 
   const claims = publicPayload.instructions.flatMap((block) => "claims" in block ? block.claims : [])
@@ -442,6 +451,46 @@ function validateClaimGrounding(
     )
     return grounded ? [] : [issue("ungrounded_claim", `$.claim.${claim.claim_id}`, "Claim.text 未通过有限规则归一化的事实对应校验")]
   })
+}
+
+export function validateExecutionContractResultSemantics(
+  contract: CodeLabPublicPayload["execution_contract"],
+): string[] {
+  if (contract.execution_mode !== "function") return []
+  const text = [contract.output_contract.type, ...(contract.output_contract.constraints ?? [])]
+    .join(" ").normalize("NFKC").toLocaleLowerCase()
+  return /(?:标准输出|打印|输出到屏幕|stdout|\bprint\b)/u.test(text)
+    ? ["function 模式只校验入口函数返回值；纯打印任务必须使用 stdin_stdout，或把 output_contract 改为真实返回值类型"]
+    : []
+}
+
+export function validateHiddenTestExpectedAgainstOutputContract(
+  outputContract: CodeLabPublicPayload["execution_contract"]["output_contract"],
+  expected: unknown,
+): string[] {
+  const type = outputContract.type.normalize("NFKC").trim().toLocaleLowerCase()
+  if (/(?:stdout|标准输出|text|string|字符串|文本)/u.test(type)) {
+    return typeof expected === "string" ? [] : ["stdout text 只允许字符串 expected"]
+  }
+  if (/(?:number|numeric|float|integer|int|数值|数字|整数|浮点)/u.test(type)) {
+    return typeof expected === "number" && Number.isFinite(expected) ? [] : ["数值输出合同只允许有限数值 expected"]
+  }
+  if (/(?:array|list|数组|列表)/u.test(type)) return Array.isArray(expected) ? [] : ["列表输出合同只允许数组 expected"]
+  if (/(?:object|dict|map|对象|字典|映射)/u.test(type)) {
+    return expected !== null && typeof expected === "object" && !Array.isArray(expected) ? [] : ["对象输出合同只允许对象 expected"]
+  }
+  if (/(?:boolean|bool|布尔)/u.test(type)) return typeof expected === "boolean" ? [] : ["布尔输出合同只允许布尔 expected"]
+  return []
+}
+
+export function validateHiddenTestComparisonCompatibility(
+  comparison: CodeLabSecurePayload["hidden_tests"][number]["comparison"],
+  expected: unknown,
+): string[] {
+  if (comparison.kind !== "numeric") return []
+  return typeof expected === "number" && Number.isFinite(expected)
+    ? []
+    : ["numeric 比较只允许有限数值 expected；对象、数组、字符串或布尔结果必须使用 exact"]
 }
 
 function uniqueMap<T extends Record<K, string>, K extends keyof T>(

@@ -1,4 +1,5 @@
-import { join } from "node:path"
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
+import { dirname, join } from "node:path"
 import { runLearningOrchestrator } from "./learning-orchestrator-runner"
 import {
   InteractiveSessionError,
@@ -16,8 +17,17 @@ interface ErrorBody {
   }
 }
 
+interface LocalProviderConfiguration {
+  provider_mode: "model"
+  endpoint: string
+  model_id: string
+  api_key: string
+}
+
 export interface LearningOrchestratorApiOptions {
   data_root?: string
+  provider_config_path?: string
+  provider_environment?: Record<string, string | undefined>
 }
 
 const JSON_HEADERS = {
@@ -29,6 +39,8 @@ export function createLearningOrchestratorApiHandler(
   options: LearningOrchestratorApiOptions = {},
 ): (request: Request) => Promise<Response> {
   const dataRoot = options.data_root ?? join(process.cwd(), ".tmp", "orchestrator")
+  const providerConfigPath = options.provider_config_path ?? join(dataRoot, "provider-config.json")
+  const providerEnvironment = options.provider_environment ?? process.env
   const sessions = new InteractiveSessionStore(dataRoot)
 
   return async function handle(request: Request): Promise<Response> {
@@ -41,6 +53,8 @@ export function createLearningOrchestratorApiHandler(
           service: "learning-orchestrator",
           endpoints: [
             "GET /health",
+            "GET /orchestrator/provider-config",
+            "PUT /orchestrator/provider-config",
             "POST /orchestrator/runs",
             "POST /orchestrator/sessions",
             "GET /orchestrator/sessions/:id",
@@ -48,6 +62,21 @@ export function createLearningOrchestratorApiHandler(
             "GET /orchestrator/sessions/:id/events",
           ],
         })
+      }
+
+      if (url.pathname === "/orchestrator/provider-config") {
+        requireLoopback(request)
+        if (request.method === "GET") {
+          const config = await readProviderConfiguration(providerConfigPath, providerEnvironment)
+          return jsonResponse(providerPublicView(config))
+        }
+        if (request.method === "PUT") {
+          const body = await parseJson<Record<string, unknown>>(request)
+          const config = validateProviderConfiguration(body)
+          await saveProviderConfiguration(providerConfigPath, config)
+          applyProviderConfiguration(config, providerEnvironment)
+          return jsonResponse(providerPublicView(config))
+        }
       }
 
       if (request.method === "POST" && url.pathname === "/orchestrator/runs") {
@@ -143,13 +172,61 @@ export function createLearningOrchestratorApiHandler(
 export const handleLearningOrchestratorApiRequest = createLearningOrchestratorApiHandler()
 
 export function startLearningOrchestratorApiServer(
-  options: { port?: number; hostname?: string; data_root?: string } = {},
+  options: { port?: number; hostname?: string; data_root?: string; provider_config_path?: string } = {},
 ): ReturnType<typeof Bun.serve> {
   return Bun.serve({
     port: options.port ?? 8787,
     hostname: options.hostname ?? "127.0.0.1",
-    fetch: createLearningOrchestratorApiHandler({ data_root: options.data_root }),
+    fetch: createLearningOrchestratorApiHandler({ data_root: options.data_root, provider_config_path: options.provider_config_path }),
   })
+}
+
+function requireLoopback(request: Request): void {
+  const hostname = new URL(request.url).hostname.toLowerCase()
+  if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "[::1]") {
+    throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration is available only on this machine", 403)
+  }
+}
+
+async function readProviderConfiguration(path: string, environment: Record<string, string | undefined>): Promise<LocalProviderConfiguration | null> {
+  try {
+    return JSON.parse(await readFile(path, "utf8")) as LocalProviderConfiguration
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+    const endpoint = environment.ROLE_C_MODEL_ENDPOINT?.trim()
+    const modelId = environment.ROLE_C_MODEL_ID?.trim()
+    const apiKey = environment.ROLE_C_MODEL_API_KEY?.trim()
+    return endpoint && modelId && apiKey ? { provider_mode: "model", endpoint, model_id: modelId, api_key: apiKey } : null
+  }
+}
+
+function validateProviderConfiguration(body: Record<string, unknown>): LocalProviderConfiguration {
+  const endpoint = typeof body.endpoint === "string" ? body.endpoint.trim() : ""
+  const modelId = typeof body.model_id === "string" ? body.model_id.trim() : ""
+  const apiKey = typeof body.api_key === "string" ? body.api_key.trim() : ""
+  if (!endpoint || !modelId || !apiKey) throw new InteractiveSessionError("INVALID_PROVIDER_CONFIGURATION", "endpoint, model_id and api_key are required", 400)
+  let parsed: URL
+  try { parsed = new URL(endpoint) } catch { throw new InteractiveSessionError("INVALID_PROVIDER_CONFIGURATION", "endpoint must be an absolute http(s) URL", 400) }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") throw new InteractiveSessionError("INVALID_PROVIDER_CONFIGURATION", "endpoint must use http or https", 400)
+  return { provider_mode: "model", endpoint, model_id: modelId, api_key: apiKey }
+}
+
+async function saveProviderConfiguration(path: string, config: LocalProviderConfiguration): Promise<void> {
+  await mkdir(dirname(path), { recursive: true })
+  const temporary = `${path}.${crypto.randomUUID()}.tmp`
+  await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 })
+  await rename(temporary, path)
+}
+
+function applyProviderConfiguration(config: LocalProviderConfiguration, environment: Record<string, string | undefined>): void {
+  environment.ROLE_C_PROVIDER_MODE = "model"
+  environment.ROLE_C_MODEL_ENDPOINT = config.endpoint
+  environment.ROLE_C_MODEL_ID = config.model_id
+  environment.ROLE_C_MODEL_API_KEY = config.api_key
+}
+
+function providerPublicView(config: LocalProviderConfiguration | null) {
+  return { configured: Boolean(config), provider_mode: "model", endpoint: config?.endpoint ?? "", model_id: config?.model_id ?? "" }
 }
 
 function requirePrincipal(request: Request): string {

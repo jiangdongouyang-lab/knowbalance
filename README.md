@@ -19,19 +19,28 @@ bun run check
 
 ## Main Agent and Role D v2
 
-Terminal one:
+Prerequisites: [bun](https://bun.sh) and [Docker Desktop](https://www.docker.com/products/docker-desktop/) running.
 
 ```bash
-bun scripts/learning-orchestrator-api.ts --host=127.0.0.1 --port=8787 --data-root=.tmp/role-d-ui-v2-orchestrator
+bun install
+cp .env.role-c.example .env.role-c.local   # then fill in your model endpoint + API key
+bun run docker:role-c:build                # builds the Python runner image used by Role C grading
 ```
 
-Terminal two:
+Terminal one — main Agent (port 8787):
+
+```bash
+export PATH="/c/Program Files/Docker/Docker/resources/bin:$PATH"   # Windows; adjust for your Docker install
+bun --env-file=.env.role-c.local scripts/learning-orchestrator-api.ts --host=127.0.0.1 --port=8787 --data-root=.tmp/integrated-orchestrator
+```
+
+Terminal two — Role D v2 web UI (port 4175):
 
 ```bash
 bun run role-d:v2:dev -- --host 127.0.0.1 --port 4175
 ```
 
-Open `http://127.0.0.1:4175/`.
+Open `http://127.0.0.1:4175/` in your browser. The page needs the main Agent on 8787; if you see “主 Agent请求未完成”, make sure terminal one is still running (background processes are cleared on restart).
 
 The Role D v2 client uses only:
 

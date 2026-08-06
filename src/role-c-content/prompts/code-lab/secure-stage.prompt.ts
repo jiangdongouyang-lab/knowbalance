@@ -24,8 +24,8 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
   "hidden_tests": [
     {
       "input": {"args": [参数值列表], "kwargs": {}},
-      "expected": 具体数值,
-      "comparison": {"kind": "numeric", "abs_tolerance": 1e-9, "rel_tolerance": 1e-9},
+      "expected": 与函数真实返回类型一致的具体值,
+      "comparison": 根据 frozen execution_contract.output_contract 选择 numeric 或 exact,
       "misconception_tag": "具体错误标签"
     }
   ],
@@ -36,8 +36,8 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 1. reference_solution：一个完整的、可直接执行的 Python 函数，def 开头，return 实际计算结果。不访问网络/文件/进程。function 模式只保留入口函数和必要辅助函数。
 2. hidden_tests：数组，恰好与 objective_plan 中的目标数量相等（每个目标一个测试），按 objective_plan 顺序排列。
 3. hidden_tests[].input：必须是 {"args": [参数值列表], "kwargs": {}} 格式。不能用参数名直接组成对象，不能用 {scores: [10,20]} 这种写法。参数顺序与入口函数签名一致。使用与 public_payload.public_tests 中完全不同的新值。
-4. hidden_tests[].expected：函数返回值的具体数值（如 25、91.5、0）。不能是字符串、数组或描述性文字。
-5. hidden_tests[].comparison：必须精确写成 {"kind": "numeric", "abs_tolerance": 1e-9, "rel_tolerance": 1e-9}。不能缺字段、不能多字段、不能改字段名。
+4. hidden_tests[].expected：必须与 reference_solution 的真实返回类型一致。数值返回具体数值；对象、数组、字符串或布尔值返回对应 JSON 值，不能写描述性文字。
+5. hidden_tests[].comparison：根据 frozen execution_contract.output_contract 选择。数值返回值使用 numeric，精确结构为 {"kind": "numeric", "abs_tolerance": 1e-9, "rel_tolerance": 1e-9}；对象、数组、字符串或布尔返回值使用 exact，精确结构为 {"kind": "exact"}。stdout text 必须返回字符串 expected；不得为 stdout text 返回对象。
 6. hidden_tests[].misconception_tag：具体说明测试针对的常见错误（如"skips_last_element"、"ignores_boundary"、"integer_division"），不用模糊标签。
 7. mutation_variants：始终返回空数组 []。
 
@@ -77,7 +77,7 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 - 每个目标恰好一个隐藏测试，优先选择边界或反例
 - 隐藏输入必须与公开测试 input 不同，使用公开材料中未出现的新值
 - 常规用例 + 边界用例 + 防硬编码用例组合覆盖
-- expected 必须与 reference_solution 的实际返回值一致（自己验算一遍）
+- expected 必须与 reference_solution 的实际返回值及类型一致（自己验算一遍）
 
 不返回 lab_id、test_suite_id、execution_contract、test_id、objective_id、weight、scoring_groups、misconception_map、must_fail_test_ids、objective_coverage。
 

@@ -4,7 +4,7 @@
 |---|---|
 | 设计版本 | 3.5 |
 | Schema 版本 | 1.0 |
-| Prompt manifest | `c-prompts-1.16.0` |
+| Prompt manifest | `c-prompts-1.16.2` |
 | 实现目录 | `src/role-c-content/` |
 | Schema 目录 | `schemas/role-c-content/` |
 | 自动检查 | `bun run check` |

@@ -78,8 +78,10 @@ export interface InteractiveSessionRecord {
   processed_commands: Record<string, { request_hash: string; response: InteractiveSessionPublicView }>
   private: {
     diagnosis_answer_key: Record<string, string>
+    diagnosis_answers: Record<string, string> | null
     diagnosis_items: PublicDiagnosisItem[]
     upstream_artifacts: Record<string, unknown>
+    role_c_generation_attempt: number
     role_c: null | {
       data_directory: string
       session_id: string
@@ -199,7 +201,7 @@ export class InteractiveSessionStore {
       blocked_reason: null,
       events,
       processed_commands: {},
-      private: { diagnosis_answer_key: answerKey, diagnosis_items: diagnosisItems, upstream_artifacts: {}, role_c: null },
+      private: { diagnosis_answer_key: answerKey, diagnosis_answers: null, diagnosis_items: diagnosisItems, upstream_artifacts: {}, role_c_generation_attempt: 0, role_c: null },
       created_at: now,
       updated_at: now,
     }
@@ -353,12 +355,34 @@ async function retryInteractiveSession(
     record.updated_at = new Date().toISOString()
     return record
   }
-  const syntheticCommand: InteractiveSessionCommand = {
+  const path = record.formal_path as FormalLearningPath | null
+  const node = record.current_path_node as LearningPathNode | null
+  if (record.profile && path && node && record.rag_result) {
+    record.private.role_c_generation_attempt = (record.private.role_c_generation_attempt ?? 0) + 1
+    const next = await generateFormalRoleCRound(record, path, node, dataRoot)
+    if (!next.ok) {
+      record.status = "blocked"
+      record.current_stage = "blocked"
+      record.waiting_for = null
+      record.blocked_reason = next.reason
+      record.events.push(event(record.session_id, "session_blocked", "blocked", next.reason, new Date().toISOString()))
+      record.updated_at = new Date().toISOString()
+      return record
+    }
+    applyFormalRoleCRound(record, next)
+    markReviewedRoleCWorkers(record)
+    record.updated_at = new Date().toISOString()
+    return record
+  }
+  if (!record.private.diagnosis_answers) {
+    throw new InteractiveSessionError("RETRY_CHECKPOINT_MISSING", "The original learner diagnosis answers are unavailable; create a new plan instead of fabricating answers", 409)
+  }
+  const retryCommand: InteractiveSessionCommand = {
     command_id: `RETRY-${Date.now()}`,
     type: "submit_diagnosis_answers",
-    payload: { answers: Object.fromEntries(record.private.diagnosis_items.map((item) => [item.item_id, record.private.diagnosis_answer_key[item.item_id] ?? ""])) },
+    payload: { answers: structuredClone(record.private.diagnosis_answers) },
   }
-  return continueAfterDiagnosis(record, syntheticCommand, dataRoot)
+  return continueAfterDiagnosis(record, retryCommand, dataRoot)
 }
 
 async function continueAfterAssessment(
@@ -405,7 +429,16 @@ async function continueAfterAssessment(
     return record
   }
 
-  record.feedback = outcome.feedback
+  record.feedback = {
+    ...outcome.feedback,
+    assessment_items: (record.assessment as { payload?: unknown } | null)?.payload ?? null,
+    your_answers: answers.map((answer: any) => ({
+      item_id: answer.item_id,
+      selected_option_id: answer.selected_option_id ?? null,
+      text_response: answer.text_response ?? null,
+      code_response: answer.code_response ?? null,
+    })),
+  }
   record.events.push(event(record.session_id, "command_received", "assessment", "Role C accepted and graded assessment answers", new Date().toISOString(), "tiered-evaluator"))
   const advance = advanceToNextNode({
     path,
@@ -424,6 +457,7 @@ async function continueAfterAssessment(
   }
 
   record.current_path_node = advance.nextPathNode
+  record.private.role_c_generation_attempt = 0
   record.round_no += 1
   const next = await generateFormalRoleCRound(record, advance.path, advance.nextPathNode, dataRoot)
   if (!next.ok) {
@@ -457,33 +491,15 @@ interface FormalRoleCRound {
 
 type FormalRoleCRoundResult = FormalRoleCRound | { ok: false; reason: string }
 
-function alwaysPassRoleCReviewPort(): NonNullable<RoleCForRoleDRuntimeOptions["reviewPort"]> {
+export function roleCRoundRunId(baseRunId: string, roundNo: number, generationAttempt: number): string {
+  return `${baseRunId}-R${roundNo}-C${generationAttempt + 1}`
+}
+
+export function interactiveSessionProductionBoundary() {
   return {
-    policy_version: "orchestrator-deterministic-review-v1",
-    async review(request) {
-      return {
-        run_id: request.run_id,
-        pipeline_input_hash: request.pipeline_input_hash,
-        generation_spec_hash: request.generation_spec_hash,
-        policy_version: "orchestrator-deterministic-review-v1",
-        revision_round: request.revision_round,
-        max_revision_rounds: request.max_revision_rounds,
-        evidence_hash: request.evidence_hash,
-        decision: "pass",
-        artifact_results: request.artifacts.map((artifact) => ({
-          artifact_kind: artifact.kind,
-          artifact_id: artifact.artifact.artifact_id,
-          artifact_hash: artifact.artifact_hash,
-          fact_status: "pass" as const,
-          teaching_status: "pass" as const,
-          decision: "pass" as const,
-          can_revise: false,
-          findings: [],
-          revision_instructions: [],
-        })),
-        revision_instructions: [],
-      }
-    },
+    adapter_workers: ["profile-builder", "path-planner"] as const,
+    reviewed_role_c_workers: ["concept-tutor", "code-lab", "tiered-evaluator"] as const,
+    review_port: "local-ab-content-review" as const,
   }
 }
 
@@ -493,7 +509,6 @@ function roleCRuntime(dataRoot: string): RoleCForRoleDRuntimeOptions {
     providerMode: "model" as const,
     dataDirectory,
     learningPersistence: createAtomicRoleCLearningPersistence(dataDirectory),
-    reviewPort: alwaysPassRoleCReviewPort(),
   }
 }
 
@@ -503,15 +518,19 @@ async function generateFormalRoleCRound(
   node: LearningPathNode,
   dataRoot: string,
 ): Promise<FormalRoleCRoundResult> {
-  const runId = `${record.run_id}-R${record.round_no}`
+  const runId = roleCRoundRunId(
+    record.run_id,
+    record.round_no,
+    record.private.role_c_generation_attempt ?? 0,
+  )
   const ragResult = record.rag_result as RagResult | null
   if (!ragResult) return { ok: false, reason: "A RAG result is missing for Role C generation" }
   const result = await generateRoleCForRoleDWithRuntime({
     profile: record.profile as LearnerProfile,
     ragResult,
-    kbVersion: "python-basics-v1",
+    kbVersion: await resolveRoleCKnowledgeBaseVersion(),
     runId,
-    pathNode: node,
+    pathNode: bindPathNodeFactsForRoleC(node, ragResult),
   }, roleCRuntime(dataRoot))
   if (result.status !== "ready") return { ok: false, reason: result.reason }
   if (!result.reviewedRelease) return { ok: false, reason: "Role C ready result omitted reviewed public release" }
@@ -548,6 +567,29 @@ function applyFormalRoleCRound(record: InteractiveSessionRecord, round: FormalRo
   record.waiting_for = {
     type: "assessment_answers",
     items: assessmentItems(round.assessment),
+  }
+}
+
+export async function resolveRoleCKnowledgeBaseVersion(): Promise<string> {
+  return (await loadKnowledgeBase()).version
+}
+
+export function bindPathNodeFactsForRoleC(
+  node: LearningPathNode,
+  ragResult: Pick<RagResult, "results">,
+): LearningPathNode {
+  return {
+    ...node,
+    objectives: node.objectives.map((objective) => {
+      if (objective.required_fact_ids.length > 0) return objective
+      const source = ragResult.results.find((item) => item.source_id === objective.source_id)
+      const fact = source?.facts[0]
+      return {
+        ...objective,
+        required_fact_ids: typeof fact?.fact_id === "string" ? [fact.fact_id] : [],
+      }
+    }),
+    assessment_blueprint: { ...node.assessment_blueprint },
   }
 }
 
@@ -704,7 +746,8 @@ async function continueAfterDiagnosis(
   const memory = await loadLearnerMemory(dataRoot, learnerId)
   upstreamArtifacts["learner-memory"] = memory
 
-  for (const step of ORCHESTRATION_WORKER_SEQUENCE.slice(3)) {
+  record.private.diagnosis_answers = structuredClone(answers as Record<string, string>)
+  for (const step of ORCHESTRATION_WORKER_SEQUENCE.slice(3, 5)) {
     record.events.push(event(record.session_id, "worker_invoked", stageForWorker(step.worker), `invoke ${step.worker}`, new Date().toISOString(), step.worker))
     const invocation = {
       ...createScaffoldWorkerInvocation({
@@ -768,9 +811,17 @@ async function continueAfterDiagnosis(
     return record
   }
   applyFormalRoleCRound(record, formalRound)
+  markReviewedRoleCWorkers(record)
   record.updated_at = new Date().toISOString()
   record.events.push(event(record.session_id, "waiting_for_user", "assessment", "waiting for assessment answers", record.updated_at, "tiered-evaluator"))
   return record
+}
+
+function markReviewedRoleCWorkers(record: InteractiveSessionRecord): void {
+  for (const worker of interactiveSessionProductionBoundary().reviewed_role_c_workers) {
+    upsertLedger(record, worker, "completed", `Role C reviewed ${worker} output`)
+    record.events.push(event(record.session_id, "worker_completed", stageForWorker(worker), `Role C reviewed ${worker} output`, new Date().toISOString(), worker))
+  }
 }
 
 function publicUpstreamArtifacts(artifacts: Record<string, unknown>): Record<string, unknown> {

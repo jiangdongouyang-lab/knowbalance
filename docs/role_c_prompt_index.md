@@ -6,7 +6,7 @@
 
 | 文件 | 说明 |
 |------|------|
-| `common-policy.ts` | 版本号（`c-prompts-1.16.0`）、权威边界、个性化边界、next_round 语义 |
+| `common-policy.ts` | 版本号（`c-prompts-1.16.2`）、权威边界、个性化边界、next_round 语义 |
 | `staged-repair.prompt.ts` | 分阶段生成通用修复模板，code-lab / evaluator 共用 |
 
 ## Concept Tutor

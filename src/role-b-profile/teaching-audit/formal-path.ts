@@ -314,12 +314,15 @@ function buildOrderedNodes(
 
   const goalSourceIds = new Set(goalItems.map((item) => item.sourceId))
 
-  // 收集所有需要的前置知识点（不在目标列表中、学习者尚未掌握的）
+  // 递归收集所有未掌握的先修闭包（含"先修的先修"），保证路径覆盖完整依赖链
   const allPrereqs = new Map<string, KnowledgeItem>()
-  for (const item of goalItems) {
+  const visited = new Set(goalSourceIds)
+  const pending = [...goalItems]
+  while (pending.length > 0) {
+    const item = pending.shift()!
     for (const prereqId of item.prerequisites ?? []) {
-      if (goalSourceIds.has(prereqId)) continue // 已在目标中，不需要单独列出
-      if (allPrereqs.has(prereqId)) continue
+      if (visited.has(prereqId)) continue
+      visited.add(prereqId)
       const prereqItem = kb.items.find((k) => k.sourceId === prereqId)
       if (!prereqItem) continue
 
@@ -331,6 +334,7 @@ function buildOrderedNodes(
       if (isKnown) continue
 
       allPrereqs.set(prereqId, prereqItem)
+      pending.push(prereqItem)
     }
   }
 

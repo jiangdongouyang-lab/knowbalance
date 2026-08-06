@@ -119,6 +119,31 @@ describe("buildFormalPath", () => {
     }
   })
 
+  test("path includes the full unmastered prerequisite closure, not just direct prerequisites", async () => {
+    const kb = await getKB()
+    // 学习者：基本数据类型已掌握(K003)，变量与赋值未掌握(K002)，目标=列表(K009)
+    // K009 需要 K002、K003；K002 需要 K001。K001 是"先修的先修"，也必须进路径。
+    const profile = makeProfile({
+      known_concepts: ["基本数据类型"],
+      weak_concepts: ["变量与赋值"],
+      goal: "学习列表",
+    })
+    const snapshot = makeSnapshot(profile)
+
+    const path = buildFormalPath({
+      learnerProfile: profile,
+      knowledgeBase: kb,
+      profileSnapshot: snapshot,
+      goalSourceIds: ["K009"],
+    })
+
+    const targets = path.nodes.map((node) => node.target_source_ids[0])
+    // 未掌握的先修闭包必须完整：K001(Python是什么) → K002(变量与赋值) → K009(列表)
+    expect(targets).toEqual(["K001", "K002", "K009"])
+    // 已掌握的 K003 不重复学
+    expect(targets).not.toContain("K003")
+  })
+
   test("composite project K018 is excluded when goal is about loops", async () => {
     const kb = await getKB()
     const profile = makeProfile({

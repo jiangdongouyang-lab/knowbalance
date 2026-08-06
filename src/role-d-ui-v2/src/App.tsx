@@ -1,5 +1,7 @@
 import {
+  ArrowDown,
   ArrowRight,
+  CalendarClock,
   BookOpen,
   Bot,
   Braces,
@@ -27,27 +29,49 @@ import {
   Play,
   RotateCcw,
   ShieldCheck,
+  Settings2,
   Sparkles,
   Target,
+  Trash2,
+  UserPlus,
   UserRound,
   X,
 } from "lucide-react"
-import { createContext, useContext, useEffect, useMemo, useState } from "react"
+import { createContext, useContext, useEffect, useState } from "react"
+import { createPortal } from "react-dom"
+import learningCatIllustration from "./assets/knowbalance-learning-cat.jpg"
 import { PYTHON_CURRICULUM } from "./curriculum"
 import {
   createOrchestratorSession,
   getOrchestratorEvents,
   getOrchestratorSession,
+  getProviderConfiguration,
   retryOrchestratorSession,
+  saveProviderConfiguration,
   submitAssessmentAnswers,
   submitDiagnosisAnswers,
 } from "./orchestrator-client"
-import { answersToSubmission, assessmentComplete, diagnosisComplete, pageForSession } from "./orchestrator-view"
+import { abilityRadarView, answersToSubmission, assessmentComplete, assessmentFeedbackView, blockedSessionAction, diagnosisComplete, initialGoalSelection, pageForSession, pathChainView, pathNodeTitle } from "./orchestrator-view"
 import type { AssessmentPayload, Citation, CodeLabPayload, LessonPayload, PublicSessionFixture } from "./types"
+import {
+  activePlan,
+  activeUser,
+  addPlan,
+  addUser,
+  deletePlan,
+  learnerBackground,
+  loadWorkspace,
+  masteredConceptsForUser,
+  planNameFromGoal,
+  recordPlanPublicState,
+  renamePlan,
+  selectPlan,
+  selectUser,
+  type LearnerProfileDraft,
+  type WorkspaceState,
+} from "./workspace"
 
-const SESSION_STORAGE_KEY = "knowbalance-v3-orchestrator-session"
-const LEARNER_STORAGE_KEY = "knowbalance-v2-learner-id"
-const DEFAULT_LEARNER_ID = "learner-role-d-demo"
+const WORKSPACE_STORAGE_KEY = "knowbalance-v4-workspace"
 
 type LiveContextValue = {
   session: PublicSessionFixture | null
@@ -59,7 +83,7 @@ type LiveContextValue = {
   assessmentAnswers: Record<string, string>
   setDiagnosisAnswer: (itemId: string, answer: string) => void
   setAssessmentAnswer: (itemId: string, answer: string) => void
-  create: (input: { goal: string; nodeId?: string; custom?: boolean }) => Promise<void>
+  create: (input: { goal: string; nodeId?: string; custom?: boolean; planName: string }) => Promise<void>
   submitDiagnosis: () => Promise<void>
   submitAssessment: () => Promise<void>
   retry: () => Promise<void>
@@ -86,56 +110,75 @@ type LessonTab = "lesson" | "lab" | "checks"
 type SideTab = "hint" | "evidence" | "agents"
 
 const navItems: Array<{ id: Page; label: string; icon: typeof Home }> = [
-  { id: "home", label: "首页", icon: Home },
   { id: "goal", label: "新建学习", icon: Target },
   { id: "path", label: "学习方案", icon: FolderTree },
   { id: "lesson", label: "互动学习", icon: BookOpen },
   { id: "assessment", label: "正式测评", icon: ListChecks },
-  { id: "feedback", label: "学习反馈", icon: Sparkles },
-  { id: "history", label: "学习记录", icon: History },
 ]
 
 export function App() {
-  const learnerId = useMemo(() => localStorage.getItem(LEARNER_STORAGE_KEY) || DEFAULT_LEARNER_ID, [])
+  const [workspace, setWorkspace] = useState<WorkspaceState>(() => loadWorkspace(localStorage.getItem(WORKSPACE_STORAGE_KEY)))
+  const currentUser = activeUser(workspace)
+  const currentPlan = activePlan(workspace)
+  const learnerId = currentUser?.id ?? ""
   const [liveSession, setLiveSession] = useState<PublicSessionFixture | null>(null)
-  const [page, setPage] = useState<Page>(() => localStorage.getItem(SESSION_STORAGE_KEY) ? "home" : "goal")
-  const [menuOpen, setMenuOpen] = useState(false)
-  const [motionOn, setMotionOn] = useState(true)
-  const [scrollProgress, setScrollProgress] = useState(0)
+  const [page, setPage] = useState<Page>("home")
   const [busy, setBusy] = useState("")
   const [error, setError] = useState("")
   const [diagnosisAnswers, setDiagnosisAnswers] = useState<Record<string, string>>({})
   const [assessmentAnswers, setAssessmentAnswers] = useState<Record<string, string>>({})
-
-  const applySession = (next: any) => {
-    const merged = { ...next, events: Array.isArray(next.events) ? next.events : [] } as PublicSessionFixture
-    setLiveSession(merged)
-    localStorage.setItem(SESSION_STORAGE_KEY, merged.session_id)
-    localStorage.setItem(LEARNER_STORAGE_KEY, learnerId)
-    setPage(pageForSession(merged))
-    setError("")
-  }
+  const [provider, setProvider] = useState({ configured: false, provider_mode: "model" as const, endpoint: "", model_id: "" })
+  const [providerOpen, setProviderOpen] = useState(false)
+  const [userOpen, setUserOpen] = useState(false)
+  const [profileOpen, setProfileOpen] = useState(false)
+  const [confirmSwitchUserId, setConfirmSwitchUserId] = useState<string | null>(null)
+  const [openPlanAfterProvider, setOpenPlanAfterProvider] = useState(false)
+  const [requestedPlanId, setRequestedPlanId] = useState<string | null>(null)
+  const [scrollProgress, setScrollProgress] = useState(0)
+  const [feedbackDismissed, setFeedbackDismissed] = useState(false)
+  useEffect(() => { window.scrollTo({ top: 0, left: 0, behavior: "auto" }) }, [page])
 
   useEffect(() => {
-    const sessionId = localStorage.getItem(SESSION_STORAGE_KEY)
-    if (!sessionId) return
+    localStorage.setItem(WORKSPACE_STORAGE_KEY, JSON.stringify(workspace))
+  }, [workspace])
+
+  useEffect(() => {
+    getProviderConfiguration().then(setProvider).catch(() => setProvider({ configured: false, provider_mode: "model", endpoint: "", model_id: "" }))
+  }, [])
+
+  useEffect(() => {
+    if (workspace.users.length === 0) setProfileOpen(true)
+  }, [workspace.users.length])
+
+  useEffect(() => {
+    if (!currentPlan?.sessionId || !learnerId) {
+      setLiveSession(null)
+      return
+    }
     let cancelled = false
-    setBusy("正在恢复主 Agent会话…")
-    getOrchestratorSession(sessionId, learnerId)
+    setBusy("正在恢复这个计划的主 Agent会话…")
+    getOrchestratorSession(currentPlan.sessionId, learnerId)
       .then(async (restored) => {
         if (cancelled) return
-        const eventResult = await getOrchestratorEvents(sessionId, learnerId).catch(() => ({ events: [] }))
-        applySession({ ...restored, events: eventResult.events ?? [] })
+        const eventResult = await getOrchestratorEvents(currentPlan.sessionId!, learnerId).catch(() => ({ events: [] }))
+        if (!cancelled) {
+          const merged = { ...restored, events: eventResult.events ?? [] } as PublicSessionFixture
+          setLiveSession(merged)
+          if (requestedPlanId === currentPlan.id) {
+            setPage(pageForSession(merged, { feedbackDismissed }))
+            setRequestedPlanId(null)
+          }
+        }
       })
       .catch((reason) => {
         if (!cancelled) {
-          localStorage.removeItem(SESSION_STORAGE_KEY)
-          setError(reason instanceof Error ? reason.message : "无法恢复会话")
+          setLiveSession(null)
+          setError(reason instanceof Error ? reason.message : "无法恢复计划会话")
         }
       })
       .finally(() => { if (!cancelled) setBusy("") })
     return () => { cancelled = true }
-  }, [learnerId])
+  }, [currentPlan?.id, currentPlan?.sessionId, learnerId, requestedPlanId])
 
   useEffect(() => {
     const update = () => {
@@ -147,6 +190,19 @@ export function App() {
     return () => window.removeEventListener("scroll", update)
   }, [page])
 
+  const applySession = (next: any) => {
+    const merged = { ...next, events: Array.isArray(next.events) ? next.events : [] } as PublicSessionFixture
+    setLiveSession(merged)
+    if (currentUser && currentPlan) setWorkspace((value) => recordPlanPublicState(value, currentUser.id, currentPlan.id, {
+      sessionId: merged.session_id,
+      status: merged.status,
+      stage: merged.current_stage,
+      knownConcepts: merged.profile?.known_concepts ?? currentPlan.knownConcepts ?? [],
+    }))
+    setPage(pageForSession(merged, { feedbackDismissed }))
+    setError("")
+  }
+
   const liveValue: LiveContextValue = {
     session: liveSession,
     isLive: Boolean(liveSession),
@@ -157,13 +213,26 @@ export function App() {
     assessmentAnswers,
     setDiagnosisAnswer: (itemId, answer) => setDiagnosisAnswers((current) => ({ ...current, [itemId]: answer })),
     setAssessmentAnswer: (itemId, answer) => setAssessmentAnswers((current) => ({ ...current, [itemId]: answer })),
-    create: async ({ goal, nodeId, custom }) => {
+    create: async ({ goal, nodeId, custom, planName }) => {
+      if (!currentUser || !currentPlan) {
+        setError("请先在首页选择用户和学习计划")
+        setPage("home")
+        return
+      }
+      if (!provider.configured) {
+        setOpenPlanAfterProvider(false)
+        setProviderOpen(true)
+        return
+      }
       setBusy("主 Agent正在创建会话并选择客观诊断题…")
       setError("")
       try {
+        setWorkspace((value) => renamePlan(value, currentUser.id, currentPlan.id, planName))
         const created = await createOrchestratorSession({
-          learnerId,
+          learnerId: currentUser.id,
           goal,
+          background: learnerBackground(currentUser),
+          selfRating: currentUser.pythonLevel,
           learningGoalSpec: custom
             ? { mode: "custom_goal", custom_goal: goal }
             : { mode: "curriculum_node", selected_node_ids: nodeId ? [nodeId] : [] },
@@ -196,6 +265,8 @@ export function App() {
         const eventResult = await getOrchestratorEvents(liveSession.session_id, learnerId).catch(() => ({ events: [] }))
         applySession({ ...next, events: eventResult.events ?? [] })
         setAssessmentAnswers({})
+        setFeedbackDismissed(false)
+        setPage("feedback")
       } catch (reason) { setError(reason instanceof Error ? reason.message : "提交正式测评失败") }
       finally { setBusy("") }
     },
@@ -213,7 +284,6 @@ export function App() {
       setLiveSession((current) => current ? { ...current, events: result.events ?? [] } : current)
     },
     reset: () => {
-      localStorage.removeItem(SESSION_STORAGE_KEY)
       setLiveSession(null)
       setDiagnosisAnswers({})
       setAssessmentAnswers({})
@@ -222,48 +292,158 @@ export function App() {
     },
   }
 
+  const requestNewPlan = () => {
+    if (!currentUser) {
+      setProfileOpen(true)
+      return
+    }
+    if (!provider.configured) {
+      setOpenPlanAfterProvider(true)
+      setProviderOpen(true)
+      return
+    }
+    const id = `plan-${crypto.randomUUID()}`
+    setWorkspace((value) => addPlan(value, currentUser.id, { id, name: "待选择学习目标" }))
+    setPage("goal")
+  }
+
+  const enterPlan = (planId: string) => {
+    if (!currentUser) return
+    const plan = currentUser.plans.find((candidate) => candidate.id === planId)
+    setWorkspace((value) => selectPlan(value, currentUser.id, planId))
+    if (plan?.sessionId && liveSession?.session_id === plan.sessionId) setPage(pageForSession(liveSession, { feedbackDismissed }))
+    else if (plan?.sessionId) setRequestedPlanId(planId)
+    else setPage("goal")
+  }
+
   return (
     <LiveContext.Provider value={liveValue}>
-    <div className={`app-shell${motionOn ? " motion-on" : " motion-off"}`}>
-      <div className="reading-progress" aria-hidden="true"><span style={{ transform: `scaleX(${scrollProgress})` }} /></div>
-      <Atmosphere />
-      <div className="utility-bar">
-        <span>Python 个性化学习空间</span>
-        <span><ShieldCheck size={14} /> {liveSession ? `主 Agent实时会话 · ${liveSession.session_id}` : "尚未创建主 Agent会话"}</span>
+      <div className="app-shell motion-on">
+        <div className="reading-progress" aria-hidden="true"><span style={{ transform: `scaleX(${scrollProgress})` }} /></div>
+        <Atmosphere />
+        <header className="topbar topbar-simple">
+          <button className="brand" type="button" onClick={() => setPage("home")}>
+            <span className="brand-mark"><Layers3 size={22} /></span>
+            <span><b>KnowBalance</b><small>多 Agent 协同学习空间</small></span>
+          </button>
+          {page !== "home" && currentPlan ? <nav className="primary-nav plan-nav" aria-label="计划导航">
+            {navItems.map((item) => <NavButton item={item} current={planNavSection(page)} disabled={!liveSession && item.id !== "goal"} onClick={setPage} key={item.id} />)}
+          </nav> : <span className="home-top-note">今天，也让自己多懂一些 Python。</span>}
+          <div className="top-actions">
+            <button className={`api-button${provider.configured ? " is-ready" : ""}`} type="button" onClick={() => setProviderOpen(true)}><Settings2 size={16} /><span>API设置</span><small>{provider.configured ? provider.model_id : "未配置"}</small></button>
+            <button className="avatar-button avatar-with-name" type="button" aria-label="切换学习者" onClick={() => setUserOpen((value) => !value)}><UserRound size={18} /><span>{currentUser?.name ?? "选择用户"}</span></button>
+          </div>
+        </header>
+        {busy && <div className="live-operation" role="status"><span className="operation-spinner" />{busy}</div>}
+        {error && <div className="live-error" role="alert"><b>主 Agent请求未完成</b><span>{error}</span><button type="button" onClick={() => setError("")}>知道了</button></div>}
+        <main>
+          {page === "home" && <HomeDashboard user={currentUser} mastered={currentUser ? masteredConceptsForUser(workspace, currentUser.id) : []} providerConfigured={provider.configured} onNewPlan={requestNewPlan} onEnterPlan={enterPlan} onDeletePlan={(planId) => currentUser && setWorkspace((value) => deletePlan(value, currentUser.id, planId))} />}
+          {page === "goal" && currentPlan ? <GoalPage onContinue={() => setPage("diagnosis")} /> : null}
+          {page === "diagnosis" && (liveSession ? <DiagnosisPage onContinue={() => setPage("path")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
+          {page === "path" && (liveSession ? <PathPage planName={currentPlan?.name} onContinue={() => setPage("lesson")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
+          {page === "lesson" && (liveSession ? <LessonPage onAssessment={() => setPage("assessment")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
+          {page === "assessment" && (liveSession ? <AssessmentPage onFeedback={() => setPage("feedback")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
+          {page === "feedback" && (liveSession ? <FeedbackPage onContinue={() => { setFeedbackDismissed(true); setPage(liveSession?.learning_resources?.concept_lesson || liveSession?.learning_resources?.code_lab ? "lesson" : pageForSession(liveSession, { feedbackDismissed: true })) }} /> : <NoSessionState onStart={() => setPage("goal")} />)}
+          {page === "history" && (liveSession ? <HistoryPage /> : <NoSessionState onStart={() => setPage("goal")} />)}
+        </main>
+        {profileOpen && <ProfileModal onClose={() => setProfileOpen(false)} onCreate={(profile) => { setWorkspace((value) => addUser(value, profile)); setProfileOpen(false); setPage("home") }} />}
+        {userOpen && createPortal(<UserSwitcher workspace={workspace} onClose={() => setUserOpen(false)} onAdd={() => { setUserOpen(false); setProfileOpen(true) }} onSelect={(id) => { setConfirmSwitchUserId(id); setUserOpen(false) }} />, document.body)}
+        {confirmSwitchUserId && createPortal(<ConfirmSwitchUserModal targetUser={workspace.users.find(u => u.id === confirmSwitchUserId)} currentUser={currentUser} onCancel={() => setConfirmSwitchUserId(null)} onConfirm={() => { setWorkspace((value) => selectUser(value, confirmSwitchUserId)); setPage("home"); setConfirmSwitchUserId(null) }} />, document.body)}
+        {providerOpen && <ApiConfigModal current={provider} onClose={() => { setProviderOpen(false); setOpenPlanAfterProvider(false) }} onSave={async (input) => { const saved = await saveProviderConfiguration(input); setProvider(saved); setProviderOpen(false); if (openPlanAfterProvider && currentUser) { const id = `plan-${crypto.randomUUID()}`; setWorkspace((value) => addPlan(value, currentUser.id, { id, name: "待选择学习目标" })); setOpenPlanAfterProvider(false); setPage("goal") } }} />}
       </div>
-      <header className="topbar">
-        <button className="brand" type="button" onClick={() => setPage("home")}>
-          <span className="brand-mark"><Layers3 size={22} /></span>
-          <span><b>KnowBalance</b><small>让每一步学习都有依据</small></span>
-        </button>
-        <nav className="primary-nav" aria-label="主导航">
-          {navItems.slice(0, 5).map((item) => <NavButton item={item} current={page} disabled={!liveSession && item.id !== "goal" && item.id !== "home"} onClick={setPage} key={item.id} />)}
-        </nav>
-        <div className="top-actions">
-          {liveSession && <span className="save-state"><CheckCircle2 size={15} /> 服务端已保存</span>}
-          <button className={`motion-toggle${motionOn ? " is-on" : ""}`} type="button" aria-pressed={motionOn} onClick={() => setMotionOn((value) => !value)}><Sparkles size={15} /> {motionOn ? "动态开启" : "动态关闭"}</button>
-          {liveSession && <button className="continue-button" type="button" onClick={() => setPage(pageForSession(liveSession))}>继续学习 <ArrowRight size={16} /></button>}
-          <button className="avatar-button" type="button" aria-label="学习者账户"><UserRound size={18} /></button>
-          <button className="menu-button" type="button" aria-label="打开菜单" onClick={() => setMenuOpen(true)}><Menu size={21} /></button>
-        </div>
-      </header>
-      {menuOpen && <MobileMenu current={page} hasSession={Boolean(liveSession)} onClose={() => setMenuOpen(false)} onSelect={(next) => { setPage(next); setMenuOpen(false) }} />}
-      {busy && <div className="live-operation" role="status"><span className="operation-spinner" />{busy}</div>}
-      {error && <div className="live-error" role="alert"><b>主 Agent请求未完成</b><span>{error}</span><button type="button" onClick={() => setPage("goal")}>返回新建学习</button></div>}
-      <main>
-        {page === "home" && <HomePage onStart={() => setPage("goal")} onContinue={() => liveSession && setPage(pageForSession(liveSession))} />}
-        {page === "goal" && <GoalPage onContinue={() => setPage("diagnosis")} />}
-        {page === "diagnosis" && (liveSession ? <DiagnosisPage onContinue={() => setPage("path")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
-        {page === "path" && (liveSession ? <PathPage onContinue={() => setPage("lesson")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
-        {page === "lesson" && (liveSession ? <LessonPage onAssessment={() => setPage("assessment")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
-        {page === "assessment" && (liveSession ? <AssessmentPage onFeedback={() => setPage("feedback")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
-        {page === "feedback" && (liveSession ? <FeedbackPage onContinue={() => setPage(pageForSession(liveSession))} /> : <NoSessionState onStart={() => setPage("goal")} />)}
-        {page === "history" && (liveSession ? <HistoryPage /> : <NoSessionState onStart={() => setPage("goal")} />)}
-      </main>
-    </div>
     </LiveContext.Provider>
   )
 }
+
+function HomeDashboard({ user, mastered, providerConfigured, onNewPlan, onEnterPlan, onDeletePlan }: {
+  user?: ReturnType<typeof activeUser>
+  mastered: string[]
+  providerConfigured: boolean
+  onNewPlan: () => void
+  onEnterPlan: (planId: string) => void
+  onDeletePlan: (planId: string) => void
+}) {
+  return <div className="page page-home dashboard-home">
+    <section className="home-hero fluid-hero">
+      <span className="hero-glow glow-one" /><span className="hero-glow glow-two" /><span className="hero-sweep" />
+      <div className="hero-copy"><span className="eyebrow"><Sparkles size={15} /> 欢迎回到 <span className="brand-art">KnowBalance</span></span><h1>Hello, <em>{user?.name ?? "新同学"}</em></h1><p className="hero-slogan"><span className="brand-art slogan-art">八位 Agent</span> 同心协作，<br/>&nbsp;&nbsp;&nbsp;&nbsp;让每次学习都有<span className="brand-art slogan-art">专属节奏</span>。</p><div className="hero-facts"><span><CalendarClock size={16} /> {user ? `每周 ${user.weeklyHours} 小时` : "正在建立档案"}</span><span><GraduationCap size={16} /> {user ? pythonLevelLabel(user.pythonLevel) : "认识你的起点"}</span><span className={providerConfigured ? "fact-ready" : "fact-warning"}><Settings2 size={16} /> {providerConfigured ? "通用模型已就绪" : "API待配置"}</span></div></div>
+      <div className="hero-illustration" aria-hidden="true">
+        <img src={learningCatIllustration} alt="KnowBalance 学习伙伴" className="hero-cat-illustration" />
+        <div className="floating-decorations">
+          <span className="float-star star-1">✦</span>
+          <span className="float-star star-2">✧</span>
+          <span className="float-star star-3">✦</span>
+          <span className="float-star star-4">✧</span>
+          <span className="float-star star-5">✦</span>
+          {/* 窗户区域的星星 */}
+          <span className="float-star window-star-1">✦</span>
+          <span className="float-star window-star-2">✧</span>
+          <span className="float-star window-star-3">✦</span>
+          <span className="float-star window-star-4">✧</span>
+          <span className="float-star window-star-5">✦</span>
+          <span className="float-star window-star-6">✧</span>
+          <span className="float-bubble bubble-1"></span>
+          <span className="float-bubble bubble-2"></span>
+          <span className="float-bubble bubble-3"></span>
+          <span className="float-bubble bubble-4"></span>
+          <span className="float-bubble bubble-5"></span>
+        </div>
+        <div className="hero-illustration-fade" />
+      </div>
+    </section>
+    <section className="home-bento">
+      <section className="plan-manager">
+      <header><div><span className="section-kicker section-kicker-with-icon"><Layers3 size={18} /> 计划管理</span><h2>学习，从计划开始</h2><p>计划只保存草稿和主 Agent会话入口；路径、内容与评分仍由上游生成。</p></div><button className="primary-action new-plan-button" type="button" onClick={onNewPlan}>＋ 新建计划</button></header>
+      {user?.plans.length ? <div className="plan-card-grid">{user.plans.map((plan, index) => <article className="plan-card" key={plan.id} onClick={() => onEnterPlan(plan.id)}><div className={`plan-number tone-${index % 4}`}>{String(index + 1).padStart(2,"0")}</div><div className="plan-card-copy"><span>{plan.sessionId ? stageLabelFromSaved(plan.stage) : "等待选择学习目标"}</span><h3>{plan.name}</h3><p>{plan.sessionId ? `主 Agent会话 · ${plan.status ?? "已保存"}` : "点击进入，选择章节或填写自定义目标"}</p></div><button className="delete-plan" type="button" aria-label={`删除${plan.name}`} onClick={(event) => { event.stopPropagation(); onDeletePlan(plan.id) }}><Trash2 size={16} /></button><ChevronRight className="plan-enter" size={20} /></article>)}</div> : <article className="empty-plan-panel"><FolderTree size={34} /><h3>还没有学习计划</h3><p>点击新建后直接选择章节或填写自定义目标，计划名会自动生成。</p><button className="primary-action" type="button" onClick={onNewPlan}>新建第一个计划</button></article>}
+      </section>
+      <aside className="mastery-island"><header><span className="mastery-icon"><CheckCircle2 /></span><div><span className="section-kicker-light"><BookOpen size={16} /> 学习历程</span><h2>已掌握</h2></div><strong>{mastered.length}</strong></header>{mastered.length ? <div className="mastery-cloud">{mastered.map((concept, index) => <span style={{ "--mastery-index": index } as React.CSSProperties} key={concept}>{concept}</span>)}</div> : <div className="mastery-empty"><p>完成主 Agent画像后，这里会记录公开的已掌握知识。</p><small>D 不根据计划名称或答题数量自行判断掌握。</small></div>}<footer><ShieldCheck size={15} /> 来自主 Agent公开画像</footer></aside>
+    </section>
+    <section className="home-value-river"><article><Bot /><div><b>协同正在发生</b><p>八个固定角色各守边界，D只接收主 Agent公开状态。</p></div></article><article><ShieldCheck /><div><b>每一步都有出处</b><p>题目、路径、讲义与测评均保留真实来源和审核状态。</p></div></article><article><Clock3 /><div><b>学习不会丢失</b><p>计划绑定服务端会话，刷新后仍能从当前阶段继续。</p></div></article></section>
+  </div>
+}
+
+function UserSwitcher({ workspace, onClose, onAdd, onSelect }: { workspace: WorkspaceState; onClose: () => void; onAdd: () => void; onSelect: (id: string) => void }) {
+  return <div className="user-switcher-backdrop" role="presentation" onMouseDown={onClose}><section className="user-popover" role="dialog" aria-modal="true" aria-label="切换学习者" onMouseDown={(event) => event.stopPropagation()}><div className="popover-title"><div><span>学习者空间</span><b>切换学习者</b></div><button type="button" aria-label="关闭" onClick={onClose}><X size={18} /></button></div><div className="user-options">{workspace.users.map((user) => <button className={workspace.activeUserId === user.id ? "is-active" : ""} type="button" key={user.id} onClick={() => onSelect(user.id)}><span>{user.name.slice(0,1)}</span><div><b>{user.name}</b><small>{user.plans.length} 个计划 · 每周 {user.weeklyHours} 小时</small></div>{workspace.activeUserId === user.id && <Check size={16} />}</button>)}</div><button className="add-user-button" type="button" onClick={onAdd}><UserPlus size={16} /> 新建学习者</button></section></div>
+}
+
+function ConfirmSwitchUserModal({ targetUser, currentUser, onCancel, onConfirm }: { targetUser: { name: string; plans: unknown[] } | undefined; currentUser?: { name: string }; onCancel: () => void; onConfirm: () => void }) {
+  if (!targetUser) return null
+  return <div className="user-switcher-backdrop" role="presentation" onMouseDown={onCancel}><section className="user-popover confirm-switch-modal" role="dialog" aria-modal="true" aria-label="确认切换用户" onMouseDown={(event) => event.stopPropagation()}><div className="popover-title"><div><span>确认切换</span><b>确定要切换学习者吗？</b></div></div><div className="confirm-switch-content"><div className="confirm-switch-icon"><UserRound size={28} /></div><p>即将从 <b>{currentUser?.name ?? "当前用户"}</b> 切换到 <b>{targetUser.name}</b></p><small>切换后将返回首页，当前学习进度会自动保存</small></div><div className="confirm-switch-actions"><button className="secondary-action" type="button" onClick={onCancel}>取消</button><button className="primary-action" type="button" onClick={onConfirm}>确认切换</button></div></section></div>
+}
+
+function ProfileModal({ onClose, onCreate }: { onClose: () => void; onCreate: (profile: LearnerProfileDraft) => void }) {
+  const [name, setName] = useState("")
+  const [weeklyHours, setWeeklyHours] = useState(5)
+  const [pythonLevel, setPythonLevel] = useState<LearnerProfileDraft["pythonLevel"]>("beginner")
+  const [learningStyle, setLearningStyle] = useState<LearnerProfileDraft["learningStyle"]>("balanced")
+  const [background, setBackground] = useState("")
+  const [languages, setLanguages] = useState("")
+  return <Modal title="认识你，从更合适的第一步开始" subtitle="几项轻量信息会交给主 Agent和B，用于画像与路径设计。" onClose={onClose}><div className="form-grid"><label><span>怎么称呼你？</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：林晓" /></label><label><span>每周预计学习时长</span><select value={weeklyHours} onChange={(event) => setWeeklyHours(Number(event.target.value))}>{[2,3,5,7,10,14].map((hours) => <option value={hours} key={hours}>{hours} 小时 / 周</option>)}</select></label><label><span>你和 Python 的熟悉程度</span><select value={pythonLevel} onChange={(event) => setPythonLevel(event.target.value as LearnerProfileDraft["pythonLevel"])}><option value="new">完全没接触过</option><option value="beginner">了解一点基础</option><option value="intermediate">能写简单程序</option><option value="advanced">有项目经验</option></select></label><label><span>你更喜欢怎样学？</span><select value={learningStyle} onChange={(event) => setLearningStyle(event.target.value as LearnerProfileDraft["learningStyle"])}><option value="balanced">讲解与练习平衡</option><option value="practice">多动手、多练习</option><option value="concept">先理解原理</option><option value="project">跟着项目学习</option></select></label><label className="full-field"><span>目前的学习/工作背景</span><input value={background} onChange={(event) => setBackground(event.target.value)} placeholder="例如：高中生、计算机专业大一、转行学习" /></label><label className="full-field"><span>接触过其他编程语言吗？</span><input value={languages} onChange={(event) => setLanguages(event.target.value)} placeholder="选填，用顿号或逗号分隔" /></label></div><div className="modal-actions"><button className="secondary-action" type="button" onClick={onClose}>以后再说</button><button className="primary-action" disabled={!name.trim()} type="button" onClick={() => onCreate({ id: `learner-${crypto.randomUUID()}`, name: name.trim(), weeklyHours, pythonLevel, learningStyle, background: background.trim(), priorLanguages: languages.split(/[、,，]/).map((item) => item.trim()).filter(Boolean) })}>保存学习档案</button></div></Modal>
+}
+
+
+function ApiConfigModal({ current, onClose, onSave }: { current: { configured: boolean; endpoint: string; model_id: string }; onClose: () => void; onSave: (input: { endpoint: string; modelId: string; apiKey: string }) => Promise<void> }) {
+  const [endpoint, setEndpoint] = useState(current.endpoint || "https://api.deepseek.com/chat/completions")
+  const [modelId, setModelId] = useState(current.model_id || "deepseek-chat")
+  const [apiKey, setApiKey] = useState("")
+  const [saving, setSaving] = useState(false)
+  const [failure, setFailure] = useState("")
+  const submit = async () => { setSaving(true); setFailure(""); try { await onSave({ endpoint: endpoint.trim(), modelId: modelId.trim(), apiKey: apiKey.trim() }) } catch (reason) { setFailure(reason instanceof Error ? reason.message : "保存失败") } finally { setSaving(false) } }
+  return <Modal title={current.configured ? "切换通用模型 API" : "先连接你的通用模型"} subtitle="密钥只发送到本机主 Agent并保存于本地运行目录，浏览器不会保存或再次读取它。" onClose={onClose}><div className="api-security-note"><ShieldCheck size={19} /><div><b>本机配置，不进入前端计划</b><p>保存后主 Agent立即使用新配置；接口响应只返回模型名称和地址，不返回密钥。</p></div></div><div className="form-grid"><label className="full-field"><span>兼容接口地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://.../chat/completions" /></label><label><span>模型 ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="deepseek-chat" /></label><label><span>API Key</span><input type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={current.configured ? "输入新密钥以切换" : "仅发送到本机主 Agent"} /></label></div>{failure && <p className="form-error">{failure}</p>}<div className="modal-actions"><button className="secondary-action" type="button" onClick={onClose}>取消</button><button className="primary-action" disabled={saving || !endpoint.trim() || !modelId.trim() || !apiKey.trim()} type="button" onClick={() => void submit()}>{saving ? "正在安全保存…" : "保存并启用"}</button></div></Modal>
+}
+
+function Modal({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) {
+  return <div className="modal-backdrop" role="presentation" onMouseDown={onClose}><section className="modal-card" role="dialog" aria-modal="true" aria-label={title} onMouseDown={(event) => event.stopPropagation()}><header><div><h2>{title}</h2><p>{subtitle}</p></div><button type="button" aria-label="关闭" onClick={onClose}><X /></button></header>{children}</section></div>
+}
+
+function pythonLevelLabel(level: LearnerProfileDraft["pythonLevel"]) {
+  return ({ new: "Python 零基础", beginner: "Python 入门阶段", intermediate: "Python 进阶阶段", advanced: "Python 项目阶段" })[level]
+}
+
+function stageLabelFromSaved(stage?: string) {
+  return ({ objective_diagnosis: "正在客观诊断", assessment: "学习资源已生成", completed: "计划已完成", blocked: "等待处理阻塞", failed: "流程需要恢复" } as Record<string, string>)[stage ?? ""] ?? "主 Agent会话已建立"
+}
+
 
 function Atmosphere() {
   return <div className="ambient-layer" aria-hidden="true"><span className="ambient-blob blob-blue" /><span className="ambient-blob blob-mint" /><span className="ambient-blob blob-gold" /><span className="ambient-grid" /><div className="learning-constellation"><i className="constellation-line line-a" /><i className="constellation-line line-b" /><b className="constellation-node node-main">M</b><b className="constellation-node node-a">A</b><b className="constellation-node node-b">B</b><b className="constellation-node node-c">C</b></div></div>
@@ -274,39 +454,25 @@ function NavButton({ item, current, onClick, disabled = false }: { item: (typeof
   return <button className={current === item.id ? "is-active" : ""} disabled={disabled} type="button" onClick={() => onClick(item.id)}><Icon size={16} />{item.label}</button>
 }
 
-function MobileMenu({ current, hasSession, onClose, onSelect }: { current: Page; hasSession: boolean; onClose: () => void; onSelect: (page: Page) => void }) {
-  return <div className="mobile-menu-backdrop" onClick={onClose}><aside className="mobile-menu" onClick={(event) => event.stopPropagation()}><div className="mobile-menu-head"><b>页面导航</b><button onClick={onClose} type="button"><X /></button></div>{navItems.map((item) => <NavButton item={item} current={current} disabled={!hasSession && item.id !== "goal" && item.id !== "home"} onClick={onSelect} key={item.id} />)}</aside></div>
-}
-
-function HomePage({ onStart, onContinue }: { onStart: () => void; onContinue: () => void }) {
-  const { session: activeSession, reset } = useLive()
-  if (!activeSession) return <div className="page page-home"><section className="welcome-strip"><div><span className="eyebrow"><Sparkles size={15} /> 尚未开始学习</span><h1>创建主 Agent会话，开始真实流程。</h1><p>D 不展示任何预置画像、路径、讲义、评分或 Worker状态。创建会话后，所有业务内容只来自主 Agent公开响应。</p><div className="hero-actions"><button className="primary-action" type="button" onClick={onStart}>新建真实学习会话 <ArrowRight /></button></div></div><div className="soft-orbit" aria-hidden="true"><span className="orbit-core"><GraduationCap /></span></div></section></div>
-  return <div className="page page-home">
-    <section className="welcome-strip">
-      <div><span className="eyebrow"><Sparkles size={15} /> 主 Agent实时会话</span><h1>继续你的个性化学习。</h1><p>历史画像、学习路径和正式测评结果由主 Agent统一保存。新版 D 只负责帮助你看懂并完成当前任务。</p><div className="hero-actions"><button className="primary-action" type="button" onClick={onContinue}>继续当前学习 <ArrowRight /></button><button className="secondary-action" type="button" onClick={reset}>结束本地会话并新建</button></div></div>
-      <div className="soft-orbit" aria-hidden="true"><span className="orbit-core"><GraduationCap /></span><span className="orbit-dot dot-one">A</span><span className="orbit-dot dot-two">B</span><span className="orbit-dot dot-three">C</span></div>
-    </section>
-    <section className="home-grid">
-      <article className="continue-card"><div className="card-kicker"><BookOpen size={16} /> 当前会话</div><h2>{activeSession.current_path_node?.goal ?? activeSession.profile?.goal ?? diagnosisGateLabel(activeSession)}</h2><div className="path-chips"><span>第 {activeSession.round_no} 轮</span>{activeSession.profile?.level && <span>{activeSession.profile.level}</span>}<span>{activeSession.status === "waiting_for_user" ? waitingLabel(activeSession.waiting_for?.type) : activeSession.status}</span></div><div className="continue-meta"><span>{stageLabel(activeSession)}</span><b>revision {activeSession.revision ?? "--"}</b></div><button type="button" onClick={onContinue}>进入当前阶段 <ArrowRight size={17} /></button></article>
-      <article className="compact-card"><div className="card-kicker"><Target size={16} /> 学习目标</div><h3>{activeSession.profile?.goal ?? activeSession.current_path_node?.goal ?? "诊断完成后由主 Agent生成画像"}</h3><p>目标与后续路径来自本次主 Agent会话。</p></article>
-      <article className="compact-card mint"><div className="card-kicker"><CheckCircle2 size={16} /> 历史状态</div><h3>{activeSession.profile ? `${activeSession.profile.known_concepts?.length ?? 0} 个已掌握知识` : "等待画像生成"}</h3><p>{activeSession.profile ? `薄弱知识：${activeSession.profile.weak_concepts?.join("、") || "暂无公开结果"}` : "D 不预先声称历史读取结果。"}</p></article>
-      <article className="compact-card lilac"><div className="card-kicker"><Bot size={16} /> Agent协同</div><h3>{activeSession.worker_ledger.filter((item) => item.status === "completed").length} / {activeSession.worker_ledger.length} 已完成</h3><p>默认保持安静，评委或学习者需要时再展开真实事件。</p></article>
-    </section>
-  </div>
+function planNavSection(page: Page): Page {
+  if (page === "diagnosis") return "goal"
+  if (page === "feedback" || page === "history") return "assessment"
+  return page
 }
 
 function GoalPage({ onContinue: _onContinue }: { onContinue: () => void }) {
   const { create, busy } = useLive()
   const chapters = PYTHON_CURRICULUM
-  const [mode, setMode] = useState<"catalog" | "custom">("catalog")
-  const [selected, setSelected] = useState("PY-CH02-S02")
-  const [customGoal, setCustomGoal] = useState("我想学会用循环和列表完成一个成绩统计程序")
+  const initial = initialGoalSelection()
+  const [mode, setMode] = useState<"catalog" | "custom">(initial.mode)
+  const [selected, setSelected] = useState(initial.selectedNodeId)
+  const [customGoal, setCustomGoal] = useState(initial.customGoal)
   const selectedTopic = chapters.flatMap((chapter) => chapter.topics).find((topic) => topic.node_id === selected)
   return <div className="page narrow-page"><PageHeading kicker="建立学习目标" title="这次，你想真正学会什么？" description="课程目录来自仓库中的 Python curriculum；也可以保留自定义目标模式。历史学习情况由主 Agent读取，不再要求你重复填写。" />
     <div className="segmented"><button className={mode === "catalog" ? "is-active" : ""} onClick={() => setMode("catalog")} type="button">从课程目录选择</button><button className={mode === "custom" ? "is-active" : ""} onClick={() => setMode("custom")} type="button">自定义学习目标</button></div>
     {mode === "catalog" ? <div className="chapter-grid">{chapters.map((chapter) => <article className={`chapter-card ${chapter.tone}`} key={chapter.node_id}><h2>{chapter.title}</h2>{chapter.topics.map((topic) => <button className={selected === topic.node_id ? "is-selected" : ""} type="button" key={topic.node_id} onClick={() => setSelected(topic.node_id)}><span>{topic.title}</span>{selected === topic.node_id && <Check size={16} />}</button>)}</article>)}</div> : <article className="custom-goal-card"><label htmlFor="custom-goal">用自己的话描述学习目标</label><textarea id="custom-goal" value={customGoal} onChange={(event) => setCustomGoal(event.target.value)} /><p>主 Agent会把自定义描述映射到真实课程知识与题库；D 不在本地推断结果。</p></article>}
     <div className="history-read-card"><div className="history-icon"><History /></div><div><b>历史学习情况由主 Agent处理</b><p>D 不要求用户手动填写薄弱知识，也不预先声称历史已经读取；画像生成后再展示主 Agent公开结果。</p></div><span>服务端负责</span></div>
-    <div className="page-actions"><button className="primary-action" disabled={Boolean(busy) || (mode === "custom" ? customGoal.trim().length === 0 : !selectedTopic)} type="button" onClick={() => void create(mode === "custom" ? { goal: customGoal.trim(), custom: true } : { goal: `学习${selectedTopic?.title ?? "Python基础"}`, nodeId: selectedTopic?.node_id })}>{busy ? "正在创建会话…" : "确认目标并创建主 Agent会话"} <ArrowRight /></button></div>
+    <div className="page-actions"><button className="primary-action" disabled={Boolean(busy) || (mode === "custom" ? customGoal.trim().length === 0 : !selectedTopic)} type="button" onClick={() => void create(mode === "custom" ? { goal: customGoal.trim(), custom: true, planName: planNameFromGoal({ mode: "custom", customGoal }) } : { goal: `学习${selectedTopic?.title ?? "Python基础"}`, nodeId: selectedTopic?.node_id, planName: planNameFromGoal({ mode: "catalog", chapterTitle: selectedTopic?.title ?? "Python基础" }) })}>{busy ? "正在创建会话…" : "确认目标并创建主 Agent会话"} <ArrowRight /></button></div>
   </div>
 }
 
@@ -326,16 +492,68 @@ function DiagnosisPage({ onContinue: _onContinue }: { onContinue: () => void }) 
   </div>
 }
 
-function PathPage({ onContinue }: { onContinue: () => void }) {
+function PathPage({ planName, onContinue }: { planName?: string; onContinue: () => void }) {
+  const { retry, reset, busy } = useLive()
   const activeSession = useRequiredSession()
+  const profile = activeSession.profile
+  const formalPath = activeSession.formal_path as any
+  const ragResult = activeSession.rag_result as any
   const objectives = activeSession.current_path_node?.objectives ?? []
-  return <div className="page path-page"><PageHeading kicker="个性化学习方案" title={activeSession.current_path_node?.goal ?? "当前学习路径"} description="节点、目标、知识来源和观察行为均来自主 Agent公开状态。D 只负责把它们组织成学生易懂的页面。" />
-    <section className="plan-overview"><div className="plan-current"><span>当前学习节点</span><h2>{activeSession.current_path_node?.node_id}</h2><p>{activeSession.current_path_node?.goal}</p><button className="primary-action" type="button" onClick={onContinue}>进入互动讲义 <ArrowRight /></button></div><div className="objective-list">{objectives.map((objective, index) => <article key={objective.objective_id}><span>{String(index + 1).padStart(2, "0")}</span><div><b>{objective.objective_id} · {behaviorLabel(objective.observable_behavior)}</b><p>来源 {objective.source_id} · 事实 {objective.required_fact_ids.join("、")} · {objective.importance}</p></div></article>)}</div></section>
-    <section className="provenance-note"><ShieldCheck /><div><b>这不是 D 自行规划的路线</b><p>本页只展示主 Agent持久化的 formal_path 与 current_path_node；若上游没有公开方案，页面只显示缺失或阻塞状态。</p></div></section>
+  const displayPlanName = planName && planName !== "待选择学习目标"
+    ? planName
+    : formalPath?.original_goal ?? profile?.goal ?? activeSession.current_path_node?.goal ?? "当前学习计划"
+  const pathNodes = Array.isArray(formalPath?.nodes) ? formalPath.nodes : []
+  const ragItems = Array.isArray(ragResult?.results) ? ragResult.results : []
+  const radar = abilityRadarView(profile)
+  const chain = pathChainView(pathNodes as any, ragItems, profile?.known_concepts ?? [])
+  const hasLesson = Boolean(activeSession.learning_resources.concept_lesson?.payload)
+  const hasBlockedResource = activeSession.status === "blocked" || activeSession.status === "failed"
+  if (!activeSession.current_path_node) return <BlockedResourceState session={activeSession} busy={busy} onRetry={() => void retry()} onRestart={reset} title="学习方案尚未形成可恢复检查点" />
+  return <div className="page path-page week2-plan-page">
+    <PageHeading kicker="学习方案 · Week 2 可视化报告" title={`本次计划：${displayPlanName}`} description="诊断完成后先在这里查看主 Agent公开的画像、难度匹配、正式路径和Agent协同过程；只有你主动点击后才进入 C 生成的互动学习内容。" />
+
+    <section className="week2-summary-grid">
+      <article className="profile-visual-card">
+        <header><span><UserRound size={18} /></span><div><small>学习者画像 · B公开结果</small><h2>{profile ? difficultyLabel(profile.level) : "尚未生成画像"}</h2></div></header>
+        {profile ? <>
+          <div className="profile-level-track"><i style={{ width: `${difficultyPosition(profile.level)}%` }} /><b style={{ left: `${difficultyPosition(profile.level)}%` }} /></div>
+          <div className="profile-level-labels"><span>入门</span><span>基础</span><span>进阶</span><span>综合</span></div>
+          <div className={`ability-radar ${radar.status === "verified" ? "is-verified" : "is-pending"}`} aria-label="能力雷达图">
+            <div className="radar-ring ring-outer" /><div className="radar-ring ring-middle" /><div className="radar-ring ring-inner" />
+            <i className="radar-axis axis-a" /><i className="radar-axis axis-b" /><i className="radar-axis axis-c" />
+            {radar.status === "verified" ? <svg viewBox="0 0 200 200" aria-hidden="true"><polygon points={radarPolygon(radar.dimensions.map((item) => item.value))} /></svg> : <div><b>等待 B 公开</b><span>能力维度与数值</span></div>}
+          </div>
+          <p className="radar-caption">能力雷达图 · {radar.status === "verified" ? "B公开维度" : "待上游数据"}</p>
+          <dl><div><dt>本次目标</dt><dd>{profile.goal}</dd></div><div><dt>已掌握</dt><dd>{profile.known_concepts.length ? profile.known_concepts.join("、") : "主 Agent未公开已掌握概念"}</dd></div><div><dt>待补强</dt><dd>{profile.weak_concepts.length ? profile.weak_concepts.join("、") : "本轮诊断未公开薄弱概念"}</dd></div></dl>
+          <p className="truth-note">能力雷达需要B公开多个能力维度及数值。当前合同只公开等级和概念集合，因此D不虚构雷达百分比。</p>
+        </> : <MissingContent text="主 Agent尚未公开 B 学习者画像。" />}
+      </article>
+
+      <article className="difficulty-curve-card">
+        <header><span><Target size={18} /></span><div><small>难度匹配曲线 · A检索证据</small><h2>{ragItems.length ? `${ragItems.length} 个公开知识候选` : "尚无难度匹配数据"}</h2></div></header>
+        {ragItems.length ? <div className="difficulty-bars">{ragItems.slice(0, 8).map((item: any) => <article key={item.source_id}><div><b>{item.title}</b><small>{item.source_id} · {difficultyLabel(item.difficulty)}</small></div><span><i style={{ width: `${Math.min(100, Math.max(4, Number(item.score) || 0))}%` }} /></span><em className={item.retrieval_trace?.difficulty_match ? "is-match" : "is-gap"}>{item.retrieval_trace?.difficulty_match ? "难度匹配" : "需复核"}</em></article>)}</div> : <MissingContent text="主 Agent尚未公开 A RAG 难度匹配结果。" />}
+        <p className="truth-note">曲线长度使用A公开检索分数；匹配状态使用 retrieval_trace.difficulty_match。D不自行计算“适配率”。</p>
+      </article>
+    </section>
+
+    <section className="learning-path-visual">
+      <header><div><small>学习路径图 · B正式路径</small><h2>{formalPath?.original_goal ?? displayPlanName}</h2></div><span>{pathNodes.length} 个节点</span></header>
+      {pathNodes.length ? <div className="path-node-flow">{pathNodes.map((node: any, index: number) => <article className={`path-flow-node status-${node.status ?? "pending"}`} key={node.node_id}><div className="path-flow-index">{String(index + 1).padStart(2, "0")}</div><div><span>{node.status === "in_progress" ? "当前节点" : node.status === "completed" ? "已完成" : node.status === "blocked" ? "受阻" : "待学习"}</span><h3>{pathNodeTitle(node, ragItems)}</h3><p>目标来源：{node.target_source_ids?.join("、") || "未公开"}</p><small>先修：{node.prerequisite_source_ids?.length ? node.prerequisite_source_ids.join("、") : "无公开先修"}{node.goal && pathNodeTitle(node, ragItems) !== node.goal ? ` · 计划：${node.goal}` : ""}</small></div>{index < pathNodes.length - 1 && <ArrowRight className="path-flow-arrow" size={18} />}</article>)}</div> : <MissingContent text="B尚未公开正式学习路径节点。" />}
+    </section>
+
+    <section className="week2-lower-grid">
+      <article className="current-objectives-card"><header><div><small>当前节点与观察目标</small><h2>{pathNodeTitle(activeSession.current_path_node, ragItems)}</h2></div><span>{activeSession.current_path_node?.goal && pathNodeTitle(activeSession.current_path_node, ragItems) !== activeSession.current_path_node.goal ? `${activeSession.current_path_node.goal} · ` : ""}{activeSession.current_path_node?.node_id}</span></header><div className="path-chain">{chain.map((entry: any, index: number) => <div className="chain-item" key={entry.node_id}><article className={`chain-node chain-${entry.status}`}><span className="chain-status">{entry.status === "completed" || entry.status === "reference_mastered" ? <Check size={15} /> : <i />}</span><div className="chain-body"><b>{entry.title}</b><small>{entry.source_id}{entry.status === "reference_mastered" ? " · 已掌握" : entry.status === "reference_pending" ? " · 先修" : ""}</small></div><em>{entry.status === "completed" ? "本轮已学习" : entry.status === "in_progress" ? "当前节点" : entry.status === "blocked" ? "受阻" : entry.status === "reference_mastered" ? "已掌握" : entry.status === "reference_pending" ? "先修待补" : "待学习"}</em></article>{index < chain.length - 1 && <ArrowDown className="chain-arrow" size={15} />}</div>)}</div>{objectives.length ? <div className="objective-list"><small className="objective-kicker">当前节点观察目标</small>{objectives.map((objective, index) => <article key={objective.objective_id}><span>{String(index + 1).padStart(2, "0")}</span><div><b>{pathNodeTitle({ target_source_ids: [objective.source_id] }, ragItems)} · {behaviorLabel(objective.observable_behavior)}</b><p>来源 {objective.source_id} · 事实 {objective.required_fact_ids.length ? objective.required_fact_ids.join("、") : "尚未绑定"} · {objective.importance}</p></div></article>)}</div> : null}</article>
+      <article className="agent-collaboration-card"><header><div><small>Agent协同过程 · 主 Agent台账</small><h2>{activeSession.worker_ledger.length} 个Worker状态</h2></div><Bot size={22} /></header><div className="agent-collaboration-list">{activeSession.worker_ledger.map((worker) => <article key={worker.worker}><span className={`agent-status status-${worker.status}`} /><div><b>{workerLabel(worker.worker)}</b><p>{worker.summary ?? "主 Agent未公开摘要"}</p></div><em>{worker.status}</em></article>)}</div></article>
+    </section>
+
+    {hasBlockedResource && <section className="plan-resource-status is-blocked"><ShieldCheck /><div><b>学习方案已保存，C互动资源尚未通过可信门禁</b><p>{activeSession.blocked_reason ?? "主 Agent未公开具体阻塞原因"}</p></div><button className="secondary-action" disabled={Boolean(busy)} type="button" onClick={() => void retry()}>{busy ? "正在原样重试…" : "原样重试 C 资源"}</button></section>}
+    <section className="plan-enter-learning"><div><b>{hasLesson ? "互动学习资源已由主 Agent公开" : "互动学习资源尚未发布"}</b><p>{hasLesson ? "你可以主动进入C生成并经可信审核的讲义、代码实验和理解检查。" : "学习方案仍可查看；D不会用静态内容冒充C资源。"}</p></div><button className="primary-action" disabled={!hasLesson} type="button" onClick={onContinue}>进入互动学习 <ArrowRight /></button></section>
+    <section className="provenance-note"><ShieldCheck /><div><b>Week 2 可视化只展示真实上游结果</b><p>画像和路径来自B，难度匹配与证据来自A，学习内容与测评来自C，协同状态来自主 Agent；D只负责可视化，不生成结论。</p></div></section>
   </div>
 }
 
 function LessonPage({ onAssessment }: { onAssessment: () => void }) {
+  const { retry, reset, busy } = useLive()
   const activeSession = useRequiredSession()
   const lesson = activeSession.learning_resources.concept_lesson?.payload
   const lab = activeSession.learning_resources.code_lab?.payload
@@ -343,6 +561,7 @@ function LessonPage({ onAssessment }: { onAssessment: () => void }) {
   const [sideTab, setSideTab] = useState<SideTab>("hint")
   const [activeSection, setActiveSection] = useState("prerequisite")
   const [code, setCode] = useState(lab?.starter_code ?? "")
+  if (!lesson) return <BlockedResourceState session={activeSession} busy={busy} onRetry={() => void retry()} onRestart={reset} title="互动学习资源未通过可信发布" />
   const sections = lesson ? lessonOutline(lesson) : []
   return <div className="lesson-page"><header className="lesson-topline"><div><span className="eyebrow"><BookOpen size={15} /> 第 {activeSession.round_no} 轮学习</span><h1>{lesson?.title ?? "当前没有可发布的 C 讲义"}</h1><p>{activeSession.current_path_node?.node_id} · {lesson?.objective_ids.join(" / ")}</p></div><div className="lesson-top-actions"><span><CheckCircle2 size={15} /> 主 Agent已发布公开学习资源</span><button type="button" onClick={onAssessment}>进入正式测评 <ArrowRight /></button></div></header>
     <div className="lesson-layout">
@@ -427,25 +646,36 @@ function AgentPanel() {
 }
 
 function AssessmentPage({ onFeedback: _onFeedback }: { onFeedback: () => void }) {
-  const { isLive, assessmentAnswers: answers, setAssessmentAnswer, submitAssessment, busy } = useLive()
+  const { isLive, assessmentAnswers: answers, setAssessmentAnswer, submitAssessment, retry, reset, busy } = useLive()
   const activeSession = useRequiredSession()
   const assessment = activeSession.assessment?.payload
   const [index, setIndex] = useState(0)
-  if (!assessment?.items?.length) return <div className="page"><EmptyState title="正式测评尚未公开" body="D 不会自行生成正式题目。接入后等待主 Agent返回 assessment。" /></div>
+  if (!assessment?.items?.length) return <BlockedResourceState session={activeSession} busy={busy} onRetry={() => void retry()} onRestart={reset} title="正式测评未通过可信发布" />
   const item = assessment.items[index]
   const complete = Object.values(answers).filter(Boolean).length
+  const isCodePrompt = item.modality === "code" || item.modality === "trace"
   return <div className="page assessment-page"><PageHeading kicker={`正式测评 · ${assessment.title}`} title="提交后进入 Role C 正式评分" description="正确答案、评分规范与隐藏测试始终保留在服务端。当前作答会通过主 Agent命令提交，不在 D 中评分。" />
-    <section className="assessment-shell"><aside><b>测评进度</b>{assessment.items.map((candidate, itemIndex) => <button className={itemIndex === index ? "is-active" : answers[candidate.item_id] ? "is-complete" : ""} type="button" onClick={() => setIndex(itemIndex)} key={candidate.item_id}><span>{itemIndex + 1}</span><small>{modalityLabel(candidate.modality)}</small></button>)}<p>{complete} / {assessment.items.length} 已作答</p></aside><article className="formal-question"><div className="question-meta"><span>第 {index + 1} 题</span><span>Tier {item.tier}</span><span>{item.max_score} 分</span></div><h2>{item.prompt}</h2>{item.options?.length ? <div className="formal-options">{item.options.map((option) => <button className={answers[item.item_id] === option.option_id ? "is-selected" : ""} type="button" onClick={() => setAssessmentAnswer(item.item_id, option.option_id)} key={option.option_id}><span>{option.label}</span><b>{option.text}</b></button>)}</div> : <textarea rows={item.modality === "code" ? 14 : 6} value={answers[item.item_id] ?? item.starter_code ?? ""} onChange={(event) => setAssessmentAnswer(item.item_id, event.target.value)} /> }<div className="formal-actions"><button className="secondary-action" disabled={index === 0} type="button" onClick={() => setIndex((value) => value - 1)}>上一题</button>{index < assessment.items.length - 1 ? <button className="primary-action" disabled={!answers[item.item_id]} type="button" onClick={() => setIndex((value) => value + 1)}>保存并下一题</button> : <button className="primary-action" disabled={Boolean(busy) || !assessmentComplete(activeSession, answers) || !isLive} type="button" onClick={() => void submitAssessment()}>{busy ? "正在正式评分…" : "提交正式测评"} <ArrowRight /></button>}</div></article></section>
+    <section className="assessment-shell"><aside><b>测评进度</b>{assessment.items.map((candidate, itemIndex) => <button className={itemIndex === index ? "is-active" : answers[candidate.item_id] ? "is-complete" : ""} type="button" onClick={() => setIndex(itemIndex)} key={candidate.item_id}><span>{itemIndex + 1}</span><small>{modalityLabel(candidate.modality)}</small></button>)}<p>{complete} / {assessment.items.length} 已作答</p></aside><article className="formal-question"><div className="question-meta"><span>第 {index + 1} 题</span><span>Tier {item.tier}</span><span>{item.max_score} 分</span></div><h2 className={isCodePrompt ? "formal-question-prompt is-code" : "formal-question-prompt"}>{item.prompt}</h2>{item.options?.length ? <div className="formal-options">{item.options.map((option) => <button className={answers[item.item_id] === option.option_id ? "is-selected" : ""} type="button" onClick={() => setAssessmentAnswer(item.item_id, option.option_id)} key={option.option_id}><span>{option.label}</span><b>{option.text}</b></button>)}</div> : <textarea rows={item.modality === "code" ? 14 : 6} value={answers[item.item_id] ?? item.starter_code ?? ""} onChange={(event) => setAssessmentAnswer(item.item_id, event.target.value)} /> }<div className="formal-actions"><button className="secondary-action" disabled={index === 0} type="button" onClick={() => setIndex((value) => value - 1)}>上一题</button>{index < assessment.items.length - 1 ? <button className="primary-action" disabled={!answers[item.item_id]} type="button" onClick={() => setIndex((value) => value + 1)}>保存并下一题</button> : <button className="primary-action" disabled={Boolean(busy) || !assessmentComplete(activeSession, answers) || !isLive} type="button" onClick={() => void submitAssessment()}>{busy ? "正在正式评分…" : "提交正式测评"} <ArrowRight /></button>}</div></article></section>
   </div>
 }
 
 function FeedbackPage({ onContinue }: { onContinue: () => void }) {
-  const { retry, busy } = useLive()
+  const { retry, reset, busy } = useLive()
   const activeSession = useRequiredSession()
   const feedback: any = activeSession.feedback
   const decision = feedback?.final_decision
   if (!feedback && activeSession.status !== "blocked" && activeSession.status !== "failed") return <div className="page feedback-page"><PageHeading kicker="正式反馈" title="等待 Role C 正式评分结果" description="D 不会根据作答或题目难度在浏览器里估算结果。" /><section className="feedback-empty"><div className="feedback-icon"><Sparkles /></div><h2>评分结果尚未返回</h2><p>完成正式测评后，主 Agent会持久化公开反馈与下一步决策。</p><button className="primary-action" type="button" onClick={onContinue}>返回互动学习</button></section></div>
-  return <div className="page feedback-page"><PageHeading kicker={`正式反馈 · 第 ${activeSession.round_no > 1 ? activeSession.round_no - 1 : activeSession.round_no} 轮`} title={activeSession.status === "blocked" ? "下一步暂时受阻" : decisionTitle(decision?.action)} description={feedback?.feedback_summary || activeSession.blocked_reason || "主 Agent已返回本轮正式决策。"} /><section className="feedback-result-grid"><article className="score-card"><span>本轮正式得分</span><strong>{feedback?.round_score ? `${feedback.round_score.raw_score} / ${feedback.round_score.max_score}` : "--"}</strong><p>{feedback?.round_score ? `正确率 ${Math.round(feedback.round_score.accuracy * 100)}% · 证据分 ${Math.round(feedback.round_score.evidence_score * 100)}%` : "已保留此前评分，等待下一轮恢复。"}</p></article><article className="decision-card"><span>主 Agent下一步</span><h2>{decision?.action ? decisionLabel(decision.action) : "等待恢复"}</h2><p>{decision?.reason_codes?.join("、") || activeSession.blocked_reason || "暂无公开原因码"}</p></article></section>{feedback?.objective_results?.length ? <section className="objective-feedback"><h2>学习目标反馈</h2>{feedback.objective_results.map((item: any) => <article key={item.objective_id}><div><b>{item.objective_id}</b><span>{Math.round(item.accuracy * 100)}%</span></div><div className="objective-meter"><i style={{ width: `${Math.round(item.accuracy * 100)}%` }} /></div><p>{item.misconception_tags?.length ? `需要关注：${item.misconception_tags.join("、")}` : "本轮未返回误区标签"}</p></article>)}</section> : null}<div className="page-actions">{activeSession.status === "blocked" || activeSession.status === "failed" ? <button className="primary-action" disabled={Boolean(busy)} type="button" onClick={() => void retry()}>{busy ? "正在恢复…" : "从持久化检查点重试"}</button> : <button className="primary-action" type="button" onClick={onContinue}>{activeSession.status === "completed" ? "查看学习记录" : "进入下一轮学习"}</button>}</div></div>
+  const snapshotItems = Array.isArray(feedback?.assessment_items?.items) ? feedback.assessment_items.items : []
+  const assessmentItems = snapshotItems.length > 0 ? snapshotItems : []
+  const itemViews = assessmentFeedbackView(assessmentItems, feedback?.grade_result?.payload, feedback?.your_answers ?? [])
+  const wrongCount = itemViews.filter((item) => item.correct === false).length
+  const planOptions = [
+    { action: "remediate", title: "针对性补救", description: "回到当前知识点，重新学习并再次作答" },
+    { action: "reinforce", title: "巩固强化", description: "在当前知识点追加巩固练习，加深掌握" },
+    { action: "advance", title: "进入下一节点", description: "本轮达标，推进到路径中下一个知识点" },
+    { action: "reprofile", title: "重新确认画像", description: "B 需要重新确认画像，再调整后续路径" },
+  ]
+  return <div className="page feedback-page"><PageHeading kicker={`正式反馈 · 第 ${activeSession.round_no > 1 ? activeSession.round_no - 1 : activeSession.round_no} 轮`} title={activeSession.status === "blocked" ? "下一步暂时受阻" : decisionTitle(decision?.action)} description={feedback?.feedback_summary || activeSession.blocked_reason || "主 Agent已返回本轮正式决策。"} /><section className="feedback-result-grid"><article className="score-card"><span>本轮正式得分</span><strong>{feedback?.round_score ? `${feedback.round_score.raw_score} / ${feedback.round_score.max_score}` : "--"}</strong><p>{feedback?.round_score ? `正确率 ${Math.round(feedback.round_score.accuracy * 100)}% · 证据分 ${Math.round(feedback.round_score.evidence_score * 100)}%${wrongCount ? ` · ${wrongCount} 题未答对` : ""}` : "已保留此前评分，等待下一轮恢复。"}</p></article><article className="decision-card"><span>主 Agent下一步</span><h2>{decision?.action ? decisionLabel(decision.action) : "等待恢复"}</h2><p>{decision?.reason_codes?.join("、") || activeSession.blocked_reason || "暂无公开原因码"}</p></article></section><section className="decision-plan-card"><header><div><small>动态规划 · 下一轮方案选择</small><h2>主 Agent基于本轮结果选择下一轮方案</h2></div><span>{decision?.action ?? "pending"}</span></header><div className="decision-plan-grid">{planOptions.map((option) => <article className={decision?.action === option.action ? "is-current" : ""} key={option.action}><b>{option.title}</b><p>{option.description}</p>{decision?.action === option.action ? <em>本轮决策</em> : <i />}</article>)}</div></section>{itemViews.length ? <section className="item-feedback-list"><h2>逐题结果{wrongCount ? ` · ${wrongCount} 题待订正` : ""}</h2>{itemViews.map((view, index) => <article className={view.correct === false ? "is-wrong" : view.correct === true ? "is-correct" : "is-blank"} key={view.item_id}><header><span>{modalityLabel(view.modality as any)}</span><b>第 {index + 1} 题</b><em>{view.raw_score} / {view.max_score} 分</em></header><p className="item-prompt">{view.prompt}</p><dl><dt>你的答案</dt><dd>{view.your_answer_text}</dd></dl><div className="item-verdict">{view.correct === true ? "回答正确" : view.correct === false ? "回答错误" : "未作答"}</div>{view.feedback_message ? <p className="item-message">{view.feedback_message}</p> : null}{view.next_step ? <p className="item-next">下一步：{view.next_step}</p> : null}{view.correct === false ? <small className="answer-boundary">具体参考答案由 C 私有安全产物持有；D 不越权公开，请按 C 的教学提示复习后重试。</small> : null}</article>)}</section> : feedback?.your_answers?.length ? <section className="item-feedback-list"><p className="answer-boundary">本轮题目快照由旧版会话产生未公开，此处仅显示评分汇总；下一轮重新提交后可查看逐题结果。</p></section> : null}{feedback?.objective_results?.length ? <section className="objective-feedback"><h2>学习目标反馈</h2>{feedback.objective_results.map((item: any) => <article key={item.objective_id}><div><b>{item.objective_id}</b><span>{Math.round(item.accuracy * 100)}%</span></div><div className="objective-meter"><i style={{ width: `${Math.round(item.accuracy * 100)}%` }} /></div><p>{item.misconception_tags?.length ? `需要关注：${item.misconception_tags.join("、")}` : "本轮未返回误区标签"}</p></article>)}</section> : null}<div className="page-actions">{activeSession.status === "blocked" || activeSession.status === "failed" ? (() => { const action = blockedSessionAction(activeSession); return <button className="primary-action" disabled={Boolean(busy)} type="button" onClick={action.canRetry ? () => void retry() : reset}>{busy ? "正在恢复…" : action.label}</button> })() : <button className="primary-action" type="button" onClick={onContinue}>{activeSession.status === "completed" ? "查看学习记录" : "进入下一轮学习"}</button>}</div></div>
 }
 
 function HistoryPage() {
@@ -453,6 +683,11 @@ function HistoryPage() {
   const activeSession = useRequiredSession()
   const events = activeSession.events.slice(-10).reverse()
   return <div className="page history-page"><PageHeading kicker="学习记录" title="主 Agent持久化的真实过程" description="页面读取 events 与 worker_ledger，不由 D 拼接虚假的执行链。" /><div className="history-refresh"><button className="secondary-action" type="button" onClick={() => void refreshEvents()}>刷新真实事件</button></div><section className="history-layout"><article className="session-summary"><span>当前实时会话</span><h2>{activeSession.session_id}</h2><p>此处仅展示主 Agent公开会话状态和事件。</p><dl><div><dt>状态</dt><dd>{activeSession.status}</dd></div><div><dt>阶段</dt><dd>{activeSession.current_stage}</dd></div><div><dt>轮次</dt><dd>{activeSession.round_no}</dd></div><div><dt>更新时间</dt><dd>{formatTime(activeSession.updated_at)}</dd></div></dl></article><div className="event-timeline">{events.map((event, index) => <article key={`${event.seq ?? index}-${event.event_type}`}><span className={`event-dot status-${event.status ?? "pending"}`} /><div><div><b>{eventStage(event)}</b><time>{formatTime(event.occurred_at)}</time></div><p>{event.summary || event.event_type}</p><small>{event.agent || event.worker || "learning-orchestrator"}</small></div></article>)}</div></section></div>
+}
+
+function BlockedResourceState({ session, busy, onRetry, onRestart, title }: { session: PublicSessionFixture; busy: string; onRetry: () => void; onRestart: () => void; title: string }) {
+  const action = blockedSessionAction(session)
+  return <div className="page"><section className="empty-state blocked-resource-state"><ShieldCheck size={29} /><h2>{title}</h2><p>{session.blocked_reason || "主 Agent尚未发布这一阶段的公开内容。"}</p><small>{action.canRetry ? "画像与学习路径已经保留；重试只会重新请求 C 生成、Docker验证和正式审核，不会改写你的诊断答案。" : "这是修复前创建的旧计划，没有保存真实诊断检查点；为避免篡改画像，不能用答案键自动重试。"}</small><button className="primary-action" disabled={Boolean(busy)} type="button" onClick={action.canRetry ? onRetry : onRestart}>{busy ? "正在恢复…" : action.label}</button></section></div>
 }
 
 function NoSessionState({ onStart }: { onStart: () => void }) {
@@ -528,8 +763,26 @@ function modalityLabel(modality: AssessmentPayload["items"][number]["modality"])
   return ({ mcq: "选择题", true_false: "判断题", trace: "代码追踪", short_answer: "简答题", code: "代码题" })[modality]
 }
 
+function radarPolygon(values: number[]): string {
+  const normalized = values.length >= 3 ? values : [0, 0, 0]
+  const total = normalized.length
+  return normalized.map((value, index) => {
+    const angle = -Math.PI / 2 + (Math.PI * 2 * index) / total
+    const radius = Math.max(0, Math.min(1, value)) * 76
+    return `${100 + Math.cos(angle) * radius},${100 + Math.sin(angle) * radius}`
+  }).join(" ")
+}
+
+function difficultyLabel(value?: string) {
+  return ({ beginner: "入门", basic: "基础", intermediate: "进阶", integrated: "综合" } as Record<string, string>)[value ?? ""] ?? value ?? "未公开"
+}
+
+function difficultyPosition(value?: string) {
+  return ({ beginner: 12, basic: 38, intermediate: 66, integrated: 92 } as Record<string, number>)[value ?? ""] ?? 0
+}
+
 function behaviorLabel(value: string) {
-  return ({ trace: "追踪执行过程", apply: "应用知识", create: "完成作品" } as Record<string, string>)[value] ?? value
+  return ({ recognize: "识别概念", trace: "追踪执行过程", apply: "应用知识", create: "完成作品" } as Record<string, string>)[value] ?? value
 }
 
 function workerLabel(worker: string) {

@@ -129,6 +129,53 @@ describe("orchestration worker adapters", () => {
     expect(profileArtifact.provenance.conflicts.length).toBeGreaterThan(0)
   })
 
+  test("path-planner starts from the selected function goal instead of the score-project demo node", async () => {
+    const pathStep = ORCHESTRATION_WORKER_SEQUENCE[4]
+    const learnerRequest = {
+      goal: "学习函数定义与调用",
+      background: "已掌握变量、条件和循环",
+      self_rating: "intermediate",
+      learning_goal_spec: { mode: "curriculum_node" as const, selected_node_ids: ["PY-CH04-S01"] },
+    }
+    const profile = {
+      learner_id: "learner-function-goal",
+      level: "intermediate" as const,
+      known_concepts: ["Python 是什么", "变量与赋值", "基本数据类型", "运算符", "条件判断", "for 循环"],
+      weak_concepts: [],
+      goal: learnerRequest.goal,
+    }
+    const result = await runWorkerAdapter({
+      ...createScaffoldWorkerInvocation({
+        session_id: "SESSION-FUNCTION-GOAL",
+        run_id: "RUN-FUNCTION-GOAL",
+        step_index: 5,
+        stage: pathStep.from,
+        worker: pathStep.worker,
+        learner_request: learnerRequest,
+        upstream_artifacts: {
+          "profile-builder": {
+            profile,
+            provenance: { level: { value: "intermediate", source: "self_rating", rule: "test" }, concepts: [], conflicts: [], unmapped_concepts: [] },
+            rag_request: { learner_profile: profile, query: "学习目标：学习函数定义与调用", top_k: 5 },
+          },
+        },
+        input_refs: ["profile-builder:test-result"],
+        evidence_refs: [],
+      }),
+      mode: "deterministic",
+    })
+
+    expect(result.status).toBe("completed")
+    const artifacts = result.artifacts as {
+      formal_path: { original_goal: string; nodes: Array<{ target_source_ids: string[] }> }
+      next_path_node: { target_source_ids: string[] } | null
+    }
+    expect(artifacts.formal_path.original_goal).toBe("学习函数定义与调用")
+    expect(artifacts.formal_path.nodes.flatMap((node) => node.target_source_ids)).toContain("K013")
+    expect(artifacts.next_path_node?.target_source_ids).toEqual(["K013"])
+    expect(artifacts.next_path_node?.target_source_ids).not.toEqual(["K007", "K009", "K018"])
+  })
+
   test("deterministic mode completes path-planner and concept-tutor with real C concept artifact", async () => {
     const { upstream_artifacts, input_refs } = await runDeterministicRoleBPrefix()
     const pathStep = ORCHESTRATION_WORKER_SEQUENCE[4]

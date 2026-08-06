@@ -6,7 +6,7 @@ import { selectDiagnosticItems } from "../knowledge/diagnostic-selector"
 import { synthesizeProfile } from "../role-b-profile/profile-synthesizer"
 import { executeProfileRetrieval } from "../role-b-profile/rag-bridge"
 import { retrieveKnowledge } from "../rag/retriever"
-import { buildFormalPath, startPath, type FormalLearningPath } from "../role-b-profile/teaching-audit/formal-path"
+import { buildFormalPath, startPath } from "../role-b-profile/teaching-audit/formal-path"
 import { adaptLearnerProfile } from "../role-c-content/contracts/profile-adapter"
 import { adaptRagResult } from "../role-c-content/contracts/evidence-pack"
 import { buildGenerationSpec } from "../role-c-content/contracts/generation-spec"
@@ -23,7 +23,7 @@ import { ROLE_C_PROMPT_MANIFEST_VERSION } from "../role-c-content/prompts/common
 import { TrustedCodeLabVerifier } from "../role-c-content/validators/code-lab-validator"
 import { TrustedAssessmentVerifier } from "../role-c-content/validators/assessment-validator"
 import type { RagResult, RagResultItem } from "../rag/retriever"
-import { defineLearningPathNode, type LearningPathNode } from "../role-c-content/contracts/profile-adapter"
+import type { LearningPathNode } from "../role-c-content/contracts/profile-adapter"
 import type { KnowledgeBase } from "../knowledge/types"
 import type { CodeExecutionRequest, CodeExecutionResult, CodeRunner } from "../role-c-content/security/code-runner"
 import type { CodeLabPublicArtifact, ConceptLessonArtifact } from "../role-c-content/contracts/artifacts"
@@ -248,13 +248,20 @@ async function runDeterministicWorkerAdapter(
       profile_version: "deterministic-v1",
       provenance_ref: "profile-builder:deterministic-result",
     })
+    const learningGoalSpec = resolveLearningGoalSpec(invocation.learner_request.learning_goal_spec ?? {
+      mode: "custom_goal",
+      custom_goal: invocation.learner_request.goal,
+    })
+    const goalSourceIds = learningGoalSpec.mapped_source_ids.length > 0
+      ? learningGoalSpec.mapped_source_ids
+      : rag_result.results.map((item) => item.source_id)
     const formalPath = buildFormalPath({
       learnerProfile: profileArtifact.value.profile,
       knowledgeBase,
       profileSnapshot,
-      goalSourceIds: rag_result.results.map((item) => item.source_id),
+      goalSourceIds,
     })
-    const startedPath = await startPathWithCodeLabGoldNode(formalPath)
+    const startedPath = startPath(formalPath)
     const pathRagResult = await ensureEvidenceForPathNode(
       rag_result,
       startedPath.nextPathNode,
@@ -638,56 +645,6 @@ function extractCodeLabArtifact(
     }
   }
   return { ok: true, value: artifact as unknown as CodeLabArtifact }
-}
-
-async function startPathWithCodeLabGoldNode(path: FormalLearningPath): Promise<ReturnType<typeof startPath>> {
-  const rawGoldNode = await Bun.file("examples/role-c-content/learning_path_node_score_project.json").json() as LearningPathNode
-  const updatedPath = structuredClone(path)
-  const node = {
-    ...defineLearningPathNode({
-      node_id: rawGoldNode.node_id,
-      target_source_ids: [...rawGoldNode.target_source_ids],
-      prerequisite_source_ids: [...rawGoldNode.prerequisite_source_ids],
-      goal: rawGoldNode.goal,
-      objectives: rawGoldNode.objectives.map((objective) => ({ ...objective })),
-      assessment_blueprint: { ...rawGoldNode.assessment_blueprint },
-    }),
-    status: "in_progress" as const,
-    stage_order: 1,
-  }
-  const existingIndex = updatedPath.nodes.findIndex((entry) =>
-    sameOrderedTargets(entry.target_source_ids, node.target_source_ids),
-  )
-  if (existingIndex >= 0) {
-    updatedPath.nodes[existingIndex] = node
-    updatedPath.current_node_index = existingIndex
-  } else {
-    updatedPath.nodes.unshift(node)
-    updatedPath.current_node_index = 0
-  }
-  for (const [nodeIndex, entry] of updatedPath.nodes.entries()) {
-    entry.status = nodeIndex === updatedPath.current_node_index ? "in_progress" : "pending"
-    entry.stage_order = nodeIndex + 1
-  }
-  updatedPath.updated_at = new Date().toISOString()
-
-  return {
-    nextPathNode: defineLearningPathNode({
-      node_id: node.node_id,
-      target_source_ids: [...node.target_source_ids],
-      prerequisite_source_ids: [...node.prerequisite_source_ids],
-      goal: node.goal,
-      objectives: node.objectives.map((objective) => ({ ...objective })),
-      assessment_blueprint: { ...node.assessment_blueprint },
-    }),
-    nextProfileSnapshot: updatedPath.profile_snapshot,
-    path: updatedPath,
-    pathCompleted: false,
-  }
-}
-function sameOrderedTargets(actual: string[], expected: string[]): boolean {
-  return actual.length === expected.length
-    && actual.every((sourceId, index) => sourceId === expected[index])
 }
 
 function fillRequiredFacts(pathNode: LearningPathNode, evidencePack: ReturnType<typeof adaptRagResult>): LearningPathNode {
