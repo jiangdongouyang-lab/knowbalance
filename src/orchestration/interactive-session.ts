@@ -11,6 +11,9 @@ import { validateWorkerResult } from "./worker-contract"
 import type { LearnerRequest, OrchestrationMode, WorkerName } from "./types"
 import type { BackgroundEvidence, DiagnosisItem, ObjectiveDiagnosisEvidence, SelfAssessmentEvidence } from "../role-b-profile/types"
 import type { AssessmentPublicArtifact, AssessmentSecureArtifact, SubmissionAnswer } from "../role-c-content/contracts/artifacts"
+import type { NextRoundGenerationContext } from "../role-c-content/agents/types"
+import type { RoleCAdaptationInfo } from "../role-c-content/contracts/external-api"
+import type { DynamicFeedbackResult, ObjectiveRoundResult } from "../role-c-content/contracts/dynamic-feedback"
 import {
   createAtomicRoleCLearningPersistence,
   generateRoleCForRoleDWithRuntime,
@@ -72,6 +75,8 @@ export interface InteractiveSessionRecord {
   rag_result: unknown | null
   learning_resources: { concept_lesson: unknown | null; code_lab: unknown | null }
   assessment: unknown | null
+  /** 本轮生成相对上一轮的适配信息（remediate/reinforce 时存在）。 */
+  adaptation: unknown | null
   feedback: unknown | null
   blocked_reason: string | null
   events: InteractiveEvent[]
@@ -197,6 +202,7 @@ export class InteractiveSessionStore {
       rag_result: null,
       learning_resources: { concept_lesson: null, code_lab: null },
       assessment: null,
+      adaptation: null,
       feedback: null,
       blocked_reason: null,
       events,
@@ -459,7 +465,18 @@ async function continueAfterAssessment(
   record.current_path_node = advance.nextPathNode
   record.private.role_c_generation_attempt = 0
   record.round_no += 1
-  const next = await generateFormalRoleCRound(record, advance.path, advance.nextPathNode, dataRoot)
+  const nextRoundContext = buildNextRoundContext(
+    outcome.feedback,
+    roleC.run_id,
+    `NRC-${record.session_id}-R${record.round_no}`,
+  )
+  const next = await generateFormalRoleCRound(
+    record,
+    advance.path,
+    advance.nextPathNode,
+    dataRoot,
+    nextRoundContext,
+  )
   if (!next.ok) {
     record.status = "blocked"
     record.current_stage = "blocked"
@@ -487,12 +504,72 @@ interface FormalRoleCRound {
   code_lab: unknown
   assessment: unknown
   rag_result: RagResult
+  /** 本轮相对上一轮的适配信息（remediate/reinforce 时存在），随会话公开给 D。 */
+  adaptation?: RoleCAdaptationInfo
 }
 
 type FormalRoleCRoundResult = FormalRoleCRound | { ok: false; reason: string }
 
 export function roleCRoundRunId(baseRunId: string, roundNo: number, generationAttempt: number): string {
   return `${baseRunId}-R${roundNo}-C${generationAttempt + 1}`
+}
+
+/** 与主 Agent 动态规划对齐的阈值：<40% 针对性补救，<80% 巩固强化。 */
+export const REMEDIATE_ACCURACY_THRESHOLD = 0.4
+export const REINFORCE_ACCURACY_THRESHOLD = 0.8
+
+/**
+ * 根据本轮评分结果选择下一轮的聚焦目标：
+ * remediate → 低分目标（accuracy < 0.4）；reinforce → 不稳定目标（0.4..0.8）；
+ * advance → 全部目标。
+ */
+export function focusObjectivesForNextRound(
+  results: ObjectiveRoundResult[],
+  action: DynamicFeedbackResult["final_decision"]["action"],
+): string[] {
+  if (action === "remediate") {
+    return results
+      .filter((result) => result.accuracy < REMEDIATE_ACCURACY_THRESHOLD)
+      .map((result) => result.objective_id)
+  }
+  if (action === "reinforce") {
+    return results
+      .filter((result) => result.accuracy >= REMEDIATE_ACCURACY_THRESHOLD
+        && result.accuracy < REINFORCE_ACCURACY_THRESHOLD)
+      .map((result) => result.objective_id)
+  }
+  return results.map((result) => result.objective_id)
+}
+
+/**
+ * 从本轮评分反馈构造传给 C 的 next_round_context：
+ * action/聚焦目标/上一轮误区标签/反馈引用。reprofile 不进入生成轮（返回 undefined）。
+ */
+export function buildNextRoundContext(
+  feedback: DynamicFeedbackResult,
+  parentSpecId: string,
+  requestId: string,
+): NextRoundGenerationContext | undefined {
+  const action = feedback.final_decision.action
+  if (action === "reprofile") return undefined
+  const focus = focusObjectivesForNextRound(feedback.objective_results, action)
+  const misconceptionTags = focus.length > 0
+    ? [
+        ...new Set(feedback.objective_results
+          .filter((result) => focus.includes(result.objective_id))
+          .flatMap((result) => result.misconception_tags)),
+      ]
+    : []
+  return {
+    request_id: requestId,
+    parent_spec_id: parentSpecId,
+    prior_feedback_ref: feedback.feedback_id,
+    trigger_grade_artifact_id: feedback.grade_result.artifact_id,
+    action,
+    focus_objective_ids: focus,
+    reason_codes: [...feedback.final_decision.reason_codes],
+    ...(misconceptionTags.length > 0 ? { misconception_tags: misconceptionTags } : {}),
+  }
 }
 
 export function interactiveSessionProductionBoundary() {
@@ -517,6 +594,7 @@ async function generateFormalRoleCRound(
   path: FormalLearningPath,
   node: LearningPathNode,
   dataRoot: string,
+  nextRoundContext?: NextRoundGenerationContext,
 ): Promise<FormalRoleCRoundResult> {
   const runId = roleCRoundRunId(
     record.run_id,
@@ -531,6 +609,7 @@ async function generateFormalRoleCRound(
     kbVersion: await resolveRoleCKnowledgeBaseVersion(),
     runId,
     pathNode: bindPathNodeFactsForRoleC(node, ragResult),
+    ...(nextRoundContext ? { next_round_context: nextRoundContext } : {}),
   }, roleCRuntime(dataRoot))
   if (result.status !== "ready") return { ok: false, reason: result.reason }
   if (!result.reviewedRelease) return { ok: false, reason: "Role C ready result omitted reviewed public release" }
@@ -547,6 +626,7 @@ async function generateFormalRoleCRound(
     code_lab: codeLab,
     assessment,
     rag_result: ragResult,
+    adaptation: result.reviewedRelease.adaptation,
   }
 }
 
@@ -554,6 +634,7 @@ function applyFormalRoleCRound(record: InteractiveSessionRecord, round: FormalRo
   record.rag_result = round.rag_result
   record.learning_resources = { concept_lesson: round.concept_lesson, code_lab: round.code_lab }
   record.assessment = round.assessment
+  record.adaptation = round.adaptation ?? null
   record.private.role_c = {
     data_directory: "role-c",
     session_id: round.learning_session.session_id,

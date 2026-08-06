@@ -29,9 +29,14 @@ import {
 } from "../src/role-c-content"
 import { createReviewedReleaseDelivery } from "../src/role-c-content/contracts/external-api"
 import { generateConceptLesson } from "../src/role-c-content/agents/concept-tutor"
+import {
+  buildNextRoundContext,
+  focusObjectivesForNextRound,
+} from "../src/orchestration/interactive-session"
 import { generateAssessment } from "../src/role-c-content/agents/tiered-evaluator"
 import { contentHash } from "../src/role-c-content/contracts/common"
 import type { AssessmentItemSecure, AssessmentSecureArtifact } from "../src/role-c-content/contracts/artifacts"
+import type { DynamicFeedbackResult } from "../src/role-c-content/contracts/dynamic-feedback"
 import type { SecureArtifact } from "../src/role-c-content/security/secure-artifact-store"
 import type { LearnerProfile } from "../src/role-b-profile/types"
 import { ROLE_C_PROMPT_MANIFEST_VERSION } from "../src/role-c-content/prompts/common-policy"
@@ -1494,4 +1499,66 @@ describe("role C formal learning cycle", () => {
     expect(lessonDiffers).toBe(true)
     expect(assessmentDiffers).toBe(true)
   }, { timeout: 300000 })
+
+  test("selects next-round focus objectives and misconception tags from grading feedback", () => {
+    const results = [
+      { objective_id: "O1", raw_score: 0, max_score: 4, accuracy: 0, evidence_score: 0, misconception_tags: ["integer_division"] },
+      { objective_id: "O2", raw_score: 3, max_score: 4, accuracy: 0.75, evidence_score: 0.6, misconception_tags: ["skips_last_element"] },
+      { objective_id: "O3", raw_score: 4, max_score: 4, accuracy: 1, evidence_score: 0.9, misconception_tags: [] },
+    ]
+    expect(focusObjectivesForNextRound(results, "remediate")).toEqual(["O1"])
+    expect(focusObjectivesForNextRound(results, "reinforce")).toEqual(["O2"])
+    expect(focusObjectivesForNextRound(results, "advance")).toEqual(["O1", "O2", "O3"])
+  })
+
+  test("builds next round context with action, focus, misconception tags and feedback refs", () => {
+    const feedback = {
+      feedback_id: "FB-R2",
+      run_id: "RUN-1",
+      session_id: "S-1",
+      submission_id: "SUB-1",
+      learner_id_hash: "L-1",
+      profile_version: "P-1",
+      path_node_id: "N-1",
+      form_id: "F-1",
+      attempt_no: 1,
+      round_score: { raw_score: 5, max_score: 10, accuracy: 0.5, evidence_score: 0.5 },
+      objective_results: [
+        { objective_id: "O1", raw_score: 0, max_score: 4, accuracy: 0, evidence_score: 0, misconception_tags: ["integer_division"] },
+        { objective_id: "O2", raw_score: 3, max_score: 4, accuracy: 0.75, evidence_score: 0.6, misconception_tags: ["skips_last_element"] },
+        { objective_id: "O3", raw_score: 2, max_score: 2, accuracy: 1, evidence_score: 0.9, misconception_tags: [] },
+      ],
+      grade_result: { artifact_id: "GRADE-R2", run_id: "RUN-1" } as never,
+      mastery_snapshot: [],
+      final_decision: {
+        action: "remediate" as const,
+        basis: "round_accuracy" as const,
+        confidence: 0.8,
+        reason_codes: ["round_accuracy_below_remediation_threshold"],
+        target_objective_ids: ["O1"],
+        policy_ref: "role-c-round-accuracy-v1",
+      },
+      profile_drift_suggestion: null,
+      schema_version: "1.0",
+    } as unknown as DynamicFeedbackResult
+
+    const context = buildNextRoundContext(feedback, "RUN-1", "NRC-TEST-1")
+    expect(context).toMatchObject({
+      request_id: "NRC-TEST-1",
+      parent_spec_id: "RUN-1",
+      prior_feedback_ref: "FB-R2",
+      trigger_grade_artifact_id: "GRADE-R2",
+      action: "remediate",
+      focus_objective_ids: ["O1"],
+      misconception_tags: ["integer_division"],
+      reason_codes: ["round_accuracy_below_remediation_threshold"],
+    })
+
+    const reprofile = buildNextRoundContext(
+      { ...feedback, final_decision: { ...feedback.final_decision, action: "reprofile" as const } } as unknown as DynamicFeedbackResult,
+      "RUN-1",
+      "NRC-TEST-2",
+    )
+    expect(reprofile).toBeUndefined()
+  })
 })
