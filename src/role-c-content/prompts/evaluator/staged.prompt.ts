@@ -6,6 +6,22 @@ import {
 const JSON_ONLY = "只输出满足本次 output schema 的 JSON 对象，不输出 Markdown、解释或内部推理。"
 
 /**
+ * 评估特定（超出通用 next_round 策略）的命题差异。
+ * remediate 出"纠错与基础"导向新题；reinforce 出"变式与迁移"导向新题；
+ * 两种方案都不得复用上一轮同一套题目。
+ */
+export const EVALUATOR_NEXT_ROUND_VARIANT_POLICY = `【next_round 命题差异（评估特定）】
+- action=remediate 或 teaching_strategy=reduce_load：本轮重新出题，围绕 focus_objective_ids 采用"纠错与基础"导向：
+  · 选择/判断题：错误选项直接对应上轮 misconception，题干可指向具体误解场景并要求辨析
+  · 追踪/简答题：要求指出错误原因、给出改正步骤或分步推导过程
+  · 代码题：任务边界更小、提示更明确，输入覆盖上轮错误类型的变体
+  · 不得复用上一轮同一套题目，也不得只改数字敷衍了事
+- action=reinforce 或 teaching_strategy=same_difficulty_new_variant：本轮重新出题，围绕 focus_objective_ids 采用"变式与迁移"导向：
+  · 更换场景、数据结构或表达方式，难度可适当高于上一轮同 tier
+  · 代码题使用不同任务结构与输入形态
+  · 不得复用上一轮同一套题目`
+
+/**
  * Evaluator 公开出题阶段提示词。
  * 只生成 public author payload（题干、选项、starter_code）。
  *
@@ -20,6 +36,8 @@ export const ASSESSMENT_PUBLIC_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POL
 ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 
 当前职责：tiered-evaluator 的公开出题阶段，只生成紧凑的 public author payload。题目身份、分值、引用、路由与覆盖由编排器生成，不得在输出中返回。
+
+${EVALUATOR_NEXT_ROUND_VARIANT_POLICY}
 
 ══════════════════════════════════════════
 命题设计原则
@@ -68,6 +86,8 @@ export const ASSESSMENT_SECURE_STAGE_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POL
 ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 
 当前职责：tiered-evaluator 的私有答案语义阶段，只生成紧凑的 secure author payload。输入中的 public_payload 与 item_plan 已冻结；form、题目身份、分值、代码 suite/test ID、权重和目标覆盖由编排器生成，不得在输出中返回。
+
+${EVALUATOR_NEXT_ROUND_VARIANT_POLICY}
 
 要求：
 1. items 必须按 public_payload.items 顺序一一返回且每项固定包含 answer_spec、correct_option_id、misconception_by_option；不返回 item_id、objective_id、tier、modality、max_score 或 evidence_weight。

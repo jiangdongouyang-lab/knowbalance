@@ -294,7 +294,11 @@ export async function generateRoleCForRoleDWithRuntime(
         reason: built.errors.join("；"),
       }
     }
-    const pipelineInput = { generation_spec: built.spec, evidence_pack: evidencePack }
+    const pipelineInput = {
+      generation_spec: built.spec,
+      evidence_pack: evidencePack,
+      ...(input.next_round_context ? { next_round_context: input.next_round_context } : {}),
+    }
     pipeline = await runRecoverableReviewedCPipeline(
       pipelineInput,
       agents,
@@ -377,7 +381,7 @@ export async function generateRoleCForRoleDWithRuntime(
       formId: assessment.payload!.form_id,
       attemptNo: 1,
     },
-    reviewedRelease: createReviewedReleaseDelivery(pipeline),
+    reviewedRelease: createReviewedReleaseDelivery(pipeline, input.next_round_context),
     ...(audit ? { audit } : {}),
     recovery: toRoleDRecovery(pipeline.recovery),
     finalContext: {

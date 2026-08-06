@@ -1,3 +1,4 @@
+import type { NextRoundGenerationContext } from "../role-c-content/agents/types"
 import type { RagResult } from "../rag/retriever"
 import type { LearnerProfile } from "../role-b-profile/types"
 import type {
@@ -193,6 +194,8 @@ export interface GenerateRoleCForRoleDInput {
   runId: string
   /** Formal B path consumed verbatim by C. */
   pathNode: LearningPathNode
+  /** 本轮相对上一轮的决策与反馈上下文（主 Agent 传入，C 用于定向生成与 adaptation 回传）。 */
+  next_round_context?: NextRoundGenerationContext
 }
 
 export interface SubmitRoleCAssessmentInput {
