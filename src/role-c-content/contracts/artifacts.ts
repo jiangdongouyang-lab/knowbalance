@@ -47,6 +47,12 @@ export interface QuizBlock {
   prompt: string
   options?: PublicOption[]
   citations: CitationRef[]
+  /**
+   * 课件内理解检查的即时反馈答案（公开学习内容，不计入正式评分）。
+   * 键名避开 secure 边界保留字段；正式测评答案仍走 secure + 反馈揭示。
+   */
+  answer_option_id?: string
+  answer_explanation?: string
 }
 
 export interface HintBlock {

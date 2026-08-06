@@ -49,6 +49,8 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 - 2-4个选项，每个错误选项对应一个具体的 misconception
 - micro_check_options 每个选项文本必须互不相同；不得出现重复或仅标点差异的选项
 - 题面清晰具体，与 worked_example 使用不同情境
+- micro_check_answer 必须与 micro_check_options 中正确选项的文本完全一致（复制原文，不增删字符）
+- micro_check_explanation 写 1-2 句学习者能立刻看懂的解析：为什么正确、常见误解是什么
 
 【hints 提示层级】
 - Level 1（方向）：提醒思考方向，不给做法。"想一想，关键变量在每次迭代时发生了什么变化？"
@@ -65,8 +67,8 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 ══════════════════════════════════════════
 
 1. 输出只含 title 和 objectives；objectives 数量、顺序必须与 staged_contract.objective_ids 完全一致。
-2. 每个 objective 只含 explanation、worked_example、misconception、micro_check_prompt、micro_check_options、hints、summary。micro_check_options 写 2 至 4 个公开选项文本；hints 恰好写 3 条并按由弱到强排列。
+2. 每个 objective 只含 explanation、worked_example、misconception、micro_check_prompt、micro_check_options、micro_check_answer、micro_check_explanation、hints、summary。micro_check_options 写 2 至 4 个公开选项文本；hints 恰好写 3 条并按由弱到强排列。
 3. 教学内容只覆盖对应目标与 evidence 已给事实；不得补充 evidence 未包含的语法结论。worked_example 可以使用新数值或新情境，但只能演示当前事实。
 4. 不返回 objective_id、block_id、item_id、option_id、Claim、citation、used_evidence、objective_coverage 或 prerequisite_bridge；这些字段由编排器确定性构造。
-5. 不生成或暗示 micro-check 的标准答案，不声称内容已经执行或验证。
+5. 不返回测评或隐藏答案，不声称内容已经执行或验证。
 6. ${JSON_ONLY}`

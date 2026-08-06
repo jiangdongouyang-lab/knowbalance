@@ -247,30 +247,9 @@ export async function generateRoleCForRoleDWithRuntime(
     }
   }
 
-  const built = buildGenerationSpec({
-    run_id: input.runId,
-    profile_snapshot: profileSnapshot,
-    path_node: pathNode,
-    evidence_pack: evidencePack,
-    versions: {
-      prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
-      model_config_hash: modelGateway
-        ? modelGateway.model_config_hash
-        : "deterministic-role-d-local-reference-v1",
-      runner_image_digest: runner.runner_image_digest,
-    },
-    seed: 42,
-  })
-  if (!built.ok) {
-    return {
-      status: "blocked",
-      artifacts: [],
-      workflow: [],
-      runId: input.runId,
-      reason: built.errors.join("；"),
-    }
-  }
-
+  // 真实模型生成有少量随机失败（code-lab secure 阶段、可信执行修复等），
+  // 至多重试 5 次，每次使用新 runId 重建 spec 避免产物 ID 冲突；
+  // 仍失败才向调用方阻塞。审核通过即停止。
   const provider = runtime.provider ?? new ModelBackedRoleCContentProvider(
     modelGateway!,
     modelBackedProviderOptionsFromEnv(runtimeEnv),
@@ -287,13 +266,40 @@ export async function generateRoleCForRoleDWithRuntime(
     mastery_store: persistence.masteryStore,
     code_runner: runner,
   })
-  const pipelineInput = { generation_spec: built.spec, evidence_pack: evidencePack }
+  // 循环内必有赋值：built 失败直接 return，成功则 pipeline 一定被赋值。
+  let pipeline!: Awaited<ReturnType<typeof runRecoverableReviewedCPipeline>>
   let readyContext: RecoverableReviewedReadyContext | undefined
-  const pipeline = await runRecoverableReviewedCPipeline(
-    pipelineInput,
-    agents,
-    secureStore,
-    {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const attemptRunId = attempt === 0 ? input.runId : `${input.runId}-R${attempt + 1}`
+    const built = buildGenerationSpec({
+      run_id: attemptRunId,
+      profile_snapshot: profileSnapshot,
+      path_node: pathNode,
+      evidence_pack: evidencePack,
+      versions: {
+        prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
+        model_config_hash: modelGateway
+          ? modelGateway.model_config_hash
+          : "deterministic-role-d-local-reference-v1",
+        runner_image_digest: runner.runner_image_digest,
+      },
+      seed: 42,
+    })
+    if (!built.ok) {
+      return {
+        status: "blocked",
+        artifacts: [],
+        workflow: [],
+        runId: attemptRunId,
+        reason: built.errors.join("；"),
+      }
+    }
+    const pipelineInput = { generation_spec: built.spec, evidence_pack: evidencePack }
+    pipeline = await runRecoverableReviewedCPipeline(
+      pipelineInput,
+      agents,
+      secureStore,
+      {
       review_port: runtime.reviewPort
         ?? createLocalABContentReviewPort({ knowledge_base: knowledgeBase }),
       profile_snapshot: profileSnapshot,
@@ -314,8 +320,9 @@ export async function generateRoleCForRoleDWithRuntime(
         })
         readyContext = context
       },
-    },
-  )
+    })
+    if (pipeline.status === "ready") break
+  }
   const workflow = [
     ...pipeline.trace_events.map(toWorkflowEvent),
     ...recoveryWorkflowEvents(input.runId, pipeline.recovery, pipeline.recovery_history),
