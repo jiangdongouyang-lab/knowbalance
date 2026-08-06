@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { createHash, randomUUID } from "node:crypto"
+import { contentHash } from "../role-c-content/contracts/common"
 import { join } from "node:path"
 import { loadKnowledgeBase } from "../knowledge/loader"
 import { resolveLearningGoalSpec } from "../knowledge/curriculum"
@@ -99,6 +100,8 @@ export interface InteractiveSessionRecord {
     upstream_artifacts: Record<string, unknown>
     /** 评分后暂存给后台生成的下一轮上下文；生成完成即清空。 */
     next_round_context: NextRoundGenerationContext | null
+    /** 锚点作答答案（路由锁定后暂存，最终提交时自动透传给 C 做一致性校验）。 */
+    anchor_answers: SubmissionAnswer[] | null
     role_c_generation_attempt: number
     role_c: null | {
       data_directory: string
@@ -221,7 +224,7 @@ export class InteractiveSessionStore {
       blocked_reason: null,
       events,
       processed_commands: {},
-      private: { diagnosis_answer_key: answerKey, diagnosis_answers: null, diagnosis_items: diagnosisItems, upstream_artifacts: {}, next_round_context: null, role_c_generation_attempt: 0, role_c: null },
+      private: { diagnosis_answer_key: answerKey, diagnosis_answers: null, diagnosis_items: diagnosisItems, upstream_artifacts: {}, next_round_context: null, anchor_answers: null, role_c_generation_attempt: 0, role_c: null },
       created_at: now,
       updated_at: now,
     }
@@ -266,7 +269,9 @@ export class InteractiveSessionStore {
       }
       updated = await continueAfterDiagnosis(record, command, this.data_root)
     } else if (command.type === "submit_anchor_answers") {
-      if (record.status !== "waiting_for_user" || record.waiting_for?.type !== "anchor_answers") {
+      const waitingAnchor = record.waiting_for?.type === "anchor_answers"
+      const routeLocked = record.anchor_routing?.phase === "ROUTE_LOCKED"
+      if (record.status !== "waiting_for_user" || (!waitingAnchor && !routeLocked)) {
         throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not waiting for anchor answers", 409)
       }
       updated = await continueAfterAnchorAnswers(record, command, this.data_root)
@@ -325,6 +330,12 @@ export class InteractiveSessionStore {
         this.data_root,
         nextRoundContext,
       )
+      // 乐观检查：保存前确认会话仍是"生成中"且轮次未被推进，避免覆盖并发写入。
+      const currentBeforeSave = await this.load(sessionId)
+      if (currentBeforeSave.status !== "running"
+        || currentBeforeSave.round_no !== record.round_no) {
+        return
+      }
       if (!next.ok) {
         record.status = "blocked"
         record.current_stage = "blocked"
@@ -349,6 +360,7 @@ export class InteractiveSessionStore {
     } catch (error) {
       try {
         const current = await this.load(sessionId)
+        if (current.status !== "running") return
         current.status = "failed"
         current.current_stage = "failed"
         current.blocked_reason = error instanceof Error
@@ -385,11 +397,31 @@ export class InteractiveSessionStore {
 
   private async loadOptional(sessionId: string): Promise<InteractiveSessionRecord | null> {
     try {
-      return JSON.parse(await readFile(join(this.data_root, "sessions", `${sessionId}.json`), "utf8")) as InteractiveSessionRecord
+      const parsed = JSON.parse(await readFile(join(this.data_root, "sessions", `${sessionId}.json`), "utf8")) as InteractiveSessionRecord
+      return normalizeSessionRecord(parsed)
     } catch (error) {
       if (error instanceof Error && "code" in error && error.code === "ENOENT") return null
       throw error
     }
+  }
+}
+
+/** 旧版本会话字段迁移：缺失的新增字段补默认值，避免 undefined 访问。 */
+function normalizeSessionRecord(record: InteractiveSessionRecord): InteractiveSessionRecord {
+  return {
+    ...record,
+    anchor_routing: record.anchor_routing ?? null,
+    adaptation: record.adaptation ?? null,
+    private: {
+      diagnosis_answer_key: record.private?.diagnosis_answer_key ?? {},
+      diagnosis_answers: record.private?.diagnosis_answers ?? null,
+      diagnosis_items: record.private?.diagnosis_items ?? [],
+      upstream_artifacts: record.private?.upstream_artifacts ?? {},
+      next_round_context: record.private?.next_round_context ?? null,
+      anchor_answers: record.private?.anchor_answers ?? null,
+      role_c_generation_attempt: record.private?.role_c_generation_attempt ?? 0,
+      role_c: record.private?.role_c ?? null,
+    },
   }
 }
 
@@ -420,7 +452,12 @@ async function retryInteractiveSession(
       record.updated_at = new Date().toISOString()
       return record
     }
-    const next = await generateFormalRoleCRound(record, path, node, dataRoot)
+    // 重试生成：递增尝试序号避免 run_id 碰撞，并携带暂存的下一轮上下文。
+    record.private.role_c_generation_attempt = (record.private.role_c_generation_attempt ?? 0) + 1
+    record.anchor_routing = null
+    record.private.anchor_answers = null
+    const retryContext = record.private.next_round_context ?? undefined
+    const next = await generateFormalRoleCRound(record, path, node, dataRoot, retryContext)
     if (!next.ok) {
       record.status = "blocked"
       record.current_stage = "blocked"
@@ -437,8 +474,14 @@ async function retryInteractiveSession(
   if (record.private.role_c && record.assessment && record.current_path_node && record.formal_path) {
     record.status = "waiting_for_user"
     record.current_stage = "assessment"
-    const assessment = record.assessment as { payload?: { items?: unknown[] } }
-    record.waiting_for = { type: "assessment_answers", items: assessment.payload?.items ?? [] }
+    if (record.anchor_routing?.phase === "ANCHOR_PENDING") {
+      record.waiting_for = {
+        type: "anchor_answers",
+        items: anchorItemsOf(record.assessment, record.anchor_routing.anchor_item_ids),
+      }
+    } else {
+      record.waiting_for = { type: "assessment_answers", items: assessmentItems(record.assessment) }
+    }
     record.events.push(event(record.session_id, "session_updated", "assessment", "retry restored the assessment checkpoint", new Date().toISOString()))
     record.updated_at = new Date().toISOString()
     return record
@@ -491,6 +534,8 @@ async function continueAfterAssessment(
   }
 
   const submissionId = `SUB-${record.session_id}-R${record.round_no}-${command.command_id}`
+  // 锚点路由后：学习者只作答路由新增题，锚点题答案自动透传（C 校验与冻结路由一致）。
+  const fullAnswers = mergeAnchorAnswers(answers, record.private.anchor_answers)
   const outcome = await submitRoleCAssessment({
     sessionId: roleC.session_id,
     runId: roleC.run_id,
@@ -498,7 +543,7 @@ async function continueAfterAssessment(
     formId: roleC.form_id,
     attemptNo: roleC.attempt_no,
     submissionId,
-    answers: structuredClone(answers),
+    answers: fullAnswers,
   }, roleCRuntime(dataRoot))
   if (outcome.status === "blocked") {
     record.status = "blocked"
@@ -733,6 +778,9 @@ function applyFormalRoleCRound(record: InteractiveSessionRecord, round: FormalRo
   }
   record.status = "waiting_for_user"
   record.current_stage = "assessment"
+  // 新轮先清除旧锚点状态：锚点模式由下方重新初始化，否则保持无锚点。
+  record.anchor_routing = null
+  record.private.anchor_answers = null
   if (round.learning_session.routing_request_id
     && round.learning_session.anchor_item_ids?.length) {
     record.anchor_routing = {
@@ -812,8 +860,17 @@ async function continueAfterAnchorAnswers(
   const record = structuredClone(original)
   const roleC = record.private.role_c
   const routing = record.anchor_routing
-  if (!roleC || !routing || routing.phase !== "ANCHOR_PENDING") {
-    throw new InteractiveSessionError("SESSION_ARTIFACT_MISSING", "Anchor routing is missing or already locked", 409)
+  if (!roleC || !routing) {
+    throw new InteractiveSessionError("SESSION_ARTIFACT_MISSING", "Anchor routing is missing", 409)
+  }
+  // ROUTE_LOCKED 后重放相同锚点答案：幂等返回当前状态（与 C 侧语义一致）；
+  // 答案不同则拒绝（最终提交必须与冻结路由时一致）。
+  if (routing.phase === "ROUTE_LOCKED") {
+    if (record.private.anchor_answers
+      && sameAnchorAnswers(record.private.anchor_answers, answers)) {
+      return record
+    }
+    throw new InteractiveSessionError("ANCHOR_ANSWERS_CHANGED", "Anchor routing is already locked with different answers", 409)
   }
   const anchorIds = routing.anchor_item_ids
   const answerIds = answers.map((answer: { item_id: string }) => answer.item_id)
@@ -852,6 +909,8 @@ async function continueAfterAnchorAnswers(
     anchor_score_ratio: outcome.anchor_score_ratio,
     required_item_ids: [...outcome.required_item_ids],
   }
+  record.private.anchor_answers = structuredClone(answers)
+  // 展示全部路由题（含锚点题：学习者可查看，最终提交时锚点答案以冻结版为准）。
   record.waiting_for = {
     type: "assessment_answers",
     items: assessmentItems(record.assessment)
@@ -938,6 +997,34 @@ async function generateRoundArtifacts(
 }
 
 /**
+ * 将冻结路由时的锚点答案合并进最终提交：锚点题答案一律使用冻结版本
+ * （与路由时哈希一致，学习者对锚点题的作答不会改变路由结果），
+ * 非锚点题使用前端提交。
+ */
+function mergeAnchorAnswers(
+  submitted: SubmissionAnswer[],
+  anchorAnswers: SubmissionAnswer[] | null,
+): SubmissionAnswer[] {
+  if (!anchorAnswers || anchorAnswers.length === 0) return structuredClone(submitted)
+  const anchorById = new Map(anchorAnswers.map((answer) => [answer.item_id, answer]))
+  return [
+    ...structuredClone(anchorAnswers),
+    ...structuredClone(submitted).filter((answer) => !anchorById.has(answer.item_id)),
+  ]
+}
+
+/** 锚点答案是否逐项一致（顺序无关）。 */
+function sameAnchorAnswers(prior: SubmissionAnswer[], current: SubmissionAnswer[]): boolean {
+  if (prior.length !== current.length) return false
+  const byId = new Map(prior.map((answer) => [answer.item_id, answer]))
+  return current.every((answer) => {
+    const expected = byId.get(answer.item_id)
+    if (!expected) return false
+    return contentHash({ ...expected }) === contentHash({ ...answer })
+  })
+}
+
+/**
  * 画像漂移（reprofile）后重置会话到诊断阶段：重新出诊断题、清空画像/
  * 路径/内容，学习者重答后走完整首轮流程（新画像 → 新路径 → 新内容）。
  */
@@ -984,6 +1071,7 @@ async function resetToDiagnosisPhase(
     learning_resources: { concept_lesson: null, code_lab: null },
     assessment: null,
     adaptation: null,
+    anchor_routing: null,
     feedback: null,
     blocked_reason: null,
     private: {
@@ -993,7 +1081,9 @@ async function resetToDiagnosisPhase(
       diagnosis_answers: null,
       upstream_artifacts: {},
       next_round_context: null,
-      role_c_generation_attempt: 0,
+      anchor_answers: null,
+      // 递增而非归零：reprofile 后新 run 的 runId 不与首轮冲突（C 侧 run 幂等）。
+      role_c_generation_attempt: (record.private.role_c_generation_attempt ?? 0) + 1,
       role_c: null,
     },
     events: [
