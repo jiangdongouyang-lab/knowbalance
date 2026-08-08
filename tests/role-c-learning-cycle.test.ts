@@ -53,7 +53,9 @@ function createProvider() {
   return new ModelBackedRoleCContentProvider(gateway, modelBackedProviderOptionsFromEnv(process.env))
 }
 
-const CURRENT_MODEL_HASH = createRoleCModelGatewayFromEnv(process.env).model_config_hash
+function currentModelHash(): string {
+  return createRoleCModelGatewayFromEnv(process.env).model_config_hash
+}
 const runnerDigest = `sha256:${"d".repeat(64)}`
 
 class FixtureCodeRunner implements CodeRunner {
@@ -157,6 +159,7 @@ function readyFixture(_runId: string): Promise<CycleFixture> {
 }
 
 async function buildSharedCycleFixture() {
+  const modelHash = currentModelHash()
   const runId = "RUN-CYCLE-SHARED"
   const profile: LearnerProfile = {
     learner_id: "learner-cycle",
@@ -194,14 +197,14 @@ async function buildSharedCycleFixture() {
     evidence_pack: evidence,
     versions: {
       prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
-      model_config_hash: CURRENT_MODEL_HASH,
+      model_config_hash: modelHash,
       runner_image_digest: runnerDigest,
     },
     seed: 29,
   })
   if (!built.ok) throw new Error(JSON.stringify(built))
 
-  const cacheKey = `cycle-shared-${ROLE_C_PROMPT_MANIFEST_VERSION}-${CURRENT_MODEL_HASH.slice(0, 8)}`
+  const cacheKey = `cycle-shared-${ROLE_C_PROMPT_MANIFEST_VERSION}-${modelHash.slice(0, 8)}`
   const cached = loadCachedRoleCFixture(cacheKey)
 
   const secureStore = new InMemorySecureArtifactStore()
@@ -385,7 +388,7 @@ async function serviceFixture(
   return { ...fixture, service, cycleStore, masteryStore, runner, session, assessment }
 }
 
-describe("role C formal learning cycle", () => {
+describe.skipIf(process.env.RUN_REAL_MODEL_TESTS !== "1")("role C formal learning cycle", () => {
   test("freezes the assessment route from trusted anchor scores before accepting a final submission", async () => {
     const fixture = await readyFixture("RUN-CYCLE-ANCHOR-ROUTING")
     const cycleStore = new InMemoryLearningCycleStore()

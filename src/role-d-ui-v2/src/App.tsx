@@ -37,8 +37,12 @@ import {
   UserRound,
   X,
 } from "lucide-react"
-import { createContext, useContext, useEffect, useState } from "react"
+import { createContext, useContext, useEffect, useRef, useState } from "react"
 import { createPortal } from "react-dom"
+import EditorExport from "react-simple-code-editor"
+import Prism from "prismjs"
+import "prismjs/components/prism-python"
+import "prismjs/themes/prism-tomorrow.css"
 import learningCatIllustration from "./assets/knowbalance-learning-cat.jpg"
 import { PYTHON_CURRICULUM } from "./curriculum"
 import {
@@ -46,12 +50,14 @@ import {
   getOrchestratorEvents,
   getOrchestratorSession,
   getProviderConfiguration,
+  newClientId,
   retryOrchestratorSession,
   saveProviderConfiguration,
   submitAssessmentAnswers,
   submitDiagnosisAnswers,
 } from "./orchestrator-client"
-import { abilityRadarView, answersToSubmission, assessmentComplete, assessmentFeedbackView, blockedSessionAction, diagnosisComplete, initialGoalSelection, pageForSession, pathChainView, pathNodeTitle } from "./orchestrator-view"
+import { semanticLessonLines, indentParagraphText } from "./lesson-format"
+import { abilityRadarView, answersMatchAssessmentItems, answersToSubmission, assessmentComplete, assessmentFeedbackView, blockedSessionAction, completedNodeFromPath, diagnosisComplete, finalFeedbackAction, initialGoalSelection, isFinalAdvanceSession, isFinalMasterySession, microCheckFeedbackView, nextRoundResourceGate, nextUnmasteredPathNode, pageForSession, pathChainView, pathNodeTitle, shouldPollOrchestratorSession } from "./orchestrator-view"
 import type { AssessmentPayload, Citation, CodeLabPayload, LessonPayload, PublicSessionFixture } from "./types"
 import {
   activePlan,
@@ -61,6 +67,7 @@ import {
   deletePlan,
   learnerBackground,
   loadWorkspace,
+  markPlanConceptMastered,
   masteredConceptsForUser,
   planNameFromGoal,
   recordPlanPublicState,
@@ -83,6 +90,7 @@ type LiveContextValue = {
   assessmentAnswers: Record<string, string>
   setDiagnosisAnswer: (itemId: string, answer: string) => void
   setAssessmentAnswer: (itemId: string, answer: string) => void
+  clearAssessmentAnswers: () => void
   create: (input: { goal: string; nodeId?: string; custom?: boolean; planName: string }) => Promise<void>
   submitDiagnosis: () => Promise<void>
   submitAssessment: () => Promise<void>
@@ -136,6 +144,8 @@ export function App() {
   const [requestedPlanId, setRequestedPlanId] = useState<string | null>(null)
   const [scrollProgress, setScrollProgress] = useState(0)
   const [feedbackDismissed, setFeedbackDismissed] = useState(false)
+  const [masteryNotice, setMasteryNotice] = useState<{ title: string; concept: string; final: boolean } | null>(null)
+  const celebratedRoundRef = useRef("")
   useEffect(() => { window.scrollTo({ top: 0, left: 0, behavior: "auto" }) }, [page])
 
   useEffect(() => {
@@ -156,29 +166,63 @@ export function App() {
       return
     }
     let cancelled = false
-    setBusy("正在恢复这个计划的主 Agent会话…")
-    getOrchestratorSession(currentPlan.sessionId, learnerId)
-      .then(async (restored) => {
-        if (cancelled) return
+    let timer: number | undefined
+    const load = async () => {
+      if (cancelled) return
+      try {
+        const restored = await getOrchestratorSession(currentPlan.sessionId!, learnerId)
         const eventResult = await getOrchestratorEvents(currentPlan.sessionId!, learnerId).catch(() => ({ events: [] }))
-        if (!cancelled) {
-          const merged = { ...restored, events: eventResult.events ?? [] } as PublicSessionFixture
-          setLiveSession(merged)
-          if (requestedPlanId === currentPlan.id) {
-            setPage(pageForSession(merged, { feedbackDismissed }))
-            setRequestedPlanId(null)
-          }
+        if (cancelled) return
+        const merged = { ...restored, events: eventResult.events ?? [] } as PublicSessionFixture
+        setLiveSession(merged)
+        if (requestedPlanId === currentPlan.id) {
+          setPage(pageForSession(merged, { feedbackDismissed }))
+          setRequestedPlanId(null)
         }
-      })
-      .catch((reason) => {
+        if (shouldPollOrchestratorSession(merged)) {
+          setBusy("主 Agent正在调用 C 生成并审核下一轮资源…")
+          timer = window.setTimeout(() => void load(), 800)
+        } else {
+          setBusy("")
+        }
+      } catch (reason) {
         if (!cancelled) {
           setLiveSession(null)
           setError(reason instanceof Error ? reason.message : "无法恢复计划会话")
+          setBusy("")
         }
-      })
-      .finally(() => { if (!cancelled) setBusy("") })
-    return () => { cancelled = true }
-  }, [currentPlan?.id, currentPlan?.sessionId, learnerId, requestedPlanId])
+      }
+    }
+    setBusy("正在恢复这个计划的主 Agent会话…")
+    void load()
+    return () => {
+      cancelled = true
+      if (timer !== undefined) window.clearTimeout(timer)
+    }
+  }, [currentPlan?.id, currentPlan?.sessionId, learnerId, requestedPlanId, liveSession?.status])
+
+  useEffect(() => {
+    if (!liveSession || !currentUser || !currentPlan) return
+    // 完成弹窗：feedback 为 advance 且 session 已结束（completed / 无下一节点）
+    const isAdvance = (liveSession.feedback as any)?.final_decision?.action === "advance"
+    const isCompleted = liveSession.status === "completed"
+    if (!isAdvance && !isCompleted) return
+    const key = `${liveSession.session_id}:${liveSession.round_no}`
+    if (celebratedRoundRef.current === key) return
+    const completedNode = completedNodeFromPath(liveSession)
+    if (!completedNode) return
+    const ragItems = ((liveSession.rag_result as any)?.results ?? []).map((item: any) => ({ source_id: item.source_id ?? item.sourceId, title: item.title }))
+    const concept = pathNodeTitle(completedNode, ragItems)
+    const final = isFinalAdvanceSession(liveSession)
+    celebratedRoundRef.current = key
+    setWorkspace((value) => markPlanConceptMastered(value, currentUser.id, currentPlan.id, concept))
+    setPage("feedback")
+    setMasteryNotice({
+      title: final ? `恭喜你已完成对${concept}的学习！` : "恭喜你！本轮正确率已达标！",
+      concept,
+      final,
+    })
+  }, [liveSession?.session_id, liveSession?.round_no, liveSession?.status, liveSession?.feedback, currentUser?.id, currentPlan?.id])
 
   useEffect(() => {
     const update = () => {
@@ -191,6 +235,13 @@ export function App() {
   }, [page])
 
   const applySession = (next: any) => {
+    const previousAssessmentId = liveSession?.assessment?.artifact_id
+    const nextAssessmentId = next?.assessment?.artifact_id
+    const assessmentChanged = Boolean(
+      liveSession
+      && (liveSession.round_no !== next?.round_no || (previousAssessmentId && nextAssessmentId && previousAssessmentId !== nextAssessmentId)),
+    )
+    if (assessmentChanged) setAssessmentAnswers({})
     const merged = { ...next, events: Array.isArray(next.events) ? next.events : [] } as PublicSessionFixture
     setLiveSession(merged)
     if (currentUser && currentPlan) setWorkspace((value) => recordPlanPublicState(value, currentUser.id, currentPlan.id, {
@@ -213,6 +264,7 @@ export function App() {
     assessmentAnswers,
     setDiagnosisAnswer: (itemId, answer) => setDiagnosisAnswers((current) => ({ ...current, [itemId]: answer })),
     setAssessmentAnswer: (itemId, answer) => setAssessmentAnswers((current) => ({ ...current, [itemId]: answer })),
+    clearAssessmentAnswers: () => setAssessmentAnswers({}),
     create: async ({ goal, nodeId, custom, planName }) => {
       if (!currentUser || !currentPlan) {
         setError("请先在首页选择用户和学习计划")
@@ -302,7 +354,7 @@ export function App() {
       setProviderOpen(true)
       return
     }
-    const id = `plan-${crypto.randomUUID()}`
+    const id = newClientId("plan")
     setWorkspace((value) => addPlan(value, currentUser.id, { id, name: "待选择学习目标" }))
     setPage("goal")
   }
@@ -342,14 +394,33 @@ export function App() {
           {page === "diagnosis" && (liveSession ? <DiagnosisPage onContinue={() => setPage("path")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
           {page === "path" && (liveSession ? <PathPage planName={currentPlan?.name} onContinue={() => setPage("lesson")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
           {page === "lesson" && (liveSession ? <LessonPage onAssessment={() => setPage("assessment")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
-          {page === "assessment" && (liveSession ? <AssessmentPage onFeedback={() => setPage("feedback")} /> : <NoSessionState onStart={() => setPage("goal")} />)}
-          {page === "feedback" && (liveSession ? <FeedbackPage onContinue={() => { setFeedbackDismissed(true); setPage(liveSession?.learning_resources?.concept_lesson || liveSession?.learning_resources?.code_lab ? "lesson" : pageForSession(liveSession, { feedbackDismissed: true })) }} /> : <NoSessionState onStart={() => setPage("goal")} />)}
+          {page === "assessment" && (liveSession ? (
+            liveSession.status === "completed" || (liveSession.feedback && feedbackDismissed)
+              ? <RedirectPage title="本轮测评已结束" message="你已经完成本轮测评，无法返回答题界面。" action="查看评分反馈" onAction={() => setPage("feedback")} />
+              : <AssessmentPage onFeedback={() => setPage("feedback")} />
+          ) : <NoSessionState onStart={() => setPage("goal")} />)}
+          {page === "feedback" && (liveSession ? <FeedbackPage masteryNotice={masteryNotice} onMasteryDismiss={() => setMasteryNotice(null)} onContinue={() => {
+            if (masteryNotice?.final || isFinalAdvanceSession(liveSession)) {
+              setMasteryNotice(null)
+              setFeedbackDismissed(true)
+              setPage("home")
+              return
+            }
+            const nextNode = nextUnmasteredPathNode(liveSession)
+            const gate = nextRoundResourceGate(liveSession)
+            if (!gate.ready) return
+            setMasteryNotice(null)
+            setFeedbackDismissed(true)
+            setPage(nextNode && (liveSession?.learning_resources?.concept_lesson || liveSession?.learning_resources?.code_lab)
+              ? "lesson"
+              : pageForSession(liveSession, { feedbackDismissed: true }))
+          }} /> : <NoSessionState onStart={() => setPage("goal")} />)}
           {page === "history" && (liveSession ? <HistoryPage /> : <NoSessionState onStart={() => setPage("goal")} />)}
         </main>
         {profileOpen && <ProfileModal onClose={() => setProfileOpen(false)} onCreate={(profile) => { setWorkspace((value) => addUser(value, profile)); setProfileOpen(false); setPage("home") }} />}
         {userOpen && createPortal(<UserSwitcher workspace={workspace} onClose={() => setUserOpen(false)} onAdd={() => { setUserOpen(false); setProfileOpen(true) }} onSelect={(id) => { setConfirmSwitchUserId(id); setUserOpen(false) }} />, document.body)}
         {confirmSwitchUserId && createPortal(<ConfirmSwitchUserModal targetUser={workspace.users.find(u => u.id === confirmSwitchUserId)} currentUser={currentUser} onCancel={() => setConfirmSwitchUserId(null)} onConfirm={() => { setWorkspace((value) => selectUser(value, confirmSwitchUserId)); setPage("home"); setConfirmSwitchUserId(null) }} />, document.body)}
-        {providerOpen && <ApiConfigModal current={provider} onClose={() => { setProviderOpen(false); setOpenPlanAfterProvider(false) }} onSave={async (input) => { const saved = await saveProviderConfiguration(input); setProvider(saved); setProviderOpen(false); if (openPlanAfterProvider && currentUser) { const id = `plan-${crypto.randomUUID()}`; setWorkspace((value) => addPlan(value, currentUser.id, { id, name: "待选择学习目标" })); setOpenPlanAfterProvider(false); setPage("goal") } }} />}
+        {providerOpen && <ApiConfigModal current={provider} onClose={() => { setProviderOpen(false); setOpenPlanAfterProvider(false) }} onSave={async (input) => { const saved = await saveProviderConfiguration(input); setProvider(saved); setProviderOpen(false); if (openPlanAfterProvider && currentUser) { const id = newClientId("plan"); setWorkspace((value) => addPlan(value, currentUser.id, { id, name: "待选择学习目标" })); setOpenPlanAfterProvider(false); setPage("goal") } }} />}
       </div>
     </LiveContext.Provider>
   )
@@ -418,7 +489,7 @@ function ProfileModal({ onClose, onCreate }: { onClose: () => void; onCreate: (p
   const [learningStyle, setLearningStyle] = useState<LearnerProfileDraft["learningStyle"]>("balanced")
   const [background, setBackground] = useState("")
   const [languages, setLanguages] = useState("")
-  return <Modal title="认识你，从更合适的第一步开始" subtitle="几项轻量信息会交给主 Agent和B，用于画像与路径设计。" onClose={onClose}><div className="form-grid"><label><span>怎么称呼你？</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：林晓" /></label><label><span>每周预计学习时长</span><select value={weeklyHours} onChange={(event) => setWeeklyHours(Number(event.target.value))}>{[2,3,5,7,10,14].map((hours) => <option value={hours} key={hours}>{hours} 小时 / 周</option>)}</select></label><label><span>你和 Python 的熟悉程度</span><select value={pythonLevel} onChange={(event) => setPythonLevel(event.target.value as LearnerProfileDraft["pythonLevel"])}><option value="new">完全没接触过</option><option value="beginner">了解一点基础</option><option value="intermediate">能写简单程序</option><option value="advanced">有项目经验</option></select></label><label><span>你更喜欢怎样学？</span><select value={learningStyle} onChange={(event) => setLearningStyle(event.target.value as LearnerProfileDraft["learningStyle"])}><option value="balanced">讲解与练习平衡</option><option value="practice">多动手、多练习</option><option value="concept">先理解原理</option><option value="project">跟着项目学习</option></select></label><label className="full-field"><span>目前的学习/工作背景</span><input value={background} onChange={(event) => setBackground(event.target.value)} placeholder="例如：高中生、计算机专业大一、转行学习" /></label><label className="full-field"><span>接触过其他编程语言吗？</span><input value={languages} onChange={(event) => setLanguages(event.target.value)} placeholder="选填，用顿号或逗号分隔" /></label></div><div className="modal-actions"><button className="secondary-action" type="button" onClick={onClose}>以后再说</button><button className="primary-action" disabled={!name.trim()} type="button" onClick={() => onCreate({ id: `learner-${crypto.randomUUID()}`, name: name.trim(), weeklyHours, pythonLevel, learningStyle, background: background.trim(), priorLanguages: languages.split(/[、,，]/).map((item) => item.trim()).filter(Boolean) })}>保存学习档案</button></div></Modal>
+  return <Modal title="认识你，从更合适的第一步开始" subtitle="几项轻量信息会交给主 Agent和B，用于画像与路径设计。" onClose={onClose}><div className="form-grid"><label><span>怎么称呼你？</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="例如：林晓" /></label><label><span>每周预计学习时长</span><select value={weeklyHours} onChange={(event) => setWeeklyHours(Number(event.target.value))}>{[2,3,5,7,10,14].map((hours) => <option value={hours} key={hours}>{hours} 小时 / 周</option>)}</select></label><label><span>你和 Python 的熟悉程度</span><select value={pythonLevel} onChange={(event) => setPythonLevel(event.target.value as LearnerProfileDraft["pythonLevel"])}><option value="new">完全没接触过</option><option value="beginner">了解一点基础</option><option value="intermediate">能写简单程序</option><option value="advanced">有项目经验</option></select></label><label><span>你更喜欢怎样学？</span><select value={learningStyle} onChange={(event) => setLearningStyle(event.target.value as LearnerProfileDraft["learningStyle"])}><option value="balanced">讲解与练习平衡</option><option value="practice">多动手、多练习</option><option value="concept">先理解原理</option><option value="project">跟着项目学习</option></select></label><label className="full-field"><span>目前的学习/工作背景</span><input value={background} onChange={(event) => setBackground(event.target.value)} placeholder="例如：高中生、计算机专业大一、转行学习" /></label><label className="full-field"><span>接触过其他编程语言吗？</span><input value={languages} onChange={(event) => setLanguages(event.target.value)} placeholder="选填，用顿号或逗号分隔" /></label></div><div className="modal-actions"><button className="secondary-action" type="button" onClick={onClose}>以后再说</button><button className="primary-action" disabled={!name.trim()} type="button" onClick={() => onCreate({ id: newClientId("learner"), name: name.trim(), weeklyHours, pythonLevel, learningStyle, background: background.trim(), priorLanguages: languages.split(/[、,，]/).map((item) => item.trim()).filter(Boolean) })}>保存学习档案</button></div></Modal>
 }
 
 
@@ -519,11 +590,14 @@ function PathPage({ planName, onContinue }: { planName?: string; onContinue: () 
           <div className="profile-level-track"><i style={{ width: `${difficultyPosition(profile.level)}%` }} /><b style={{ left: `${difficultyPosition(profile.level)}%` }} /></div>
           <div className="profile-level-labels"><span>入门</span><span>基础</span><span>进阶</span><span>综合</span></div>
           <div className={`ability-radar ${radar.status === "verified" ? "is-verified" : "is-pending"}`} aria-label="能力雷达图">
-            <div className="radar-ring ring-outer" /><div className="radar-ring ring-middle" /><div className="radar-ring ring-inner" />
-            <i className="radar-axis axis-a" /><i className="radar-axis axis-b" /><i className="radar-axis axis-c" />
-            {radar.status === "verified" ? <svg viewBox="0 0 200 200" aria-hidden="true"><polygon points={radarPolygon(radar.dimensions.map((item) => item.value))} /></svg> : <div><b>等待 B 公开</b><span>能力维度与数值</span></div>}
+            {radar.status === "verified" ? <RadarChart dimensions={radar.dimensions} /> : <div><b>等待 B 公开</b><span>能力维度与数值</span></div>}
           </div>
           <p className="radar-caption">能力雷达图 · {radar.status === "verified" ? "B公开维度" : "待上游数据"}</p>
+          {radar.status === "verified" && <div className="radar-legend">
+            <p><b>概念理解</b> — 已知概念 ÷（已知+薄弱），封底 20% 封顶 95%</p>
+            <p><b>代码认知</b> — 画像等级映射：入门 20% / 基础 45% / 进阶 70% / 综合 90%</p>
+            <p><b>诊断表现</b> — 客观题正确数 ÷ 总作答数，封底 15% 封顶 100%</p>
+          </div>}
           <dl><div><dt>本次目标</dt><dd>{profile.goal}</dd></div><div><dt>已掌握</dt><dd>{profile.known_concepts.length ? profile.known_concepts.join("、") : "主 Agent未公开已掌握概念"}</dd></div><div><dt>待补强</dt><dd>{profile.weak_concepts.length ? profile.weak_concepts.join("、") : "本轮诊断未公开薄弱概念"}</dd></div></dl>
           <p className="truth-note">能力雷达需要B公开多个能力维度及数值。当前合同只公开等级和概念集合，因此D不虚构雷达百分比。</p>
         </> : <MissingContent text="主 Agent尚未公开 B 学习者画像。" />}
@@ -557,13 +631,16 @@ function LessonPage({ onAssessment }: { onAssessment: () => void }) {
   const activeSession = useRequiredSession()
   const lesson = activeSession.learning_resources.concept_lesson?.payload
   const lab = activeSession.learning_resources.code_lab?.payload
+  const adaptation = activeSession.adaptation?.adaptation_action === "remediate" || activeSession.adaptation?.adaptation_action === "reinforce"
+    ? activeSession.adaptation
+    : null
   const [tab, setTab] = useState<LessonTab>("lesson")
   const [sideTab, setSideTab] = useState<SideTab>("hint")
   const [activeSection, setActiveSection] = useState("prerequisite")
   const [code, setCode] = useState(lab?.starter_code ?? "")
   if (!lesson) return <BlockedResourceState session={activeSession} busy={busy} onRetry={() => void retry()} onRestart={reset} title="互动学习资源未通过可信发布" />
   const sections = lesson ? lessonOutline(lesson) : []
-  return <div className="lesson-page"><header className="lesson-topline"><div><span className="eyebrow"><BookOpen size={15} /> 第 {activeSession.round_no} 轮学习</span><h1>{lesson?.title ?? "当前没有可发布的 C 讲义"}</h1><p>{activeSession.current_path_node?.node_id} · {lesson?.objective_ids.join(" / ")}</p></div><div className="lesson-top-actions"><span><CheckCircle2 size={15} /> 主 Agent已发布公开学习资源</span><button type="button" onClick={onAssessment}>进入正式测评 <ArrowRight /></button></div></header>
+  return <div className="lesson-page"><header className="lesson-topline"><div><span className="eyebrow"><BookOpen size={15} /> 第 {activeSession.round_no} 轮学习</span>{adaptation ? <span className={`lesson-adaptation-badge is-${adaptation.adaptation_action}`}>{adaptation.adaptation_action === "remediate" ? "针对性补救" : adaptation.adaptation_action === "reinforce" ? "巩固强化" : "下一节点适配"}</span> : null}<h1>{lesson?.title ?? "当前没有可发布的 C 讲义"}</h1><p>{activeSession.current_path_node?.node_id} · {lesson?.objective_ids.join(" / ")}</p></div><div className="lesson-top-actions"><span><CheckCircle2 size={15} /> 主 Agent已发布公开学习资源</span><button type="button" onClick={onAssessment}>进入正式测评 <ArrowRight /></button></div></header>
     <div className="lesson-layout">
       <aside className="lesson-outline"><div className="outline-head"><FolderTree size={18} /><b>本节目录</b></div>{sections.map((section, index) => <button className={activeSection === section.id ? "is-active" : ""} type="button" onClick={() => { setActiveSection(section.id); document.getElementById(`section-${section.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }) }} key={section.id}><span>{String(index + 1).padStart(2, "0")}</span><b>{section.title}</b></button>)}<div className="outline-progress"><span>当前内容结构</span><div><i style={{ width: "58%" }} /></div><small>由 C 公开字段直接渲染</small></div></aside>
       <section className="lesson-main"><div className="lesson-tabs" role="tablist"><span className={`tab-glider glider-${tab}`} aria-hidden="true" /><button className={tab === "lesson" ? "is-active" : ""} type="button" onClick={() => setTab("lesson")}><BookOpen size={17} /> 定制讲义</button><button className={tab === "lab" ? "is-active" : ""} type="button" onClick={() => setTab("lab")}><Code2 size={17} /> 代码实验</button><button className={tab === "checks" ? "is-active" : ""} type="button" onClick={() => setTab("checks")}><ListChecks size={17} /> 理解检查</button></div>
@@ -588,13 +665,46 @@ function LessonSection({ id, title, tone, icon, children, onActive }: { id: stri
   return <section id={`section-${id}`} className={`lesson-section tone-${tone}`} onMouseEnter={() => onActive(id)}><header><span>{icon}</span><h2>{title}</h2></header>{children}</section>
 }
 
+function SemanticLessonText({ text }: { text: string }) {
+  const indented = indentParagraphText(text)
+  return <>{semanticLessonLines(indented).map((line, index) => <span className="semantic-lesson-line" key={`${index}-${line}`}>{line}</span>)}</>
+}
+
+/** 事实证据：C 公开的 claim 文本，离上文空一行，紫色小字。 */
+function ClaimEvidence({ claims }: { claims: Array<{ claim_id: string; text: string }> }) {
+  if (!claims.length) return null
+  return <div className="claim-evidence">
+    {claims.map((claim) => <p key={claim.claim_id} className="claim-text">{claim.text}</p>)}
+  </div>
+}
+
 function RenderLessonBlock({ block }: { block: LessonPayload["explanation_blocks"][number] }) {
+  const claims = ("claims" in block && Array.isArray((block as any).claims) ? (block as any).claims as Array<{ claim_id: string; text: string }> : [])
   if (block.block_type === "heading") return <h3 className="block-heading">{block.text}</h3>
-  if (block.block_type === "paragraph") return <article className="prose-block"><p>{block.text}</p><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /></article>
-  if (block.block_type === "code") return <article className="code-example"><div className="code-head"><span>{block.caption ?? "Python 示例"}</span><small>{block.language}</small></div><CodeViewer code={block.code} /><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /></article>
-  if (block.block_type === "callout") return <article className={`callout callout-${block.tone}`}><b>{block.title}</b><p>{block.text}</p><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /></article>
-  if (block.block_type === "comparison") return <article className="comparison-block"><h3>{block.title}</h3><div>{block.columns.map((column) => <section key={column.heading}><b>{column.heading}</b><p>{column.content}</p></section>)}</div><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /></article>
+  if (block.block_type === "paragraph") return <article className="prose-block"><p><SemanticLessonText text={block.text} /></p><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /><ClaimEvidence claims={claims} /></article>
+  if (block.block_type === "code") return <article className="code-example"><div className="code-head"><span>{block.caption ?? "Python 示例"}</span><small>{block.language}</small></div><CodeViewer code={block.code} /><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /><ClaimEvidence claims={claims} /></article>
+  if (block.block_type === "callout") return <article className={`callout callout-${block.tone}`}><b>{block.title}</b><p><SemanticLessonText text={block.text} /></p><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /><ClaimEvidence claims={claims} /></article>
+  if (block.block_type === "comparison") return <article className="comparison-block"><h3>{block.title}</h3><div>{block.columns.map((column) => <section key={column.heading}><b>{column.heading}</b><p><SemanticLessonText text={column.content} /></p></section>)}</div><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /><ClaimEvidence claims={claims} /></article>
   return null
+}
+
+const Editor = ((EditorExport as unknown as { default?: typeof EditorExport }).default ?? EditorExport) as typeof EditorExport
+
+function highlightPython(code: string): string {
+  try {
+    const grammar = Prism.languages.python ?? Prism.languages.plain
+    return Prism.highlight(code, grammar, "python")
+  } catch {
+    return code.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[character] ?? character))
+  }
+}
+
+function PythonCodeBlock({ code, className = "" }: { code: string; className?: string }) {
+  return <pre className={`python-code-block ${className}`.trim()}><code className="language-python" dangerouslySetInnerHTML={{ __html: highlightPython(code) }} /></pre>
+}
+
+function PythonCodeEditor({ value, onChange, minHeight = 260, ariaLabel = "Python 代码编辑器" }: { value: string; onChange: (value: string) => void; minHeight?: number; ariaLabel?: string }) {
+  return <div className="python-editor" aria-label={ariaLabel}><Editor value={value} onValueChange={onChange} highlight={highlightPython} padding={16} textareaId={ariaLabel.replace(/\s+/g, "-")} style={{ minHeight, fontFamily: 'Consolas, "Liberation Mono", monospace', fontSize: 13, lineHeight: 1.7 }} /></div>
 }
 
 function CodeViewer({ code }: { code: string }) {
@@ -613,18 +723,22 @@ function CodeViewer({ code }: { code: string }) {
     return () => window.clearInterval(timer)
   }, [playing, lines.length])
   const effectiveStep = Math.min(step, Math.max(0, lines.length - 1))
-  return <div className="code-viewer"><div className="code-lines">{lines.map((line, index) => <div className={index === effectiveStep ? "is-current" : index < effectiveStep ? "is-past" : ""} key={`${index}-${line}`}><span>{index + 1}</span><code>{line || " "}</code></div>)}</div><div className="code-controls"><button type="button" onClick={() => setStep((value) => Math.max(0, value - 1))}><ChevronLeft size={15} /> 上一步</button><button type="button" onClick={() => { setPlaying((value) => !value); if (!playing && effectiveStep >= lines.length - 1) setStep(0) }}>{playing ? <Pause size={15} /> : <Play size={15} />} {playing ? "暂停播放" : "自动演示"}</button><button type="button" onClick={() => setStep((value) => Math.min(lines.length - 1, value + 1))}>下一步 <ChevronRight size={15} /></button></div></div>
+  return <div className="code-viewer"><div className="code-lines">{lines.map((line, index) => <div className={index === effectiveStep ? "is-current" : index < effectiveStep ? "is-past" : ""} key={`${index}-${line}`}><span>{index + 1}</span><code className="language-python" dangerouslySetInnerHTML={{ __html: highlightPython(line || " ") }} /></div>)}</div><div className="code-controls"><button type="button" onClick={() => setStep((value) => Math.max(0, value - 1))}><ChevronLeft size={15} /> 上一步</button><button type="button" onClick={() => { setPlaying((value) => !value); if (!playing && effectiveStep >= lines.length - 1) setStep(0) }}>{playing ? <Pause size={15} /> : <Play size={15} />} {playing ? "暂停播放" : "自动演示"}</button><button type="button" onClick={() => setStep((value) => Math.min(lines.length - 1, value + 1))}>下一步 <ChevronRight size={15} /></button></div></div>
 }
 
 function LabContent({ lab, code, setCode }: { lab?: CodeLabPayload; code: string; setCode: (code: string) => void }) {
   if (!lab) return <EmptyState title="代码实验尚未发布" body="D 不会自造 starter code 或测试。请等待主 Agent返回 learning_resources.code_lab。" />
-  return <div className="lab-workspace"><section className="lab-instructions"><span className="eyebrow"><FlaskConical size={15} /> {lab.lab_id}</span><h2>{lab.title}</h2>{lab.instructions.map((block) => <RenderLessonBlock block={block} key={block.block_id} />)}<div className="public-tests"><h3>公开测试</h3>{lab.public_tests.map((test) => <article key={test.test_id}><CheckCircle2 size={16} /><div><b>{test.description}</b><p>{test.expected_behavior}</p></div></article>)}</div></section><section className="editor-panel"><header><div><Braces size={17} /><b>Python 编辑器</b></div><small>{lab.execution_contract.execution_mode} · {lab.execution_contract.resource_limits.timeout_ms}ms</small></header><textarea spellCheck={false} value={code} onChange={(event) => setCode(event.target.value)} /><footer><button type="button" onClick={() => setCode(lab.starter_code)}><RotateCcw size={15} /> 重置</button></footer><div className="run-result is-visible"><b>当前主 Agent合同未提供代码运行命令</b><p>D 仅展示 C 发布的 starter code 与公开测试，不在浏览器伪造运行输出或通过状态。</p></div></section></div>
+  return <div className="lab-workspace"><section className="lab-instructions"><span className="eyebrow"><FlaskConical size={15} /> {lab.lab_id}</span><h2>{lab.title}</h2>{lab.instructions.map((block) => <RenderLessonBlock block={block} key={block.block_id} />)}<div className="public-tests"><h3>公开测试</h3>{lab.public_tests.map((test) => <article key={test.test_id}><CheckCircle2 size={16} /><div><b>{test.description}</b><p>{test.expected_behavior}</p></div></article>)}</div></section><section className="editor-panel"><header><div><Braces size={17} /><b>Python 编辑器</b></div><small>{lab.execution_contract.execution_mode} · {lab.execution_contract.resource_limits.timeout_ms}ms</small></header><PythonCodeEditor value={code} onChange={setCode} minHeight={420} ariaLabel="代码实验 Python 编辑器" /><footer><button type="button" onClick={() => setCode(lab.starter_code)}><RotateCcw size={15} /> 重置</button></footer><div className="run-result is-visible"><b>当前主 Agent合同未提供代码运行命令</b><p>D 仅展示 C 发布的 starter code 与公开测试，不在浏览器伪造运行输出或通过状态。</p></div></section></div>
 }
 
 function ChecksContent({ lesson }: { lesson: LessonPayload }) {
   const [open, setOpen] = useState<string | null>(null)
   const [answers, setAnswers] = useState<Record<string, string>>({})
-  return <div className="checks-workspace"><header><span className="eyebrow"><ListChecks size={15} /> 课件内理解检查</span><h2>边学边检查，不计入正式 mastery</h2><p>所有题目均来自 C 的 micro_checks；如果 C 没有给选项，D 只提供文本作答，不补造答案。</p></header>{lesson.micro_checks.length ? lesson.micro_checks.map((check, index) => <article className="micro-check" key={check.item_id}><div className="micro-number">{String(index + 1).padStart(2, "0")}</div><div><h3>{check.prompt}</h3>{check.options?.length ? <div className="check-options">{check.options.map((option) => <button className={answers[check.item_id] === option.option_id ? "is-selected" : ""} onClick={() => setAnswers((current) => ({ ...current, [check.item_id]: option.option_id }))} type="button" key={option.option_id}>{option.label}. {option.text}</button>)}</div> : <textarea value={answers[check.item_id] ?? ""} onChange={(event) => setAnswers((current) => ({ ...current, [check.item_id]: event.target.value }))} placeholder="写下你的理解；不会在前端自动判分" />}<button className="source-toggle" type="button" onClick={() => setOpen(open === check.item_id ? null : check.item_id)}>{open === check.item_id ? "收起来源" : "查看来源"} <ChevronDown size={15} /></button>{open === check.item_id && <p className="source-line">{formatCitations(check.citations)}</p>}</div></article>) : <MissingContent text="C 未公开 micro_checks，D 不补造理解题。" />}</div>
+  return <div className="checks-workspace"><header><span className="eyebrow"><ListChecks size={15} /> 课件内理解检查</span><h2>边学边检查，不计入正式 mastery</h2><p>题目、正确选项和解析均来自 C 的公开 micro_checks；D 只在你选择后展示。</p></header>{lesson.micro_checks.length ? lesson.micro_checks.map((check, index) => {
+    const selected = answers[check.item_id]
+    const feedback = microCheckFeedbackView(check, selected)
+    return <article className="micro-check" key={check.item_id}><div className="micro-number">{String(index + 1).padStart(2, "0")}</div><div><h3>{check.prompt}</h3>{check.options?.length ? <div className="check-options">{check.options.map((option) => <button className={`${selected === option.option_id ? "is-selected" : ""} ${feedback && option.option_id === check.answer_option_id ? "is-answer" : ""}`.trim()} onClick={() => setAnswers((current) => ({ ...current, [check.item_id]: option.option_id }))} type="button" key={option.option_id}>{option.label}. {option.text}</button>)}</div> : <textarea value={selected ?? ""} onChange={(event) => setAnswers((current) => ({ ...current, [check.item_id]: event.target.value }))} placeholder="C 未公开可自动核对的选项；请写下你的理解" />}{feedback && <div className={`micro-feedback ${feedback.correct ? "is-correct" : "is-wrong"}`} role="status"><b>{feedback.correct ? "回答正确" : "回答错误"}</b><p>正确答案：{feedback.answer_text}</p><small>{feedback.explanation}</small></div>}<button className="source-toggle" type="button" onClick={() => setOpen(open === check.item_id ? null : check.item_id)}>{open === check.item_id ? "收起来源" : "查看来源"} <ChevronDown size={15} /></button>{open === check.item_id && <p className="source-line">{formatCitations(check.citations)}</p>}</div></article>
+  }) : <MissingContent text="C 未公开 micro_checks，D 不补造理解题。" />}</div>
 }
 
 function HintPanel({ lesson }: { lesson?: LessonPayload }) {
@@ -646,24 +760,38 @@ function AgentPanel() {
 }
 
 function AssessmentPage({ onFeedback: _onFeedback }: { onFeedback: () => void }) {
-  const { isLive, assessmentAnswers: answers, setAssessmentAnswer, submitAssessment, retry, reset, busy } = useLive()
+  const { isLive, assessmentAnswers: answers, setAssessmentAnswer, clearAssessmentAnswers, submitAssessment, retry, reset, busy } = useLive()
   const activeSession = useRequiredSession()
   const assessment = activeSession.assessment?.payload
   const [index, setIndex] = useState(0)
+  useEffect(() => {
+    const items = assessment?.items ?? []
+    if (items.length === 0) return
+    if (!answersMatchAssessmentItems(items, answers) && Object.keys(answers).length > 0) {
+      clearAssessmentAnswers()
+    }
+    setIndex(0)
+  }, [activeSession.round_no, activeSession.assessment?.artifact_id])
   if (!assessment?.items?.length) return <BlockedResourceState session={activeSession} busy={busy} onRetry={() => void retry()} onRestart={reset} title="正式测评未通过可信发布" />
   const item = assessment.items[index]
   const complete = Object.values(answers).filter(Boolean).length
   const isCodePrompt = item.modality === "code" || item.modality === "trace"
   return <div className="page assessment-page"><PageHeading kicker={`正式测评 · ${assessment.title}`} title="提交后进入 Role C 正式评分" description="正确答案、评分规范与隐藏测试始终保留在服务端。当前作答会通过主 Agent命令提交，不在 D 中评分。" />
-    <section className="assessment-shell"><aside><b>测评进度</b>{assessment.items.map((candidate, itemIndex) => <button className={itemIndex === index ? "is-active" : answers[candidate.item_id] ? "is-complete" : ""} type="button" onClick={() => setIndex(itemIndex)} key={candidate.item_id}><span>{itemIndex + 1}</span><small>{modalityLabel(candidate.modality)}</small></button>)}<p>{complete} / {assessment.items.length} 已作答</p></aside><article className="formal-question"><div className="question-meta"><span>第 {index + 1} 题</span><span>Tier {item.tier}</span><span>{item.max_score} 分</span></div><h2 className={isCodePrompt ? "formal-question-prompt is-code" : "formal-question-prompt"}>{item.prompt}</h2>{item.options?.length ? <div className="formal-options">{item.options.map((option) => <button className={answers[item.item_id] === option.option_id ? "is-selected" : ""} type="button" onClick={() => setAssessmentAnswer(item.item_id, option.option_id)} key={option.option_id}><span>{option.label}</span><b>{option.text}</b></button>)}</div> : <textarea rows={item.modality === "code" ? 14 : 6} value={answers[item.item_id] ?? item.starter_code ?? ""} onChange={(event) => setAssessmentAnswer(item.item_id, event.target.value)} /> }<div className="formal-actions"><button className="secondary-action" disabled={index === 0} type="button" onClick={() => setIndex((value) => value - 1)}>上一题</button>{index < assessment.items.length - 1 ? <button className="primary-action" disabled={!answers[item.item_id]} type="button" onClick={() => setIndex((value) => value + 1)}>保存并下一题</button> : <button className="primary-action" disabled={Boolean(busy) || !assessmentComplete(activeSession, answers) || !isLive} type="button" onClick={() => void submitAssessment()}>{busy ? "正在正式评分…" : "提交正式测评"} <ArrowRight /></button>}</div></article></section>
+    <section className="assessment-shell"><aside><b>测评进度</b>{assessment.items.map((candidate, itemIndex) => <button className={itemIndex === index ? "is-active" : answers[candidate.item_id] ? "is-complete" : ""} type="button" onClick={() => setIndex(itemIndex)} key={candidate.item_id}><span>{itemIndex + 1}</span><small>{modalityLabel(candidate.modality)}</small></button>)}<p>{complete} / {assessment.items.length} 已作答</p></aside><article className="formal-question"><div className="question-meta"><span>第 {index + 1} 题</span><span>Tier {item.tier}</span><span>{item.max_score} 分</span></div><h2 className={isCodePrompt ? "formal-question-prompt is-code" : "formal-question-prompt"}>{item.prompt}</h2>{item.modality === "code" ? <PythonCodeEditor value={answers[item.item_id] ?? item.starter_code ?? ""} onChange={(value) => setAssessmentAnswer(item.item_id, value)} minHeight={360} ariaLabel={`正式测评第 ${index + 1} 题 Python 编辑器`} /> : item.options?.length ? <div className="formal-options">{item.options.map((option) => <button className={answers[item.item_id] === option.option_id ? "is-selected" : ""} type="button" onClick={() => setAssessmentAnswer(item.item_id, option.option_id)} key={option.option_id}><span>{option.label}</span><b>{option.text}</b></button>)}</div> : <textarea rows={6} value={answers[item.item_id] ?? ""} onChange={(event) => setAssessmentAnswer(item.item_id, event.target.value)} /> }<div className="formal-actions"><button className="secondary-action" disabled={index === 0} type="button" onClick={() => setIndex((value) => value - 1)}>上一题</button>{index < assessment.items.length - 1 ? <button className="primary-action" disabled={!answers[item.item_id]} type="button" onClick={() => setIndex((value) => value + 1)}>保存并下一题</button> : <button className="primary-action" disabled={Boolean(busy) || !assessmentComplete(activeSession, answers) || !isLive} type="button" onClick={() => void submitAssessment()}>{busy ? "正在正式评分…" : "提交正式测评"} <ArrowRight /></button>}</div></article></section>
   </div>
 }
 
-function FeedbackPage({ onContinue }: { onContinue: () => void }) {
+function MasteryCelebration({ notice, onClose }: { notice: { title: string; concept: string; final: boolean }; onClose: () => void }) {
+  return <div className="mastery-celebration-backdrop" role="presentation"><section className="mastery-celebration-card" role="dialog" aria-modal="true" aria-label={notice.title}><button className="mastery-celebration-close" aria-label="关闭完成提示" type="button" onClick={onClose}><X size={20} /></button><div className="mastery-celebration-icon"><GraduationCap size={34} /></div><h2>{notice.title}</h2>{notice.final ? <p>本学习路径中的知识结点已经全部完成。你可以关闭提示查看本轮错题和参考答案。</p> : <p>已将 <strong>{notice.concept}</strong> 标记为已掌握，接下来会按正式路径进入下一个未掌握结点。</p>}</section></div>
+}
+
+function FeedbackPage({ onContinue, masteryNotice, onMasteryDismiss }: { onContinue: () => void; masteryNotice: { title: string; concept: string; final: boolean } | null; onMasteryDismiss: () => void }) {
   const { retry, reset, busy } = useLive()
   const activeSession = useRequiredSession()
   const feedback: any = activeSession.feedback
   const decision = feedback?.final_decision
+  // C 的公开评分摘要嵌套在 grade_result.payload.feedback.summary(后端无顶层 feedback_summary)。
+  const feedbackSummary = feedback?.grade_result?.payload?.feedback?.summary || feedback?.feedback_summary || ""
   if (!feedback && activeSession.status !== "blocked" && activeSession.status !== "failed") return <div className="page feedback-page"><PageHeading kicker="正式反馈" title="等待 Role C 正式评分结果" description="D 不会根据作答或题目难度在浏览器里估算结果。" /><section className="feedback-empty"><div className="feedback-icon"><Sparkles /></div><h2>评分结果尚未返回</h2><p>完成正式测评后，主 Agent会持久化公开反馈与下一步决策。</p><button className="primary-action" type="button" onClick={onContinue}>返回互动学习</button></section></div>
   const snapshotItems = Array.isArray(feedback?.assessment_items?.items) ? feedback.assessment_items.items : []
   const assessmentItems = snapshotItems.length > 0 ? snapshotItems : []
@@ -675,14 +803,19 @@ function FeedbackPage({ onContinue }: { onContinue: () => void }) {
     { action: "advance", title: "进入下一节点", description: "本轮达标，推进到路径中下一个知识点" },
     { action: "reprofile", title: "重新确认画像", description: "B 需要重新确认画像，再调整后续路径" },
   ]
-  return <div className="page feedback-page"><PageHeading kicker={`正式反馈 · 第 ${activeSession.round_no > 1 ? activeSession.round_no - 1 : activeSession.round_no} 轮`} title={activeSession.status === "blocked" ? "下一步暂时受阻" : decisionTitle(decision?.action)} description={feedback?.feedback_summary || activeSession.blocked_reason || "主 Agent已返回本轮正式决策。"} /><section className="feedback-result-grid"><article className="score-card"><span>本轮正式得分</span><strong>{feedback?.round_score ? `${feedback.round_score.raw_score} / ${feedback.round_score.max_score}` : "--"}</strong><p>{feedback?.round_score ? `正确率 ${Math.round(feedback.round_score.accuracy * 100)}% · 证据分 ${Math.round(feedback.round_score.evidence_score * 100)}%${wrongCount ? ` · ${wrongCount} 题未答对` : ""}` : "已保留此前评分，等待下一轮恢复。"}</p></article><article className="decision-card"><span>主 Agent下一步</span><h2>{decision?.action ? decisionLabel(decision.action) : "等待恢复"}</h2><p>{decision?.reason_codes?.join("、") || activeSession.blocked_reason || "暂无公开原因码"}</p></article></section><section className="decision-plan-card"><header><div><small>动态规划 · 下一轮方案选择</small><h2>主 Agent基于本轮结果选择下一轮方案</h2></div><span>{decision?.action ?? "pending"}</span></header><div className="decision-plan-grid">{planOptions.map((option) => <article className={decision?.action === option.action ? "is-current" : ""} key={option.action}><b>{option.title}</b><p>{option.description}</p>{decision?.action === option.action ? <em>本轮决策</em> : <i />}</article>)}</div></section>{itemViews.length ? <section className="item-feedback-list"><h2>逐题结果{wrongCount ? ` · ${wrongCount} 题待订正` : ""}</h2>{itemViews.map((view, index) => <article className={view.correct === false ? "is-wrong" : view.correct === true ? "is-correct" : "is-blank"} key={view.item_id}><header><span>{modalityLabel(view.modality as any)}</span><b>第 {index + 1} 题</b><em>{view.raw_score} / {view.max_score} 分</em></header><p className="item-prompt">{view.prompt}</p><dl><dt>你的答案</dt><dd>{view.your_answer_text}</dd></dl><div className="item-verdict">{view.correct === true ? "回答正确" : view.correct === false ? "回答错误" : "未作答"}</div>{view.feedback_message ? <p className="item-message">{view.feedback_message}</p> : null}{view.next_step ? <p className="item-next">下一步：{view.next_step}</p> : null}{view.correct === false ? <small className="answer-boundary">具体参考答案由 C 私有安全产物持有；D 不越权公开，请按 C 的教学提示复习后重试。</small> : null}</article>)}</section> : feedback?.your_answers?.length ? <section className="item-feedback-list"><p className="answer-boundary">本轮题目快照由旧版会话产生未公开，此处仅显示评分汇总；下一轮重新提交后可查看逐题结果。</p></section> : null}{feedback?.objective_results?.length ? <section className="objective-feedback"><h2>学习目标反馈</h2>{feedback.objective_results.map((item: any) => <article key={item.objective_id}><div><b>{item.objective_id}</b><span>{Math.round(item.accuracy * 100)}%</span></div><div className="objective-meter"><i style={{ width: `${Math.round(item.accuracy * 100)}%` }} /></div><p>{item.misconception_tags?.length ? `需要关注：${item.misconception_tags.join("、")}` : "本轮未返回误区标签"}</p></article>)}</section> : null}<div className="page-actions">{activeSession.status === "blocked" || activeSession.status === "failed" ? (() => { const action = blockedSessionAction(activeSession); return <button className="primary-action" disabled={Boolean(busy)} type="button" onClick={action.canRetry ? () => void retry() : reset}>{busy ? "正在恢复…" : action.label}</button> })() : <button className="primary-action" type="button" onClick={onContinue}>{activeSession.status === "completed" ? "查看学习记录" : "进入下一轮学习"}</button>}</div></div>
+  const nextRoundGate = nextRoundResourceGate(activeSession)
+  const adaptation = activeSession.adaptation?.adaptation_action === "remediate" || activeSession.adaptation?.adaptation_action === "reinforce"
+    ? activeSession.adaptation
+    : null
+const finalAction = finalFeedbackAction(activeSession)
+  return <div className="page feedback-page">{masteryNotice && <MasteryCelebration notice={masteryNotice} onClose={onMasteryDismiss} />}<PageHeading kicker={`正式反馈 · 第 ${activeSession.round_no > 1 ? activeSession.round_no - 1 : activeSession.round_no} 轮`} title={activeSession.status === "blocked" ? "下一步暂时受阻" : decisionTitle(decision?.action)} description={feedbackSummary || activeSession.blocked_reason || "主 Agent已返回本轮正式决策。"} /> <section className="feedback-result-grid"><article className="score-card"><span>本轮正式得分</span><strong>{feedback?.round_score ? `${feedback.round_score.raw_score} / ${feedback.round_score.max_score}` : "--"}</strong><p>{feedback?.round_score ? `正确率 ${Math.round(feedback.round_score.accuracy * 100)}% · 证据分 ${Math.round(feedback.round_score.evidence_score * 100)}%${wrongCount ? ` · ${wrongCount} 题未答对` : ""}` : "已保留此前评分，等待下一轮恢复。"}</p></article><article className="decision-card"><span>主 Agent下一步</span><h2>{decision?.action ? decisionLabel(decision.action) : "等待恢复"}</h2><p>{decision?.reason_codes?.join("、") || activeSession.blocked_reason || "暂无公开原因码"}</p></article></section><section className="decision-plan-card"><header><div><small>动态规划 · 下一轮方案选择</small><h2>主 Agent基于本轮结果选择下一轮方案</h2></div><span>{decision?.action ?? "pending"}</span></header><div className="decision-plan-grid">{planOptions.map((option) => <article className={decision?.action === option.action ? "is-current" : ""} key={option.action}><b>{option.title}</b><p>{option.description}</p>{decision?.action === option.action ? <em>本轮决策</em> : <i />}</article>)}</div></section>{adaptation ? <section className="adaptation-card"><small>本轮C资源适配说明</small><h2>{adaptation.adaptation_action === "remediate" ? "针对性补救" : adaptation.adaptation_action === "reinforce" ? "巩固强化" : "下一节点适配"}</h2><p>{adaptation.adaptation_summary}</p><p>目标：{adaptation.target_objective_ids.join("、") || "主Agent未公开具体目标"}</p>{adaptation.addressed_misconception_tags.length ? <p>针对误区：{adaptation.addressed_misconception_tags.join("、")}</p> : null}</section> : null}{itemViews.length ? <section className="item-feedback-list"><h2>逐题结果{wrongCount ? ` · ${wrongCount} 题待订正` : ""}</h2>{itemViews.map((view, index) => <article className={view.correct === false ? "is-wrong" : view.correct === true ? "is-correct" : "is-blank"} key={view.item_id}><header><span>{modalityLabel(view.modality as any)}</span><b>第 {index + 1} 题</b><em>{view.raw_score} / {view.max_score} 分</em></header><p className="item-prompt">{view.prompt}</p><dl><dt>你的答案</dt><dd>{view.your_answer_text}</dd></dl><div className="item-verdict">{view.correct === true ? "回答正确" : view.correct === false ? "回答错误" : "未作答"}</div>{view.correct_answer_text ? <dl className="correct-answer"><dt>参考答案</dt><dd className={view.correct_answer_kind === "code" ? "is-code" : ""}>{view.correct_answer_text}</dd></dl> : null}{view.feedback_message ? <p className="item-message">{view.feedback_message}</p> : null}{view.next_step ? <p className="item-next">下一步：{view.next_step}</p> : null}{view.correct === false && !view.correct_answer_text ? <small className="answer-boundary">C 本轮未公开结构化参考答案，仅提供评分反馈与下一步建议。</small> : null}</article>)}</section> : feedback?.your_answers?.length ? <section className="item-feedback-list"><p className="answer-boundary">本轮题目快照由旧版会话产生未公开，此处仅显示评分汇总；下一轮重新提交后可查看逐题结果。</p></section> : null}{feedback?.objective_results?.length ? <section className="objective-feedback"><h2>学习目标反馈</h2>{feedback.objective_results.map((item: any) => <article key={item.objective_id}><div><b>{item.objective_id}</b><span>{Math.round(item.accuracy * 100)}%</span></div><div className="objective-meter"><i style={{ width: `${Math.round(item.accuracy * 100)}%` }} /></div><p>{item.misconception_tags?.length ? `需要关注：${item.misconception_tags.join("、")}` : "本轮未返回误区标签"}</p></article>)}</section> : null}<div className="page-actions">{activeSession.status === "blocked" || activeSession.status === "failed" ? (() => { const action = blockedSessionAction(activeSession); return <button className="primary-action" disabled={Boolean(busy)} type="button" onClick={action.canRetry ? () => void retry() : reset}>{busy ? "正在恢复…" : action.label}</button> })() : <button className="primary-action" disabled={!(finalAction?.ready ?? nextRoundGate.ready)} type="button" onClick={onContinue}>{finalAction?.label ?? nextRoundGate.label}</button>}</div></div>
 }
 
 function HistoryPage() {
   const { refreshEvents } = useLive()
   const activeSession = useRequiredSession()
   const events = activeSession.events.slice(-10).reverse()
-  return <div className="page history-page"><PageHeading kicker="学习记录" title="主 Agent持久化的真实过程" description="页面读取 events 与 worker_ledger，不由 D 拼接虚假的执行链。" /><div className="history-refresh"><button className="secondary-action" type="button" onClick={() => void refreshEvents()}>刷新真实事件</button></div><section className="history-layout"><article className="session-summary"><span>当前实时会话</span><h2>{activeSession.session_id}</h2><p>此处仅展示主 Agent公开会话状态和事件。</p><dl><div><dt>状态</dt><dd>{activeSession.status}</dd></div><div><dt>阶段</dt><dd>{activeSession.current_stage}</dd></div><div><dt>轮次</dt><dd>{activeSession.round_no}</dd></div><div><dt>更新时间</dt><dd>{formatTime(activeSession.updated_at)}</dd></div></dl></article><div className="event-timeline">{events.map((event, index) => <article key={`${event.seq ?? index}-${event.event_type}`}><span className={`event-dot status-${event.status ?? "pending"}`} /><div><div><b>{eventStage(event)}</b><time>{formatTime(event.occurred_at)}</time></div><p>{event.summary || event.event_type}</p><small>{event.agent || event.worker || "learning-orchestrator"}</small></div></article>)}</div></section></div>
+  return <div className="page history-page"><PageHeading kicker="学习记录" title="主 Agent持久化的真实过程" description="页面读取 events 与 worker_ledger，不由 D 拼接虚假的执行链。" /><div className="history-refresh"><button className="secondary-action" type="button" onClick={() => void refreshEvents()}>刷新真实事件</button></div><section className="history-layout"><article className="session-summary"><span>当前实时会话</span><h2>{activeSession.session_id}</h2><p>此处仅展示主 Agent公开会话状态和事件。</p><dl><div><dt>状态</dt><dd>{activeSession.status}</dd></div><div><dt>阶段</dt><dd>{activeSession.current_stage}</dd></div><div><dt>轮次</dt><dd>{activeSession.round_no}</dd></div><div><dt>更新时间</dt><dd>{formatTime(activeSession.updated_at)}</dd></div></dl></article><div className="event-timeline">{events.map((event, index) => <article key={`${event.seq ?? index}-${event.event_type}`}><span className={`event-dot status-${event.status ?? "pending"}`} /><div><div><b>{eventStage(event)}</b><time>{formatTime(event.timestamp ?? event.occurred_at)}</time></div><p>{event.summary || event.event_type}</p><small>{event.agent || event.worker || "learning-orchestrator"}</small></div></article>)}</div></section></div>
 }
 
 function BlockedResourceState({ session, busy, onRetry, onRestart, title }: { session: PublicSessionFixture; busy: string; onRetry: () => void; onRestart: () => void; title: string }) {
@@ -704,6 +837,10 @@ function EmptyState({ title, body }: { title: string; body: string }) {
 
 function MissingContent({ text }: { text: string }) {
   return <div className="missing-content"><FileText size={17} /><span>{text}</span></div>
+}
+
+function RedirectPage({ title, message, action, onAction }: { title: string; message: string; action: string; onAction: () => void }) {
+  return <div className="page"><section className="empty-state"><ShieldCheck size={29} /><h2>{title}</h2><p>{message}</p><button className="primary-action" type="button" onClick={onAction}>{action}</button></section></div>
 }
 
 function CitationChips({ citations }: { citations: Citation[] }) {
@@ -763,14 +900,57 @@ function modalityLabel(modality: AssessmentPayload["items"][number]["modality"])
   return ({ mcq: "选择题", true_false: "判断题", trace: "代码追踪", short_answer: "简答题", code: "代码题" })[modality]
 }
 
-function radarPolygon(values: number[]): string {
-  const normalized = values.length >= 3 ? values : [0, 0, 0]
-  const total = normalized.length
-  return normalized.map((value, index) => {
-    const angle = -Math.PI / 2 + (Math.PI * 2 * index) / total
-    const radius = Math.max(0, Math.min(1, value)) * 76
-    return `${100 + Math.cos(angle) * radius},${100 + Math.sin(angle) * radius}`
-  }).join(" ")
+interface RadarDimension { label: string; value: number }
+
+function RadarChart({ dimensions }: { dimensions: RadarDimension[] }) {
+  const cx = 100, cy = 100, maxR = 56
+  const count = dimensions.length
+  // 3 轴等边三角形朝上: 顶 90°, 左下 210°, 右下 330°
+  const axes = dimensions.map((dim, i) => ({
+    label: dim.label,
+    value: dim.value,
+    angle: -Math.PI / 2 + (Math.PI * 2 * i) / count,
+  }))
+  const rings = [1, 0.5]
+
+  return <svg viewBox="0 0 200 200" aria-hidden="true">
+    {/* 同心圆网格 */}
+    {rings.map((scale) =>
+      <circle key={scale} cx={cx} cy={cy} r={maxR * scale} fill="none" stroke="#e8e4f0" strokeWidth={scale === 1 ? 1.2 : 0.6} />,
+    )}
+    {/* 轴线 */}
+    {axes.map((axis, i) =>
+      <line key={`line-${i}`} x1={cx} y1={cy} x2={cx + Math.cos(axis.angle) * maxR} y2={cy + Math.sin(axis.angle) * maxR} stroke="#e8e4f0" strokeWidth={1} />,
+    )}
+    {/* 数据多边形 */}
+    <polygon
+      points={axes.map((a) => `${cx + Math.cos(a.angle) * maxR * a.value},${cy + Math.sin(a.angle) * maxR * a.value}`).join(" ")}
+      fill="rgba(124,58,237,.15)"
+      stroke="#7c3aed"
+      strokeWidth={1.8}
+      strokeLinejoin="round"
+    />
+    {/* 数据点 */}
+    {axes.map((axis, i) =>
+      <circle key={`dot-${i}`} cx={cx + Math.cos(axis.angle) * maxR * axis.value} cy={cy + Math.sin(axis.angle) * maxR * axis.value} r={4} fill="#7c3aed" stroke="white" strokeWidth={2} />,
+    )}
+    {/* 百分比标注（在轴线外侧，靠近轴端点） */}
+    {axes.map((axis, i) => {
+      const pctR = maxR + 10
+      const px = cx + Math.cos(axis.angle) * pctR
+      const py = cy + Math.sin(axis.angle) * pctR
+      return <text key={`pct-${i}`} x={px} y={py} textAnchor="middle" dominantBaseline="middle" fill="#7c3aed" fontSize={13} fontWeight={800}>{Math.round(axis.value * 100)}%</text>
+    })}
+    {/* 维度标签（在百分比外侧） */}
+    {axes.map((axis, i) => {
+      const labelR = maxR + 30
+      const lx = cx + Math.cos(axis.angle) * labelR
+      const ly = cy + Math.sin(axis.angle) * labelR
+      const anchor = i === 0 ? "middle" : i === 1 ? "end" : "start"
+      const dy = i === 0 ? "-0.2em" : "0.35em"
+      return <text key={`label-${i}`} x={lx} y={ly} textAnchor={anchor} dy={dy} fill="#5c4b7a" fontSize={11} fontWeight={600}>{axis.label}</text>
+    })}
+  </svg>
 }
 
 function difficultyLabel(value?: string) {

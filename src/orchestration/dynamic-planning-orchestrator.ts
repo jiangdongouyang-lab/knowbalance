@@ -1,3 +1,14 @@
+/**
+ * 动态规划循环（演示/参考路径）。
+ *
+ * 实现状态标注（2026-08-08）：本模块是独立于 `interactive-session` 的另一套
+ * 跨轮规划循环（基于 `ContinueRoleCAfterSubmission`，依赖旧前端 role-d-ui 的
+ * continuation 契约）。**生产主路径不调用它**——主 Agent 交互会话由
+ * `src/orchestration/interactive-session.ts` 驱动（持久会话 + 后台生成 +
+ * 四路决策 + 轮次上限）。本文件保留以覆盖跨轮控制流语义，并有独立测试
+ * `tests/dynamic-planning-orchestrator.test.ts`；若旧前端 role-d-ui 下线，
+ * 本模块连同其依赖应一并移除。
+ */
 import type {
   ContinueRoleCAfterSubmissionInput,
   ContinueRoleCForRoleDResult,

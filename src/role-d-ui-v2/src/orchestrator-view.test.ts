@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { abilityRadarView, answersToSubmission, assessmentFeedbackView, blockedSessionAction, initialGoalSelection, pageForSession, pathChainView, pathNodeTitle } from "./orchestrator-view"
+import { abilityRadarView, answersToSubmission, assessmentFeedbackView, blockedSessionAction, initialGoalSelection, microCheckFeedbackView, pageForSession, pathChainView, pathNodeTitle } from "./orchestrator-view"
 
 describe("orchestrator UI state mapping", () => {
   test("routes diagnosis completion and plan re-entry to the learning plan before C content", () => {
@@ -51,6 +51,25 @@ describe("orchestrator UI state mapping", () => {
     expect(chain.map((entry) => entry.title)).toEqual(["Python 是什么", "变量与赋值", "基本数据类型", "列表"])
   })
 
+  test("reveals C-authored micro-check correctness and explanation after a choice", () => {
+    const check = {
+      item_id: "CHECK-1",
+      options: [
+        { option_id: "A", label: "A", text: "一次" },
+        { option_id: "B", label: "B", text: "列表长度次" },
+      ],
+      answer_option_id: "B",
+      answer_explanation: "for 循环会依次处理列表中的每个元素。",
+    }
+    expect(microCheckFeedbackView(check, undefined)).toBeNull()
+    expect(microCheckFeedbackView(check, "A")).toEqual({
+      correct: false,
+      answer_text: "B. 列表长度次",
+      explanation: "for 循环会依次处理列表中的每个元素。",
+    })
+    expect(microCheckFeedbackView(check, "B")?.correct).toBe(true)
+  })
+
   test("builds per-item assessment feedback with your answer, verdict and C guidance", () => {
     const items = [
       { item_id: "I1", modality: "mcq", prompt: "列表的主要用途？", max_score: 1, options: [{ option_id: "A", label: "A", text: "保存一个元素" }, { option_id: "B", label: "B", text: "保存多个有序元素" }] },
@@ -62,8 +81,8 @@ describe("orchestrator UI state mapping", () => {
         { item_id: "I2", raw_score: 4, max_score: 4, feedback_code: "correct" },
       ],
       feedback: { item_feedback: [
-        { item_id: "I1", message: "与参考答案不符", next_step: "复习列表概念" },
-        { item_id: "I2", message: "作答满足要求", next_step: "进入迁移练习" },
+        { item_id: "I1", message: "与参考答案不符", next_step: "复习列表概念", revealed_answer: { kind: "choice", option_id: "B" } },
+        { item_id: "I2", message: "作答满足要求", next_step: "进入迁移练习", revealed_answer: { kind: "code", code: "fruits = [1, 2, 3]" } },
       ] },
     }
     const yours = [
@@ -71,8 +90,8 @@ describe("orchestrator UI state mapping", () => {
       { item_id: "I2", code_response: "fruits = [1,2,3]" },
     ]
     const view = assessmentFeedbackView(items as any, grade as any, yours as any)
-    expect(view[0]).toMatchObject({ item_id: "I1", correct: false, your_answer_text: "保存一个元素", max_score: 1, raw_score: 0 })
-    expect(view[1]).toMatchObject({ item_id: "I2", correct: true, max_score: 4, raw_score: 4 })
+    expect(view[0]).toMatchObject({ item_id: "I1", correct: false, your_answer_text: "保存一个元素", correct_answer_text: "保存多个有序元素", max_score: 1, raw_score: 0 })
+    expect(view[1]).toMatchObject({ item_id: "I2", correct: true, correct_answer_text: "fruits = [1, 2, 3]", max_score: 4, raw_score: 4 })
     expect(view[1].your_answer_text).toContain("fruits")
   })
 

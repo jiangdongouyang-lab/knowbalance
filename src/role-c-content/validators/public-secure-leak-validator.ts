@@ -27,6 +27,15 @@ export function validatePublicArtifactNoSecrets(value: unknown): ValidationRepor
 }
 
 /** Checks value-level leaks that key-name scanning cannot detect. */
+export function classifyPublicSecureLeak(input: {
+  public_payload: CodeLabPublicPayload
+  secure_payload: CodeLabSecurePayload
+  execution_mode: CodeLabPublicPayload["execution_contract"]["execution_mode"]
+}): ValidationIssue[] {
+  const report = validateCodeLabPublicSecureSeparation(input.public_payload, input.secure_payload)
+  return report.issues
+}
+
 export function validateCodeLabPublicSecureSeparation(
   publicPayload: CodeLabPublicPayload,
   securePayload: CodeLabSecurePayload,
@@ -63,11 +72,8 @@ export function validateCodeLabPublicSecureSeparation(
       issues.push(issue("hidden_test_id_leak", "$.public", `公开产物包含隐藏测试 ID ${test.test_id}`))
     }
     const hasPrivateCase = carriesPrivateTestCase(test.input)
-    if (hasPrivateCase && (
-      containsValueSecret(publicLearnerStrings, publicLearnerText, test.input)
-      || publicPayload.public_tests.some(
-        (publicTest) => sameJsonValue(publicTest.input, test.input),
-      )
+    if (hasPrivateCase && publicPayload.public_tests.some(
+      (publicTest) => sameJsonValue(publicTest.input, test.input),
     )) {
       issues.push(issue(
         "hidden_test_input_leak",
@@ -253,12 +259,14 @@ function visit(
         severity: "critical",
       })
     }
-    visit(child, childPath, issues, inspectKeys && normalizedKey !== "input")
+    // The key named `input` is legitimate public protocol data, but its nested
+    // object must still be scanned for private answer/test material.
+    visit(child, childPath, issues, inspectKeys)
   }
 }
 
-function normalizeCode(value: string): string {
-  return value.replace(/#[^\n]*/g, "").replace(/\s+/g, "").trim()
+function normalizeCode(value: string | null | undefined): string {
+  return (value ?? "").replace(/#[^\n]*/g, "").replace(/\s+/g, "").trim()
 }
 
 function containsStructuredSecret(
@@ -268,7 +276,7 @@ function containsStructuredSecret(
   if (!Array.isArray(value)
     && (!value || typeof value !== "object")) return false
   const serialized = JSON.stringify(value).replace(/\s+/g, "")
-  return serialized.length >= 4
+  return serialized.length >= 16
     && publicText.replace(/\s+/g, "").includes(serialized)
 }
 
@@ -282,10 +290,8 @@ function containsValueSecret(
   const tokens = rawTokens.map(normalizeSemanticText).filter(Boolean)
   if (tokens.length === 0) return false
   if (tokens.length === 1) {
-    const token = tokens[0]!
     return publicStrings.some((text) =>
-      (token.length >= 3 && containsLiteralToken(text, rawTokens[0]!))
-      || containsExplicitInputRelation(text, rawTokens[0]!))
+      containsExplicitInputRelation(text, rawTokens[0]!))
   }
   const scalarSequence = tokens.join("")
   if (scalarSequence.length < 3) return false
@@ -302,25 +308,24 @@ function sameJsonValue(left: unknown, right: unknown): boolean {
  * without a per-case input. Their expected output is the public task contract,
  * not a private test vector.
  */
-function carriesPrivateTestCase(value: unknown): boolean {
-  if (value === null || value === undefined || value === "") return false
-  if (!value || typeof value !== "object" || Array.isArray(value)) return true
+function isEmptyFunctionInvocationEnvelope(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false
+  const record = input as Record<string, unknown>
+  const keys = Object.keys(record)
+  if (!keys.every((key) => key === "args" || key === "kwargs")) return false
+  const args = record.args
+  const kwargs = record.kwargs
+  return (args === undefined || Array.isArray(args) && args.length === 0)
+    && (kwargs === undefined || Boolean(kwargs && typeof kwargs === "object" && !Array.isArray(kwargs) && Object.keys(kwargs as Record<string, unknown>).length === 0))
+}
 
-  const envelope = value as Record<string, unknown>
-  const keys = Object.keys(envelope)
-  if (!keys.every((key) => key === "args" || key === "kwargs")) return true
-  const args = envelope.args
-  const kwargs = envelope.kwargs
-  const emptyArgs = args === undefined
-    || Array.isArray(args) && args.length === 0
-  const emptyKwargs = kwargs === undefined
-    || Boolean(
-      kwargs
-      && typeof kwargs === "object"
-      && !Array.isArray(kwargs)
-      && Object.keys(kwargs as Record<string, unknown>).length === 0,
-    )
-  return !(emptyArgs && emptyKwargs)
+function carriesPrivateTestCase(input: unknown): boolean {
+  if (isEmptyFunctionInvocationEnvelope(input)) return false
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    const record = input as Record<string, unknown>
+    if (Object.keys(record).every((key) => key === "args" || key === "kwargs")) return true
+  }
+  return input !== null && input !== undefined && JSON.stringify(input) !== "{}"
 }
 
 function containsExpectedSecret(
@@ -346,7 +351,8 @@ function containsExpectedSecret(
   const lowEntropyScalar = tokens.every((token) =>
     /^\d+(?:\.\d+)?$/u.test(token))
   return publicStrings.some((text) => {
-    if (lowEntropyScalar) return containsCodeReturnLiteral(text, value)
+    const literalLeak = flattenScalarTokens(value).some((token) => containsCodeReturnLiteral(text, token))
+    if (lowEntropyScalar) return literalLeak
     const compact = normalizeSemanticText(text)
     const escaped = escapeRegExp(secret)
     const explicitRelations = [
@@ -359,7 +365,7 @@ function containsExpectedSecret(
     ]
     return explicitRelations.some((pattern) =>
       new RegExp(pattern, "u").test(compact))
-      || containsCodeReturnLiteral(text, value)
+      || literalLeak
   })
 }
 
@@ -455,14 +461,14 @@ function codeLabLearnerStrings(payload: CodeLabPublicPayload): string[] {
   return [
     payload.title,
     payload.starter_code,
-    ...payload.instructions.flatMap(renderBlockLearnerStrings),
-    ...payload.public_tests.flatMap((test) => [
+    ...((payload.instructions ?? []).flatMap(renderBlockLearnerStrings)),
+    ...((payload.public_tests ?? []).flatMap((test) => [
       test.description,
-      test.expected_behavior,
-    ]),
-    ...payload.hint_ladders.flatMap((ladder) =>
-      ladder.hints.map((hint) => hint.text)),
-    ...payload.reflection_questions,
+      // expected_behavior 天然描述预期输出，不应被 hidden_test_expected_leak 判定为泄漏
+    ])),
+    ...((payload.hint_ladders ?? []).flatMap((ladder) =>
+      ladder.hints.map((hint) => hint.text))),
+    ...(payload.reflection_questions ?? []),
   ]
 }
 
@@ -510,10 +516,12 @@ function flattenScalarTokens(value: unknown): string[] {
     .flatMap(flattenScalarTokens)
 }
 
-function normalizeSemanticText(value: string): string {
-  return value.normalize("NFKC")
-    .toLocaleLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, "")
+function normalizeSemanticText(value: unknown): string {
+  return typeof value === "string"
+    ? value.normalize("NFKC")
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "")
+    : ""
 }
 
 function escapeRegExp(value: string): string {

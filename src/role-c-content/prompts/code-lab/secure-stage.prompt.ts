@@ -75,7 +75,7 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 ══════════════════════════════════════════
 
 - 每个目标恰好一个隐藏测试，优先选择边界或反例
-- 隐藏输入必须与公开测试 input 不同，使用公开材料中未出现的新值
+- hidden_tests[].input 必须与 public_payload.public_tests 中所有 input 做 JSON 深比较；只要完全相同就无效。不要复用示例中的任何具体数字、字符串、列表或对象。至少改变输入结构和一个标量，并确保新输入不出现在 public_payload 的任何 learner-visible 字段中。
 - 常规用例 + 边界用例 + 防硬编码用例组合覆盖
 - expected 必须与 reference_solution 的实际返回值及类型一致（自己验算一遍）
 

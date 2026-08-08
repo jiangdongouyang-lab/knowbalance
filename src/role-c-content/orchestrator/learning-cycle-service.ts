@@ -175,6 +175,36 @@ export interface ExecutePublishedCodeLabInput {
   code: string
 }
 
+export interface ExecuteAssessmentCodeInput {
+  execution_id: string
+  session_id: string
+  run_id: string
+  authenticated_learner_id_hash: string
+  item_id: string
+  code: string
+}
+
+export type ExecuteAssessmentCodeBlockedCode = "INVALID_REQUEST" | "SESSION_NOT_FOUND" | "LEARNER_IDENTITY_MISMATCH" | "RUN_NOT_FOUND" | "ITEM_NOT_FOUND" | "SECURE_ASSESSMENT_UNAVAILABLE" | "RUNNER_UNAVAILABLE"
+
+export type ExecuteAssessmentCodeOutcome =
+  | {
+      status: "passed" | "failed" | "timeout"
+      execution_id: string
+      run_id: string
+      item_id: string
+      passed_checks: number
+      total_checks: number
+      score_ratio: number
+      feedback_codes: PublishedCodeLabFeedbackCode[]
+    }
+  | {
+      status: "blocked"
+      execution_id: string
+      item_id: string
+      code: ExecuteAssessmentCodeBlockedCode
+      message: string
+    }
+
 export type PublishedCodeLabFeedbackCode =
   | "assertion_failed"
   | "syntax_error"
@@ -1074,6 +1104,47 @@ export class LearningCycleService {
       score_ratio: result.score_ratio,
       feedback_codes: publicCodeLabFeedbackCodes(result.failure_codes),
     }
+  }
+
+  /** Executes one formal-assessment code item through the C-owned secure suite. */
+  async executeAssessmentCode(input: ExecuteAssessmentCodeInput): Promise<ExecuteAssessmentCodeOutcome> {
+    const blocked = (code: ExecuteAssessmentCodeBlockedCode, message: string): ExecuteAssessmentCodeOutcome => ({
+      status: "blocked", execution_id: input.execution_id, item_id: input.item_id, code, message,
+    })
+    if (!input.execution_id.trim() || !input.session_id.trim() || !input.run_id.trim()
+      || !input.authenticated_learner_id_hash.trim() || !input.item_id.trim()
+      || !input.code.trim() || Buffer.byteLength(input.code, "utf8") > 100_000) {
+      return blocked("INVALID_REQUEST", "代码运行请求缺少必要字段或代码超过 100 KB")
+    }
+    if (!this.dependencies.code_runner) return blocked("RUNNER_UNAVAILABLE", "代码执行服务暂不可用")
+    const session = await this.dependencies.cycle_store.loadSession(input.session_id)
+    if (!session || session.run_id !== input.run_id) return blocked("SESSION_NOT_FOUND", "正式测评会话不存在")
+    if (session.session_state.learner_id_hash !== input.authenticated_learner_id_hash) return blocked("LEARNER_IDENTITY_MISMATCH", "学习者身份与测评会话不一致")
+    const run = await this.dependencies.cycle_store.loadRun(input.run_id)
+    if (!run) return blocked("RUN_NOT_FOUND", "正式测评轮次不存在")
+    const publicAssessment = run.pipeline_result.public_artifacts.assessment
+    if (!publicAssessment?.payload || publicAssessment.status !== "ready") return blocked("ITEM_NOT_FOUND", "正式测评题目尚未可信发布")
+    const publicItem = publicAssessment.payload.items.find((item) => item.item_id === input.item_id)
+    if (!publicItem || publicItem.modality !== "code" || !session.session_state.required_item_ids.includes(input.item_id)) return blocked("ITEM_NOT_FOUND", "当前测评没有这道可运行代码题")
+    let secure: AssessmentSecureArtifact
+    try {
+      const artifact = await this.dependencies.secure_store.get(run.secure_artifact_refs.assessment, { principal: "role-c-grader", run_id: run.run_id })
+      if (artifact.artifact_type !== "assessment_secure" || artifact.status !== "ready" || !artifact.payload) return blocked("SECURE_ASSESSMENT_UNAVAILABLE", "正式测评私有测试套件暂不可用")
+      secure = artifact as AssessmentSecureArtifact
+    } catch { return blocked("SECURE_ASSESSMENT_UNAVAILABLE", "正式测评私有测试套件暂不可用") }
+    const secureItem = secure.payload?.items.find((item) => item.item_id === input.item_id)
+    const suiteId = secureItem?.answer_spec?.kind === "code" ? secureItem.answer_spec.test_suite_id : undefined
+    const suite = suiteId ? secure.payload?.code_test_suites.find((candidate) => candidate.test_suite_id === suiteId) : undefined
+    if (!secureItem || secureItem.modality !== "code" || !suite) return blocked("SECURE_ASSESSMENT_UNAVAILABLE", "这道代码题没有可用的私有测试套件")
+    const contract = suite.execution_contract
+    const result = await executeWithRunnerRetry(this.dependencies.code_runner, {
+      language: "python", code: input.code, test_suite_id: suite.test_suite_id,
+      test_suite: { test_suite_id: suite.test_suite_id, execution_contract: structuredClone(contract), tests: structuredClone(suite.hidden_tests) },
+      timeout_ms: contract.resource_limits.timeout_ms, memory_mb: contract.resource_limits.memory_mb,
+      max_output_bytes: contract.resource_limits.max_output_bytes, network_allowed: false,
+    }, run.pipeline_input.generation_spec.policies.max_tool_retry)
+    if (result.status === "runner_error" || result.runner_image_digest !== this.dependencies.code_runner.runner_image_digest) return blocked("RUNNER_UNAVAILABLE", "代码执行服务暂不可用")
+    return { status: result.status, execution_id: input.execution_id, run_id: input.run_id, item_id: input.item_id, passed_checks: result.passed_tests, total_checks: result.total_tests, score_ratio: result.score_ratio, feedback_codes: publicCodeLabFeedbackCodes(result.failure_codes) }
   }
 
   /** Backend orchestration result used for the B handoff and durable mastery flow. */

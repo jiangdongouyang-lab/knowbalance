@@ -10,6 +10,7 @@ import type {
 } from "../contracts/artifacts"
 import type { RagEvidencePack } from "../contracts/evidence-pack"
 import type { GenerationSpec } from "../contracts/generation-spec"
+import type { CodeLabVerificationFailureDiagnostic } from "../validators/code-lab-validator"
 import type { AlignmentObjection } from "../validators/alignment-validator"
 
 export interface NextRoundGenerationContext {
@@ -79,6 +80,8 @@ export interface CodeLabVerificationFeedback {
     failure_codes: string[]
     must_fail_test_ids: string[]
   }>
+  /** Stable classification for private targeted repair; public surfaces use safe_message only. */
+  failure_diagnostic?: CodeLabVerificationFailureDiagnostic
 }
 
 export interface AssessmentDraft {

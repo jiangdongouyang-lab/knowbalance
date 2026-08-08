@@ -33,7 +33,7 @@
 
 | 文件 | 说明 |
 |------|------|
-| `evaluator/author-system.prompt.ts` | 命题主提示词。含分层设计（Tier1/2/3）、选项设计（错误选项对应 misconception）、锚点路由原则 |
+| `evaluator/author-system.prompt.ts` | 命题主提示词。含分层设计（Tier1/2/3）、选项设计（错误选项对应 misconception）、code-pair 结构（无主观简答题） |
 | `evaluator/author-repair.prompt.ts` | 命题校验失败时的定向修复提示词，含隐藏测试泄漏处理指引 |
 | `evaluator/feedback.prompt.ts` | 学习反馈生成。含正向引导策略、具体可行动原则、formative / summative 双模式说明 |
 | `evaluator/grader.prompt.ts` | 盲审量规判断器。met / unmet / uncertain 的判断标准与 confidence 取值指导 |

@@ -13,11 +13,14 @@ import type {
   RouteRoleCAssessmentAnchorsInput,
   RouteRoleCAssessmentAnchorsResult,
   RunRoleCCodeLabInput,
+  RunRoleCAssessmentCodeInput,
+  RunRoleCAssessmentCodeResult,
   RunRoleCCodeLabResult,
   SubmitRoleCAssessmentInput,
 } from "./contracts"
 import { loadKnowledgeBase } from "../knowledge/loader"
 import type { KnowledgeBase } from "../knowledge/types"
+import { canonicalizeConcept } from "../role-b-profile/concept-canonicalizer"
 import {
   type RagResult,
   type RagResultItem,
@@ -28,6 +31,8 @@ import {
   type StructuredEvidenceRequest,
 } from "../rag/structured-evidence"
 import { join, resolve } from "node:path"
+import { appendFile, mkdir } from "node:fs/promises"
+import { roleCGenerationBudgets, shouldRetryWholeGenerationReason } from "./generation-budget"
 import {
   adaptLearnerProfile,
   adaptRagResult,
@@ -70,6 +75,7 @@ import {
   type CodeExecutionRequest,
   type CodeExecutionResult,
   type CodeRunner,
+  type SafeStageFailureDiagnostic,
   type RenderBlock,
   type LearningCyclePublicOutcome,
   type LearningCycleStore,
@@ -105,6 +111,19 @@ export async function generateRoleCForRoleD(input: GenerateRoleCForRoleDInput): 
   })
 }
 
+function stageDiagnosticSink(dataDirectory?: string) {
+  if (!dataDirectory?.trim()) return undefined
+  const path = join(resolve(dataDirectory), "diagnostics", "stage-failures.jsonl")
+  return async (diagnostic: SafeStageFailureDiagnostic): Promise<void> => {
+    try {
+      await mkdir(join(resolve(dataDirectory), "diagnostics"), { recursive: true })
+      await appendFile(path, `${JSON.stringify({ ...diagnostic, timestamp: new Date().toISOString() })}\n`, "utf8")
+    } catch {
+      // Diagnostics must never weaken or replace the trusted content gate.
+    }
+  }
+}
+
 export interface RoleCForRoleDRuntimeOptions {
   providerMode?: "deterministic" | "model" | "unconfigured"
   /** UI/production sets false unless offline deterministic mode was selected explicitly. */
@@ -129,12 +148,14 @@ export interface RoleCForRoleDRuntimeOptions {
   learningProgressPort?: RoleBLearningProgressPort
   /** B path adapter used when a generated candidate needs formal replanning. */
   pathPlanningPort?: RoleBPathPlanningPort
-  /** External D receiver. HTTP/local use an acknowledgement-only adapter. */
+  /** Durable D receiver. Continuation fails closed when it is not configured. */
   roleDPort?: RoleDAdaptiveLearningLoopPort
   /** Durable outer continuation journal; dataDirectory selects the file adapter by default. */
   adaptiveExecutionJournal?: AdaptiveLearningLoopJournal
   /** Stable receiver identity included in continuation idempotency. */
   deliveryTargetNamespace?: string
+  /** 触发 reprofile 所需的最小冲突目标数；缺省回退 C 侧默认（2）。主 Agent 传 1 以适配每节点单 objective。 */
+  profileDriftMinimumConflicts?: number
 }
 
 export interface RoleCLearningPersistence {
@@ -198,7 +219,9 @@ export async function generateRoleCForRoleDWithRuntime(
     rag_version: "rule-rag-0.1",
   })
   const profileSnapshot = adaptLearnerProfile(input.profile, {
-    profile_version: `${input.runId}-profile-v1`,
+    // 跨轮稳定标识：主 Agent 传入会话级 run_id 时，mastery 状态可跨轮累积
+    //（reprofile 才能被多轮高分/低分触发）；缺省时每轮 runId 派生 → 每轮独立评估。
+    profile_version: input.profile_version ?? `${input.runId}-profile-v1`,
     provenance_ref: "role-d:new-learning-plan",
   })
   const pathNode = structuredClone(input.pathNode)
@@ -252,7 +275,10 @@ export async function generateRoleCForRoleDWithRuntime(
   // 仍失败才向调用方阻塞。审核通过即停止。
   const provider = runtime.provider ?? new ModelBackedRoleCContentProvider(
     modelGateway!,
-    modelBackedProviderOptionsFromEnv(runtimeEnv),
+    {
+      ...modelBackedProviderOptionsFromEnv(runtimeEnv),
+      stage_failure_diagnostic_sink: stageDiagnosticSink(runtime.dataDirectory),
+    },
   )
   const agents = createRoleCAgents(provider, {
     code_lab: new TrustedCodeLabVerifier(runner),
@@ -269,7 +295,7 @@ export async function generateRoleCForRoleDWithRuntime(
   // 循环内必有赋值：built 失败直接 return，成功则 pipeline 一定被赋值。
   let pipeline!: Awaited<ReturnType<typeof runRecoverableReviewedCPipeline>>
   let readyContext: RecoverableReviewedReadyContext | undefined
-  for (let attempt = 0; attempt < 5; attempt += 1) {
+  for (let attempt = 0; attempt < roleCGenerationBudgets().inner_attempts; attempt += 1) {
     const attemptRunId = attempt === 0 ? input.runId : `${input.runId}-R${attempt + 1}`
     const built = buildGenerationSpec({
       run_id: attemptRunId,
@@ -283,7 +309,9 @@ export async function generateRoleCForRoleDWithRuntime(
           : "deterministic-role-d-local-reference-v1",
         runner_image_digest: runner.runner_image_digest,
       },
-      seed: 42,
+      // seed 由 run_id 派生：同一轮确定性结构稳定（幂等/审计可复现），
+      // 不同轮/不同重试自然产生不同变体，不再全仓库写死同一 seed。
+      seed: seedFromRunId(attemptRunId),
     })
     if (!built.ok) {
       return {
@@ -326,6 +354,10 @@ export async function generateRoleCForRoleDWithRuntime(
       },
     })
     if (pipeline.status === "ready") break
+    const attemptReason = pipeline.blocked_reason
+      ? [pipeline.blocked_reason.message, ...(pipeline.blocked_reason.details ?? [])].join("；")
+      : pipeline.failure_reason?.message ?? ""
+    if (!shouldRetryWholeGenerationReason(attemptReason)) break
   }
   const workflow = [
     ...pipeline.trace_events.map(toWorkflowEvent),
@@ -358,16 +390,23 @@ export async function generateRoleCForRoleDWithRuntime(
   const finalSpec = readyContext.pipeline_input.generation_spec
   const learningSessionId = `C-${finalSpec.run_id}-SESSION-1`
   const assessment = pipeline.public_artifacts.assessment!
-  const routingRequestId = `ROUTING-${finalSpec.run_id}`
-  const anchorItemIds = assessment.payload!.routing.anchor_item_ids
-  await cycleService.openAnchorFirstSession({
-    routing_request_id: routingRequestId,
+  const requiredItemIds = (assessment.payload!.items ?? []).map((item: { item_id: string }) => item.item_id)
+  await cycleService.openTrustedPreselectedSession({
+    routing_policy: "trusted_preselected_v1",
     session_id: learningSessionId,
     run_id: finalSpec.run_id,
     authenticated_learner_id_hash: input.profile.learner_id,
     attempt_no: 1,
+    required_item_ids: requiredItemIds,
+    revealed_hint_levels: {},
+    // 画像预期来自 B 初始画像的真实 known/weak_concepts（按 source_id 映射）：
+    // 画像认为已掌握的目标标 known，其余标 weak。reprofile 检测据此判定
+    //「预期 known 但 mastery < 0.45」或「预期 weak 但 mastery > 0.85」的冲突。
     profile_expectations_by_objective: Object.fromEntries(
-      finalSpec.targets.map((target) => [target.objective_id, "weak" as const]),
+      finalSpec.targets.map((target) => [
+        target.objective_id,
+        profileExpectationForTarget(input.profile, target.source_id, knowledgeBase),
+      ]),
     ),
   })
   return {
@@ -379,8 +418,6 @@ export async function generateRoleCForRoleDWithRuntime(
       sessionId: learningSessionId,
       formId: assessment.payload!.form_id,
       attemptNo: 1,
-      routing_request_id: routingRequestId,
-      anchor_item_ids: [...anchorItemIds],
     },
     reviewedRelease: createReviewedReleaseDelivery(pipeline, input.next_round_context),
     ...(audit ? { audit } : {}),
@@ -528,6 +565,30 @@ function groupRequiredFacts(
   return grouped
 }
 
+/**
+ * 由 run_id 派生确定性 seed：同一 run 稳定（幂等/审计可复现），不同 run 自然
+ * 产生不同变体。参考 next-round.ts 的 followUpSeed 模式。
+ */
+function seedFromRunId(runId: string): number {
+  const digest = contentHash({ contract: "role-c-generation-seed-v1", run_id: runId })
+  return Number.parseInt(digest.slice("sha256:".length, "sha256:".length + 12), 16)
+}
+
+/**
+ * 由 B 画像决定单个测评目标的画像预期：画像 known_concepts 映射到该 source_id
+ * 则预期 known，否则 weak。reprofile 检测以这些预期为基准，判断真实表现是否
+ * 与画像冲突（画像说会却不会 / 画像说弱却已掌握）。
+ */
+export function profileExpectationForTarget(
+  profile: { known_concepts: string[]; weak_concepts: string[] },
+  sourceId: string,
+  knowledgeBase: KnowledgeBase,
+): "known" | "weak" {
+  const knownSourceIds = new Set(profile.known_concepts.flatMap((concept) =>
+    canonicalizeConcept(concept, knowledgeBase).sourceIds))
+  return knownSourceIds.has(sourceId) ? "known" : "weak"
+}
+
 function chunk<T>(values: T[], size: number): T[][] {
   const chunks: T[][] = []
   for (let index = 0; index < values.length; index += size) {
@@ -580,6 +641,9 @@ export async function submitRoleCAssessment(
     secure_store: persistence.secureStore,
     mastery_store: persistence.masteryStore,
     code_runner: runner,
+    ...(runtime.profileDriftMinimumConflicts !== undefined
+      ? { profile_drift_minimum_conflicts: runtime.profileDriftMinimumConflicts }
+      : {}),
     ...(runtime.learningProgressPort
       ? {
           learning_progress_delivery: {
@@ -602,6 +666,20 @@ export async function submitRoleCAssessment(
       answers: input.answers,
     },
   })
+}
+
+export async function runRoleCAssessmentCode(
+  input: RunRoleCAssessmentCodeInput,
+  runtime: RoleCForRoleDRuntimeOptions = {},
+) {
+  let runner: CodeRunner
+  try { runner = await resolveRoleCCodeRunner(runtime) }
+  catch { return { status: "blocked" as const, executionId: input.executionId, itemId: input.itemId, code: "RUNNER_UNAVAILABLE", message: "代码执行服务暂不可用" } }
+  const persistence = resolveRoleCLearningPersistence(runtime)
+  const service = new LearningCycleService({ cycle_store: persistence.cycleStore, secure_store: persistence.secureStore, mastery_store: persistence.masteryStore, code_runner: runner })
+  const result = await service.executeAssessmentCode({ execution_id: input.executionId, session_id: input.sessionId, run_id: input.runId, authenticated_learner_id_hash: input.learnerId, item_id: input.itemId, code: input.code })
+  if (result.status === "blocked") return { status: "blocked" as const, executionId: result.execution_id, itemId: result.item_id, code: result.code, message: result.message }
+  return { status: result.status, executionId: result.execution_id, runId: result.run_id, itemId: result.item_id, passedChecks: result.passed_checks, totalChecks: result.total_checks, scoreRatio: result.score_ratio, feedback: result.feedback_codes.map((feedbackCode) => ({ code: feedbackCode, message: codeLabFeedbackMessage(feedbackCode) })) }
 }
 
 /** Executes one published code lab without accepting hidden tests from D. */
@@ -676,6 +754,14 @@ export async function continueRoleCAfterSubmission(
     }
   }
 
+  if (!runtime.roleDPort) {
+    return {
+      status: "blocked",
+      stage: "configuration",
+      reason: "Role D durable delivery port is not configured",
+    }
+  }
+
   const persistence = resolveRoleCLearningPersistence(runtime)
   let session: Awaited<ReturnType<LearningCycleStore["loadSession"]>>
   let knowledgeBase: KnowledgeBase
@@ -730,7 +816,10 @@ export async function continueRoleCAfterSubmission(
   }
   const provider = runtime.provider ?? new ModelBackedRoleCContentProvider(
     modelGateway!,
-    modelBackedProviderOptionsFromEnv(runtimeEnv),
+    {
+      ...modelBackedProviderOptionsFromEnv(runtimeEnv),
+      stage_failure_diagnostic_sink: stageDiagnosticSink(runtime.dataDirectory),
+    },
   )
   const agents = createRoleCAgents(provider, {
     code_lab: new TrustedCodeLabVerifier(runner),
@@ -891,7 +980,7 @@ export async function continueRoleCAfterSubmission(
         max_recovery_attempts: 2,
         recovery_policy_version: "role-c-review-recovery-v1",
         recovery_port_version: "role-c-a-b-runtime-v1",
-        role_d_port: runtime.roleDPort ?? acknowledgementOnlyRoleDPort,
+        role_d_port: runtime.roleDPort,
         delivery_target_namespace:
           runtime.deliveryTargetNamespace ?? "role-d-http-facade-v1",
         ...(adaptiveExecutionJournal
@@ -1060,33 +1149,6 @@ function resolveAdaptiveJournal(
         ),
       })
     : undefined
-}
-
-const acknowledgementOnlyRoleDPort: RoleDAdaptiveLearningLoopPort = {
-  async publishReviewedRelease(delivery) {
-    return {
-      schema_version: "1.0",
-      delivery_kind: delivery.delivery_kind,
-      delivery_id: delivery.delivery_id,
-      status: "accepted",
-    }
-  },
-  async publishLearningSession(delivery) {
-    return {
-      schema_version: "1.0",
-      delivery_kind: delivery.delivery_kind,
-      delivery_id: delivery.delivery_id,
-      status: "accepted",
-    }
-  },
-  async publishReviewRecoveryStatus(delivery) {
-    return {
-      schema_version: "1.0",
-      delivery_kind: delivery.delivery_kind,
-      delivery_id: delivery.delivery_id,
-      status: "accepted",
-    }
-  },
 }
 
 type NextPathEvidenceRefreshResult =

@@ -36,7 +36,7 @@ import type { SecureArtifactStore } from "../security/secure-artifact-store"
 import { validatePublicArtifactNoSecrets } from "../validators/public-secure-leak-validator"
 import type { CPipelineInput } from "./content-pipeline"
 import type {
-  OpenAnchorFirstSessionInput,
+  OpenTrustedPreselectedSessionInput,
   PrepareNextRoundFromCompletedSubmissionInput,
   RegisterReadyRunInput,
 } from "./learning-cycle-service"
@@ -57,7 +57,7 @@ export interface CompletedSubmissionNextRoundPort {
     input: PrepareNextRoundFromCompletedSubmissionInput,
   ): Promise<NextRoundPreparation>
   registerReadyRun(input: RegisterReadyRunInput): Promise<unknown>
-  openAnchorFirstSession(input: OpenAnchorFirstSessionInput): Promise<unknown>
+  openTrustedPreselectedSession(input: OpenTrustedPreselectedSessionInput): Promise<unknown>
 }
 
 export interface RoleDAdaptiveLearningLoopPort
@@ -978,7 +978,10 @@ async function activateLearningSession(
   if (!assessment?.payload) {
     throw new Error("ROLE_C_NEXT_ROUND_ASSESSMENT_NOT_READY")
   }
-  const anchorItemIds = [...assessment.payload.routing.anchor_item_ids]
+  const assessmentItemIds = assessment.payload.items.map((item) => item.item_id)
+  if (assessmentItemIds.length === 0) {
+    throw new Error("ROLE_C_NEXT_ROUND_ASSESSMENT_ITEMS_NOT_READY")
+  }
   const sessionId = stableId("SESSION-C-NEXT", {
     parent_session_id: input.session_id,
     request_id: preparation.request_id,
@@ -992,21 +995,25 @@ async function activateLearningSession(
     form_id: assessment.payload.form_id,
   })
   const attemptNo = 1
-  await lifecycle.openAnchorFirstSession({
-    routing_request_id: routingRequestId,
+  await lifecycle.openTrustedPreselectedSession({
+    routing_policy: "trusted_preselected_v1",
     session_id: sessionId,
     run_id: context.pipeline_input.generation_spec.run_id,
     authenticated_learner_id_hash: input.authenticated_learner_id_hash,
     attempt_no: attemptNo,
+    required_item_ids: assessmentItemIds,
+    revealed_hint_levels: Object.fromEntries(
+      assessmentItemIds.map((itemId) => [itemId, 0 as const]),
+    ),
   })
   return {
-    phase: "anchor_pending",
+    phase: "preselected",
     routing_request_id: routingRequestId,
     session_id: sessionId,
     run_id: context.pipeline_input.generation_spec.run_id,
     form_id: assessment.payload.form_id,
     attempt_no: attemptNo,
-    required_item_ids: anchorItemIds,
+    required_item_ids: assessmentItemIds,
   }
 }
 

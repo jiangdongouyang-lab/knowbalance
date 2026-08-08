@@ -44,8 +44,17 @@ function validateCommandBody(value: Record<string, unknown>): OrchestratorApiSch
   if (typeof value.command_id !== "string" || !/^[A-Za-z0-9_-]{1,120}$/.test(value.command_id)) {
     errors.push("command_id is required and must be safe")
   }
-  if (!["submit_diagnosis_answers", "submit_anchor_answers", "submit_assessment_answers", "retry"].includes(String(value.type))) {
+  if (!["submit_diagnosis_answers", "submit_assessment_answers", "run_assessment_code", "retry"].includes(String(value.type))) {
     errors.push("Unsupported command type")
+  }
+  if (value.type === "run_assessment_code") {
+    const payload = isRecord(value.payload) ? value.payload : null
+    if (!payload || typeof payload.item_id !== "string" || !/^[A-Za-z0-9_-]{1,160}$/.test(payload.item_id)) {
+      errors.push("run_assessment_code.payload.item_id is required and must be safe")
+    }
+    if (!payload || typeof payload.code !== "string" || payload.code.trim().length === 0 || Buffer.byteLength(payload.code, "utf8") > 100_000) {
+      errors.push("run_assessment_code.payload.code is required and must be at most 100 KB")
+    }
   }
   return errors.length > 0 ? { ok: false, errors } : { ok: true, value: value as unknown as InteractiveSessionCommand }
 }

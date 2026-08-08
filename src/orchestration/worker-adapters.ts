@@ -22,10 +22,11 @@ import { createRoleCModelGatewayFromEnv } from "../role-c-content/contracts/mode
 import { ROLE_C_PROMPT_MANIFEST_VERSION } from "../role-c-content/prompts/common-policy"
 import { TrustedCodeLabVerifier } from "../role-c-content/validators/code-lab-validator"
 import { TrustedAssessmentVerifier } from "../role-c-content/validators/assessment-validator"
+import { createDockerPythonCodeRunnerFromEnv } from "../role-c-content/security/code-runner"
 import type { RagResult, RagResultItem } from "../rag/retriever"
 import type { LearningPathNode } from "../role-c-content/contracts/profile-adapter"
 import type { KnowledgeBase } from "../knowledge/types"
-import type { CodeExecutionRequest, CodeExecutionResult, CodeRunner } from "../role-c-content/security/code-runner"
+
 import type { CodeLabPublicArtifact, ConceptLessonArtifact } from "../role-c-content/contracts/artifacts"
 import type {
   BackgroundEvidence,
@@ -60,7 +61,15 @@ export interface CreateScaffoldWorkerInvocationInput {
 }
 
 const ROLE_B_EVIDENCE_FILE = "examples/learner_evidence_loop_weak.json"
-const DETERMINISTIC_RUNNER_DIGEST = `sha256:${"a".repeat(64)}`
+
+/** 由 run_id 派生确定性 seed：同一轮次可复现，跨轮/跨学习者不同（替代硬编码 0）。 */
+function seedFromRunId(runId: string): number {
+  let hash = 0
+  for (let i = 0; i < runId.length; i += 1) {
+    hash = (hash * 31 + runId.charCodeAt(i)) | 0
+  }
+  return Math.abs(hash) >>> 0
+}
 
 /** 创建 Role C 的模型 Provider。确定性模板已删除，仅支持模型路径。 */
 function resolveRoleCProvider(): { ok: true; provider: ModelBackedRoleCContentProvider } | { ok: false; reason: string } {
@@ -245,7 +254,7 @@ async function runDeterministicWorkerAdapter(
     }
 
     const profileSnapshot = adaptLearnerProfile(profileArtifact.value.profile, {
-      profile_version: "deterministic-v1",
+      profile_version: `${invocation.run_id}-profile-v1`,
       provenance_ref: "profile-builder:deterministic-result",
     })
     const learningGoalSpec = resolveLearningGoalSpec(invocation.learner_request.learning_goal_spec ?? {
@@ -293,15 +302,17 @@ async function runDeterministicWorkerAdapter(
     }
 
     const profileSnapshot = adaptLearnerProfile(pathArtifact.value.profile, {
-      profile_version: "deterministic-v1",
+      profile_version: `${invocation.run_id}-profile-v1`,
       provenance_ref: "profile-builder:deterministic-result",
     })
+    const knowledgeBase = await loadKnowledgeBase()
     const evidencePack = adaptRagResult(pathArtifact.value.a_rag_result, {
-      kb_version: "python-basic-v1",
+      kb_version: knowledgeBase.version,
       rag_version: "deterministic-rag-v1",
     })
     const pathNode = fillRequiredFacts(pathArtifact.value.next_path_node, evidencePack)
     const gateway = createRoleCModelGatewayFromEnv(process.env)
+    const runner = await createDockerPythonCodeRunnerFromEnv(process.env)
     const specResult = buildGenerationSpec({
       run_id: invocation.run_id,
       profile_snapshot: profileSnapshot,
@@ -310,9 +321,9 @@ async function runDeterministicWorkerAdapter(
       versions: {
         prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
         model_config_hash: gateway.model_config_hash,
-        runner_image_digest: DETERMINISTIC_RUNNER_DIGEST,
+        runner_image_digest: runner.runner_image_digest,
       },
-      seed: 0,
+      seed: seedFromRunId(invocation.run_id),
     })
     if (!specResult.ok) {
       return failedResult(invocation, {
@@ -346,11 +357,12 @@ async function runDeterministicWorkerAdapter(
     const conceptArtifact = extractConceptTutorArtifact(invocation)
     if (!conceptArtifact.ok) return conceptArtifact.result
 
+    const runner = await createDockerPythonCodeRunnerFromEnv(process.env)
     const pair = await generateCodeLab({
       generation_spec: conceptArtifact.value.generation_spec,
       evidence_pack: conceptArtifact.value.evidence_pack,
       concept_artifact: conceptArtifact.value.concept_lesson,
-    }, resolveRoleCProviderOrFail(), new TrustedCodeLabVerifier(new SubprocessCodeRunner()))
+    }, resolveRoleCProviderOrFail(), new TrustedCodeLabVerifier(runner))
 
     if (pair.public_artifact.status !== "ready" || pair.secure_artifact.status !== "ready") {
       return failedResult(invocation, {
@@ -374,6 +386,7 @@ async function runDeterministicWorkerAdapter(
     const codeLabArtifact = extractCodeLabArtifact(invocation)
     if (!codeLabArtifact.ok) return codeLabArtifact.result
 
+    const runner = await createDockerPythonCodeRunnerFromEnv(process.env)
     const pair = await generateAssessment({
       generation_spec: codeLabArtifact.value.generation_spec,
       evidence_pack: codeLabArtifact.value.evidence_pack,
@@ -383,7 +396,7 @@ async function runDeterministicWorkerAdapter(
         objective_ids: codeLabArtifact.value.code_lab_public.payload?.objective_ids ?? [],
         execution_verified: codeLabArtifact.value.code_lab_public.quality.execution_verified === true,
       },
-    }, resolveRoleCProviderOrFail(), new TrustedAssessmentVerifier(new SubprocessCodeRunner()))
+    }, resolveRoleCProviderOrFail(), new TrustedAssessmentVerifier(runner))
 
     if (pair.public_artifact.status !== "ready" || pair.secure_artifact.status !== "ready") {
       return failedResult(invocation, {
@@ -663,42 +676,6 @@ function fillRequiredFacts(pathNode: LearningPathNode, evidencePack: ReturnType<
   }
 }
 
-export class SubprocessCodeRunner implements CodeRunner {
-  readonly runner_image_digest = DETERMINISTIC_RUNNER_DIGEST
-
-  async execute(request: CodeExecutionRequest): Promise<CodeExecutionResult> {
-    const tests = request.test_suite?.tests ?? []
-    if (tests.length === 0) return { status: "passed", passed_tests: 0, total_tests: 0, score_ratio: 1, failure_codes: [], runner_image_digest: this.runner_image_digest }
-
-    const entryPoint = request.test_suite?.execution_contract.entry_point ?? "solution"
-    const testIds = tests.map((t) => t.test_id)
-    const failed: string[] = []
-    for (const test of tests) {
-      try {
-        const input = test.input as { args?: unknown[]; kwargs?: Record<string, unknown> }
-        const args = Array.isArray(input?.args) ? input.args.map((a) => JSON.stringify(a)).join(", ") : ""
-        const code = `import json\n${request.code}\n\nprint(json.dumps(${entryPoint}(${args})))`
-        const proc = Bun.spawnSync(["python3", "-c", code], { stdout: "pipe", stderr: "pipe", timeout: 5000 })
-        if (proc.exitCode !== 0) { failed.push(test.test_id); continue }
-        const output = new TextDecoder().decode(proc.stdout).trim()
-        const expected = JSON.stringify(test.expected)
-        // Numeric tolerance: parse both as float and compare
-        const outNum = Number(output); const expNum = Number(expected)
-        if (!isNaN(outNum) && !isNaN(expNum)) {
-          if (Math.abs(outNum - expNum) > 1e-6) failed.push(test.test_id)
-        } else if (output !== expected) { failed.push(test.test_id) }
-      } catch { failed.push(test.test_id) }
-    }
-    return {
-      status: failed.length === 0 ? "passed" : "failed",
-      passed_tests: testIds.length - failed.length,
-      total_tests: testIds.length,
-      score_ratio: testIds.length === 0 ? 0 : (testIds.length - failed.length) / testIds.length,
-      failure_codes: failed.map((id) => `${id}: assertion_failed`),
-      runner_image_digest: this.runner_image_digest,
-    }
-  }
-}
 
 async function ensureEvidenceForPathNode(
   ragResult: RagResult,

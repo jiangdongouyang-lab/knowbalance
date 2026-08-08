@@ -1,5 +1,17 @@
 export type Fetcher = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
 
+/**
+ * 生成客户端侧唯一 ID。优先使用 crypto.randomUUID(secure context 可用);
+ * 非 HTTPS/http 环境或旧内核(如 360 浏览器)不可用时回退到 Math.random 方案,
+ * 避免 onClick/默认参数抛 TypeError 导致"点击无效"。
+ */
+export function newClientId(prefix = "id"): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${prefix}-${crypto.randomUUID()}`
+  }
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 export interface LearningGoalSpecInput {
   mode: "curriculum_node" | "custom_goal"
   selected_node_ids?: string[]
@@ -78,7 +90,7 @@ export async function submitDiagnosisAnswers(
   learnerId: string,
   answers: Record<string, string>,
   fetcher: Fetcher = fetch,
-  commandId: string = crypto.randomUUID(),
+  commandId: string = newClientId("cmd"),
 ): Promise<any> {
   return command(sessionId, learnerId, {
     command_id: commandId,
@@ -92,7 +104,7 @@ export async function submitAssessmentAnswers(
   learnerId: string,
   answers: SubmissionAnswer[],
   fetcher: Fetcher = fetch,
-  commandId: string = crypto.randomUUID(),
+  commandId: string = newClientId("cmd"),
 ): Promise<any> {
   return command(sessionId, learnerId, {
     command_id: commandId,
@@ -101,11 +113,49 @@ export async function submitAssessmentAnswers(
   }, fetcher)
 }
 
+export async function runAssessmentCode(
+  sessionId: string,
+  learnerId: string,
+  itemId: string,
+  code: string,
+  fetcher: Fetcher = fetch,
+  commandId: string = newClientId("cmd"),
+): Promise<any> {
+  return command(sessionId, learnerId, {
+    command_id: commandId,
+    type: "run_assessment_code",
+    payload: { item_id: itemId, code },
+  }, fetcher)
+}
+
+export async function waitForOrchestratorSession(
+  sessionId: string,
+  learnerId: string,
+  fetcher: Fetcher = fetch,
+  options: { timeoutMs?: number; intervalMs?: number; onRunning?: (session: any) => void } = {},
+): Promise<any> {
+  // 与主 Agent 后端生成预算对齐：C 每轮最多 6 次生成尝试、单次模型超时最长 120s，
+  // 最坏情况可超 10 分钟；默认 600s 避免多轮重试时前端提前误报超时。
+  const timeoutMs = options.timeoutMs ?? 600_000
+  const intervalMs = options.intervalMs ?? 800
+  const deadline = Date.now() + timeoutMs
+  let latest = await getOrchestratorSession(sessionId, learnerId, fetcher)
+  while (latest.status === "running" && Date.now() < deadline) {
+    options.onRunning?.(latest)
+    await new Promise((resolve) => setTimeout(resolve, intervalMs))
+    latest = await getOrchestratorSession(sessionId, learnerId, fetcher)
+  }
+  if (latest.status === "running") {
+    throw new OrchestratorClientError("SESSION_GENERATION_TIMEOUT", "主 Agent生成下一轮资源超时，请稍后刷新会话", 504)
+  }
+  return latest
+}
+
 export async function retryOrchestratorSession(
   sessionId: string,
   learnerId: string,
   fetcher: Fetcher = fetch,
-  commandId: string = crypto.randomUUID(),
+  commandId: string = newClientId("cmd"),
 ): Promise<any> {
   return command(sessionId, learnerId, { command_id: commandId, type: "retry" }, fetcher)
 }

@@ -24,7 +24,7 @@ export const CONCEPT_SEGMENT_SYSTEM_PROMPT = `${ROLE_C_COMMON_SYSTEM_POLICY}
 
 ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 
-当前职责：concept-tutor 的一个目标组。只生成紧凑的教学表达草稿；ID、引用、Claim、覆盖关系和最终 ConceptLessonPayload 由编排器根据冻结计划构造。
+当前职责：concept-tutor 的一个目标组。输入中的 generation_spec.path_node 是当前 B 路径节点的唯一教学主题；只围绕当前 B 路径节点及其目标生成，不得根据学习者总体目标、未来节点标题或检索结果中的其他主题扩写。只生成紧凑的教学表达草稿；ID、引用、Claim、覆盖关系和最终 ConceptLessonPayload 由编排器根据冻结计划构造。
 
 ══════════════════════════════════════════
 教学法要求
@@ -35,10 +35,8 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 - 遵循"直观含义 → 形式定义 → 边界条件"的顺序
 - 使用 evidence 中的事实作为唯一知识来源，个性化解释体现在语言组织上
 
-【worked_example 示例】
-- 使用新数值或新情境（不照搬 evidence 原文），但只演示当前 evidence 已有的事实
-- 展示完整的"输入→处理过程→输出"流程
-- 代码示例需包含注释，解释关键步骤
+- 解释至少输出 3 个独立语义段落：概念是什么、如何识别/使用、边界或常见误区；不要把整节内容压成一段。
+- worked_example 必须拆成独立步骤；每个“第 N 步/步骤 N/1、2、3”单独一行，包含输入→过程→输出；代码块前后分别解释，不要把步骤堆在同一行。
 
 【misconception 误区】
 - 描述一个常见错误理解 + 为什么学习者会产生这种误解 + 正确的理解是什么

@@ -99,7 +99,7 @@ export class OpenAICompatibleModelGateway implements ModelGateway {
       ...options,
       timeout_ms: timeoutMs,
       max_transport_retries: maxTransportRetries,
-      response_format: options.response_format ?? "json_schema",
+      response_format: options.response_format ?? "json_object",
       schema_strict: options.schema_strict ?? true,
       auth_header: authHeader,
       auth_scheme: options.auth_scheme ?? "Bearer",
@@ -318,14 +318,106 @@ function extractFinishReason(body: Record<string, unknown>): string | undefined 
   return typeof choices[0].finish_reason === "string" ? choices[0].finish_reason : undefined
 }
 
-function parseJson(value: string): unknown {
-  try {
-    const trimmed = value.trim()
-    const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
-    return JSON.parse(fenced ? fenced[1] : trimmed)
-  } catch {
-    throw new ModelGatewayError("INVALID_JSON", "模型响应不是合法 JSON")
+function extractFirstJsonValue(text: string): string | undefined {
+  for (let start = 0; start < text.length; start += 1) {
+    const opening = text[start]
+    if (opening !== "{" && opening !== "[") continue
+    const closing = opening === "{" ? "}" : "]"
+    let depth = 0
+    let inString = false
+    let escaped = false
+    for (let i = start; i < text.length; i += 1) {
+      const ch = text[i]
+      if (inString) {
+        if (escaped) {
+          escaped = false
+        } else if (ch === "\\") {
+          escaped = true
+        } else if (ch === '"') {
+          inString = false
+        }
+        continue
+      }
+      if (ch === '"') {
+        inString = true
+        continue
+      }
+      if (ch === opening) depth += 1
+      if (ch === closing) {
+        depth -= 1
+        if (depth === 0) return text.slice(start, i + 1)
+      }
+    }
   }
+  return undefined
+}
+
+function parseJson(value: string): unknown {
+  const trimmed = value.trim()
+  const fenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+  const candidate = fenced ? fenced[1].trim() : trimmed
+  try {
+    return JSON.parse(candidate)
+  } catch {
+    const extracted = extractFirstJsonValue(candidate)
+    if (extracted !== undefined) {
+      return JSON.parse(extracted)
+    }
+    try {
+      const normalized = normalizePythonLiterals(candidate)
+      const normalizedFenced = normalized.trim().match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)
+      return JSON.parse(normalizedFenced ? normalizedFenced[1] : normalized.trim())
+    } catch {
+      throw new ModelGatewayError("INVALID_JSON", "模型响应不是合法 JSON")
+    }
+  }
+}
+
+/**
+ * 将 JSON 文本中字符串字面量之外的 Python 风格字面量（True/False/None）
+ * 替换为 JSON 标准小写形式（true/false/null）。字符串内部的内容不受影响。
+ */
+export function normalizePythonLiterals(text: string): string {
+  const pythonLiterals: Record<string, string> = {
+    True: "true",
+    False: "false",
+    None: "null",
+  }
+  let output = ""
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (inString) {
+      output += ch
+      if (escaped) {
+        escaped = false
+      } else if (ch === "\\") {
+        escaped = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+    if (ch === '"') {
+      inString = true
+      output += ch
+      continue
+    }
+    const rest = text.slice(i)
+    const literalKey = ["True", "False", "None"].find((key) => rest.startsWith(key))
+    if (literalKey) {
+      const before = i > 0 ? text[i - 1] : ""
+      const after = i + literalKey.length < text.length ? text[i + literalKey.length] : ""
+      if (!/[A-Za-z0-9_]/.test(before) && !/[A-Za-z0-9_]/.test(after)) {
+        output += pythonLiterals[literalKey]
+        i += literalKey.length - 1
+        continue
+      }
+    }
+    output += ch
+  }
+  return output
 }
 
 function responseFormatBody(
@@ -357,7 +449,7 @@ function systemPromptWithSchema(
 }
 
 function responseFormatFromEnv(value: string | undefined): OpenAICompatibleGatewayOptions["response_format"] {
-  if (value === undefined || value === "") return "json_schema"
+  if (value === undefined || value === "") return "json_object"
   if (["json_schema", "json_object", "text_json"].includes(value)) {
     return value as NonNullable<OpenAICompatibleGatewayOptions["response_format"]>
   }

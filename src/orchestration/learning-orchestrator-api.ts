@@ -1,5 +1,7 @@
+import { readFileSync } from "node:fs"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { protectSensitivePath } from "../security/windows-secure-acl"
 import { runLearningOrchestrator } from "./learning-orchestrator-runner"
 import {
   InteractiveSessionError,
@@ -28,6 +30,7 @@ export interface LearningOrchestratorApiOptions {
   data_root?: string
   provider_config_path?: string
   provider_environment?: Record<string, string | undefined>
+  server_hostname?: string
 }
 
 const JSON_HEADERS = {
@@ -41,6 +44,8 @@ export function createLearningOrchestratorApiHandler(
   const dataRoot = options.data_root ?? join(process.cwd(), ".tmp", "orchestrator")
   const providerConfigPath = options.provider_config_path ?? join(dataRoot, "provider-config.json")
   const providerEnvironment = options.provider_environment ?? process.env
+  const providerWritesEnabled = isLoopbackHostname(options.server_hostname ?? "127.0.0.1")
+  hydrateProviderEnvironmentFromDisk(providerConfigPath, providerEnvironment)
   const sessions = new InteractiveSessionStore(dataRoot)
 
   return async function handle(request: Request): Promise<Response> {
@@ -58,6 +63,7 @@ export function createLearningOrchestratorApiHandler(
             "POST /orchestrator/runs",
             "POST /orchestrator/sessions",
             "GET /orchestrator/sessions/:id",
+            "POST /orchestrator/sessions/:id/repair",
             "POST /orchestrator/sessions/:id/commands",
             "GET /orchestrator/sessions/:id/events",
           ],
@@ -71,6 +77,10 @@ export function createLearningOrchestratorApiHandler(
           return jsonResponse(providerPublicView(config))
         }
         if (request.method === "PUT") {
+          if (!providerWritesEnabled) {
+            throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration writes are disabled when the server is not bound to loopback", 403)
+          }
+          requireLoopbackOrigin(request)
           const body = await parseJson<Record<string, unknown>>(request)
           const config = validateProviderConfiguration(body)
           await saveProviderConfiguration(providerConfigPath, config)
@@ -80,10 +90,15 @@ export function createLearningOrchestratorApiHandler(
       }
 
       if (request.method === "POST" && url.pathname === "/orchestrator/runs") {
+        const principal = requirePrincipal(request)
         const body = await parseJson<RunRequestBody>(request)
         const validation = validateOrchestratorApiBody("run", body)
         if (!validation.ok) {
           return errorResponse(400, "INVALID_ORCHESTRATOR_REQUEST", "Invalid learning orchestrator request", validation.errors)
+        }
+
+        if (validation.value.learner_request!.learner_id !== principal) {
+          throw new InteractiveSessionError("LEARNER_IDENTITY_MISMATCH", "Authenticated learner does not match learner_request", 403)
         }
 
         const result = await runLearningOrchestrator({
@@ -132,9 +147,20 @@ export function createLearningOrchestratorApiHandler(
 
       const sessionMatch = url.pathname.match(/^\/orchestrator\/sessions\/([A-Za-z0-9_-]+)$/)
       if (request.method === "GET" && sessionMatch) {
+        // GET 保持纯只读：旧会话迁移是显式写操作，由 POST /repair 端点触发，
+        // 避免前端轮询 GET 时静默替换学习者正在作答的测评内容。
         const record = await sessions.load(sessionMatch[1]!)
         assertOwner(record, requirePrincipal(request))
         return jsonResponse(publicSessionView(record))
+      }
+
+      const repairMatch = url.pathname.match(/^\/orchestrator\/sessions\/([A-Za-z0-9_-]+)\/repair$/)
+      if (request.method === "POST" && repairMatch) {
+        // 显式旧会话迁移入口：检测到 short_answer 或学习资源目标漂移时，
+        // 按当前节点后台重新生成整套内容（幂等：无迁移需要时原样返回）。
+        const record = await sessions.load(repairMatch[1]!)
+        assertOwner(record, requirePrincipal(request))
+        return jsonResponse(await sessions.repairLegacyAssessment(repairMatch[1]!))
       }
 
       const eventsMatch = url.pathname.match(/^\/orchestrator\/sessions\/([A-Za-z0-9_-]+)\/events$/)
@@ -177,14 +203,35 @@ export function startLearningOrchestratorApiServer(
   return Bun.serve({
     port: options.port ?? 8787,
     hostname: options.hostname ?? "127.0.0.1",
-    fetch: createLearningOrchestratorApiHandler({ data_root: options.data_root, provider_config_path: options.provider_config_path }),
+    fetch: createLearningOrchestratorApiHandler({
+      data_root: options.data_root,
+      provider_config_path: options.provider_config_path,
+      server_hostname: options.hostname ?? "127.0.0.1",
+    }),
   })
 }
 
 function requireLoopback(request: Request): void {
   const hostname = new URL(request.url).hostname.toLowerCase()
-  if (hostname !== "127.0.0.1" && hostname !== "localhost" && hostname !== "[::1]") {
+  if (!isLoopbackHostname(hostname)) {
     throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration is available only on this machine", 403)
+  }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase()
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1" || normalized === "[::1]"
+}
+
+function requireLoopbackOrigin(request: Request): void {
+  const origin = request.headers.get("origin")
+  if (!origin) return
+  let parsed: URL
+  try { parsed = new URL(origin) } catch {
+    throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration origin must be a loopback HTTP origin", 403)
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !isLoopbackHostname(parsed.hostname)) {
+    throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration origin must be a loopback HTTP origin", 403)
   }
 }
 
@@ -197,6 +244,20 @@ async function readProviderConfiguration(path: string, environment: Record<strin
     const modelId = environment.ROLE_C_MODEL_ID?.trim()
     const apiKey = environment.ROLE_C_MODEL_API_KEY?.trim()
     return endpoint && modelId && apiKey ? { provider_mode: "model", endpoint, model_id: modelId, api_key: apiKey } : null
+  }
+}
+
+function hydrateProviderEnvironmentFromDisk(
+  path: string,
+  environment: Record<string, string | undefined>,
+): void {
+  try {
+    const config = JSON.parse(readFileSync(path, "utf8")) as Partial<LocalProviderConfiguration>
+    if (config.provider_mode === "model" && config.endpoint && config.model_id && config.api_key) {
+      applyProviderConfiguration(config as LocalProviderConfiguration, environment)
+    }
+  } catch {
+    // Missing or malformed local provider config is surfaced by the normal provider error path.
   }
 }
 
@@ -213,9 +274,12 @@ function validateProviderConfiguration(body: Record<string, unknown>): LocalProv
 
 async function saveProviderConfiguration(path: string, config: LocalProviderConfiguration): Promise<void> {
   await mkdir(dirname(path), { recursive: true })
+  await protectSensitivePath(dirname(path), "directory")
   const temporary = `${path}.${crypto.randomUUID()}.tmp`
   await writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { encoding: "utf8", mode: 0o600 })
+  await protectSensitivePath(temporary, "file")
   await rename(temporary, path)
+  await protectSensitivePath(path, "file")
 }
 
 function applyProviderConfiguration(config: LocalProviderConfiguration, environment: Record<string, string | undefined>): void {

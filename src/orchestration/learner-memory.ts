@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
 import { join } from "node:path"
 import type { WorkerName } from "./types"
 
@@ -44,16 +45,26 @@ export interface MemorySummaryForProfile {
 export async function loadLearnerMemory(rootDir: string, learnerId: string): Promise<LearnerMemorySnapshot> {
   try {
     return JSON.parse(await readFile(memoryPath(rootDir, learnerId), "utf8")) as LearnerMemorySnapshot
-  } catch {
-    return emptyMemory(learnerId)
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return emptyMemory(learnerId)
+    throw error
   }
 }
 
 export async function saveLearnerMemory(rootDir: string, snapshot: LearnerMemorySnapshot): Promise<string> {
   const dir = join(rootDir, "learner-memory")
-  await mkdir(dir, { recursive: true })
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  await chmod(dir, 0o700).catch(() => undefined)
   const path = memoryPath(rootDir, snapshot.learner_id)
-  await writeFile(path, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8")
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`
+  try {
+    await writeFile(temporary, `${JSON.stringify(snapshot, null, 2)}\n`, { encoding: "utf8", mode: 0o600 })
+    await renameWithRetry(temporary, path)
+    await chmod(path, 0o600).catch(() => undefined)
+  } catch (error) {
+    await rm(temporary, { force: true }).catch(() => undefined)
+    throw error
+  }
   return path
 }
 
@@ -116,4 +127,17 @@ function clamp(value: number): number {
 
 function safeLearnerId(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, "_")
+}
+
+async function renameWithRetry(source: string, destination: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(source, destination)
+      return
+    } catch (error) {
+      const code = error instanceof Error && "code" in error ? error.code : undefined
+      if ((code !== "EPERM" && code !== "EACCES") || attempt >= 40) throw error
+      await new Promise((resolve) => setTimeout(resolve, 5))
+    }
+  }
 }

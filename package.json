@@ -20,22 +20,24 @@
     "docker:role-c:doctor": "bun scripts/role-c-docker-doctor.ts",
     "test:role-c:docker": "bun scripts/role-c-docker-smoke.ts && bun scripts/role-c-code-lab-demo.ts && bun scripts/role-c-full-demo.ts",
     "test:role-c:real": "bun scripts/role-c-real-model-smoke.ts",
-    "test:role-c:regenerate": "bun -e \"import { clearRoleCFixtureCache } from \"./tests/helpers/role-c-fixture-cache\"; clearRoleCFixtureCache(); console.log(\"fixture cache cleared\")\"",
-    "accept:role-c:adaptation": "bun scripts/role-c-adaptation-acceptance.ts"
+    "test:role-c:regenerate": "bun -e \"import { clearRoleCFixtureCache } from \"./tests/helpers/role-c-fixture-cache\"; clearRoleCFixtureCache(); console.log(\"fixture cache cleared\")\""
   },
   "dependencies": {
     "@opencode-ai/plugin": "1.17.20",
     "@opencode-ai/sdk": "1.17.20",
     "ajv": "8.20.0",
     "lucide-react": "0.468.0",
+    "prismjs": "^1.30.0",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "react-simple-code-editor": "^0.14.1"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "6.8.0",
     "@testing-library/react": "16.3.0",
     "@testing-library/user-event": "14.6.1",
     "@types/bun": "latest",
+    "@types/prismjs": "^1.26.6",
     "@types/react": "19.1.12",
     "@types/react-dom": "19.1.9",
     "@vitejs/plugin-react": "6.0.3",

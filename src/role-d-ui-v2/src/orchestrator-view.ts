@@ -2,10 +2,90 @@ import type { SubmissionAnswer } from "./orchestrator-client"
 
 export type OrchestratorPage = "goal" | "diagnosis" | "path" | "lesson" | "assessment" | "feedback"
 
+export function finalFeedbackAction(session: any): { label: string; ready: boolean } | null {
+  return isFinalMasterySession(session, null) ? { label: "返回首页", ready: true } : null
+}
+
+export function nextRoundResourceGate(session: any): { ready: boolean; label: string } {
+  if (isFinalAdvanceSession(session)) return { ready: true, label: "返回主页" }
+  if (session?.status === "running") {
+    return { ready: false, label: "主 Agent正在调用 C 生成并审核下一轮资源…" }
+  }
+  if (session?.status !== "waiting_for_user" || session?.waiting_for?.type !== "assessment_answers") {
+    return { ready: false, label: "等待主 Agent调用 C 准备下一轮资源…" }
+  }
+  const newItems = Array.isArray(session?.waiting_for?.items) ? session.waiting_for.items : []
+  const priorItems = Array.isArray(session?.feedback?.assessment_items?.items)
+    ? session.feedback.assessment_items.items
+    : []
+  const newIds = newItems.map((item: any) => item?.item_id).filter(Boolean)
+  const priorIds = new Set(priorItems.map((item: any) => item?.item_id).filter(Boolean))
+  const assessmentIds = Array.isArray(session?.assessment?.payload?.items)
+    ? session.assessment.payload.items.map((item: any) => item?.item_id).filter(Boolean)
+    : []
+  const hasFreshItems = newIds.length > 0
+    && newIds.every((id: string) => !priorIds.has(id))
+    && assessmentIds.length === newIds.length
+    && newIds.every((id: string) => assessmentIds.includes(id))
+  const hasResources = Boolean(
+    session?.learning_resources?.concept_lesson
+      || session?.learning_resources?.code_lab,
+  )
+  return hasFreshItems && hasResources
+    ? { ready: true, label: "进入下一轮学习" }
+    : { ready: false, label: "等待 C 发布下一轮新资源…" }
+}
+
+export function shouldPollOrchestratorSession(session: any): boolean {
+  return Boolean(session?.session_id && session?.status === "running")
+}
+
+export function answersMatchAssessmentItems(items: Array<{ item_id?: unknown }>, answers: Record<string, string>): boolean {
+  const itemIds = items.map((item) => item.item_id).filter((itemId): itemId is string => typeof itemId === "string")
+  return itemIds.length > 0
+    && itemIds.length === Object.keys(answers).length
+    && itemIds.every((itemId) => Object.prototype.hasOwnProperty.call(answers, itemId))
+}
+
+export function isFinalAdvanceSession(session: any): boolean {
+  return Boolean(
+    session?.status === "completed"
+      && session?.current_path_node == null
+      && session?.feedback?.final_decision?.action === "advance"
+      && Array.isArray(session?.formal_path?.nodes)
+      && session.formal_path.nodes.length > 0
+      && session.formal_path.nodes.every((node: any) => node?.status === "completed"),
+  )
+}
+
+export function completedNodeFromPath(session: any): any | null {
+  const nodes = Array.isArray(session?.formal_path?.nodes) ? session.formal_path.nodes : []
+  return [...nodes].reverse().find((node: any) => node?.status === "completed") ?? null
+}
+
+export function nextUnmasteredPathNode(session: any): any | null {
+  const nodes = Array.isArray(session?.formal_path?.nodes) ? session.formal_path.nodes : []
+  return nodes.find((node: any) => node?.status !== "completed") ?? null
+}
+
+export function isFinalMasterySession(session: any, notice: { final: boolean } | null): boolean {
+  if (notice?.final === true) return true
+  if (session?.status !== "completed") return false
+  const accuracy = Number(session?.feedback?.round_score?.accuracy ?? 0)
+  if (accuracy < 0.8 || session?.feedback?.final_decision?.action !== "advance") return false
+  const nodes = Array.isArray(session?.formal_path?.nodes) ? session.formal_path.nodes : []
+  return nodes.length > 0 && nodes.every((node: any) => node.status === "completed")
+}
+
 export function pageForSession(session: any, options?: { feedbackDismissed?: boolean }): OrchestratorPage {
-  const hasPlanCheckpoint = Boolean(session?.profile && session?.formal_path && session?.current_path_node)
   if (session?.feedback && !options?.feedbackDismissed) return "feedback"
+  const hasPlanCheckpoint = Boolean(session?.profile && session?.formal_path && session?.current_path_node)
+  if (session?.feedback && options?.feedbackDismissed && hasPlanCheckpoint) return "path"
+  // 诊断完成后只要主Agent已公开B画像与正式路径，默认先展示画像/学习方案。
+  // assessment_answers 只说明题目已准备好，不应绕过用户的"进入讲义"操作。
   if (hasPlanCheckpoint) return "path"
+  const waitingType = session?.waiting_for?.type
+  if (waitingType === "assessment_answers") return "assessment"
   if (session?.status === "blocked" || session?.status === "failed") return "feedback"
   if (session?.waiting_for?.type === "diagnosis_answers" || session?.current_stage === "objective_diagnosis") return "diagnosis"
   if (session?.current_stage === "assessment") {
@@ -73,6 +153,23 @@ export function pathChainView(
   return chain
 }
 
+export function microCheckFeedbackView(
+  check: {
+    options?: Array<{ option_id: string; label: string; text: string }>
+    answer_option_id?: string
+    answer_explanation?: string
+  },
+  selectedOptionId?: string,
+): { correct: boolean; answer_text: string; explanation: string } | null {
+  if (!selectedOptionId || !check.answer_option_id) return null
+  const correctOption = check.options?.find((option) => option.option_id === check.answer_option_id)
+  return {
+    correct: selectedOptionId === check.answer_option_id,
+    answer_text: correctOption ? `${correctOption.label}. ${correctOption.text}` : check.answer_option_id,
+    explanation: check.answer_explanation ?? "C 未公开答案解析。",
+  }
+}
+
 export interface AssessmentItemFeedbackView {
   item_id: string
   prompt: string
@@ -81,8 +178,38 @@ export interface AssessmentItemFeedbackView {
   raw_score: number
   correct: boolean | null
   your_answer_text: string
+  correct_answer_text?: string
+  correct_answer_kind?: "choice" | "text" | "numeric" | "rubric" | "code"
   feedback_message?: string
   next_step?: string
+}
+
+function revealedAnswerView(
+  revealed: any,
+  options?: Array<{ option_id: string; text?: string }>,
+): Pick<AssessmentItemFeedbackView, "correct_answer_text" | "correct_answer_kind"> {
+  if (!revealed || typeof revealed.kind !== "string") return {}
+  if (revealed.kind === "choice") {
+    return {
+      correct_answer_kind: "choice",
+      correct_answer_text: options?.find((option) => option.option_id === revealed.option_id)?.text ?? revealed.option_id,
+    }
+  }
+  if (revealed.kind === "text") {
+    return { correct_answer_kind: "text", correct_answer_text: (revealed.accepted ?? []).join("；") }
+  }
+  if (revealed.kind === "numeric") {
+    return { correct_answer_kind: "numeric", correct_answer_text: `${revealed.target}${revealed.unit ? ` ${revealed.unit}` : ""}` }
+  }
+  if (revealed.kind === "rubric") {
+    const criteria = (revealed.criteria ?? []).map((criterion: any, index: number) =>
+      `${index + 1}. ${criterion.description}${criterion.required_evidence?.length ? `（需包含：${criterion.required_evidence.join("、")}）` : ""}`)
+    return { correct_answer_kind: "rubric", correct_answer_text: criteria.join("\n") }
+  }
+  if (revealed.kind === "code") {
+    return { correct_answer_kind: "code", correct_answer_text: revealed.code ?? "" }
+  }
+  return {}
 }
 
 export function assessmentFeedbackView(
@@ -117,6 +244,7 @@ export function assessmentFeedbackView(
       raw_score: result?.raw_score ?? 0,
       correct: result ? result.feedback_code === "correct" || result.raw_score >= (result.max_score || 1) : null,
       your_answer_text: your ? yourAnswerText : "未作答",
+      ...revealedAnswerView(guidance?.revealed_answer, item.options),
       feedback_message: guidance?.message,
       next_step: guidance?.next_step,
     }

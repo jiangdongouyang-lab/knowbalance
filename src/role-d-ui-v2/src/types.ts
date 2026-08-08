@@ -23,6 +23,8 @@ export interface LessonPayload {
     item_id: string
     prompt: string
     options?: Array<{ option_id: string; label: string; text: string }>
+    answer_option_id?: string
+    answer_explanation?: string
     citations: Citation[]
   }>
   hint_ladders: Array<{
@@ -112,17 +114,38 @@ export interface PublicSessionFixture {
     concept_lesson?: { payload: LessonPayload; citations: Citation[]; status: string }
     code_lab?: { payload: CodeLabPayload; citations: Citation[]; status: string }
   }
-  assessment?: { payload: AssessmentPayload; citations: Citation[]; status: string }
+  adaptation?: {
+    adaptation_action: "remediate" | "reinforce" | "advance"
+    target_objective_ids: string[]
+    addressed_misconception_tags: string[]
+    adaptation_summary: string
+    source_feedback_refs: string[]
+  } | null
+  assessment?: { artifact_id?: string; payload: AssessmentPayload; citations: Citation[]; status: string }
+  code_execution?: {
+    status: "passed" | "failed" | "timeout" | "blocked"
+    itemId?: string
+    passedChecks?: number
+    totalChecks?: number
+    scoreRatio?: number
+    message?: string
+    feedback?: Array<{ code: string; message: string }>
+  } | null
   feedback?: unknown
   blocked_reason?: string | null
+  /** 与后端 InteractiveEvent 对齐：event_id/event_type/stage/worker/message/timestamp。 */
   events: Array<{
-    seq?: number
-    agent?: string
+    event_id: string
+    event_type: "session_created" | "worker_completed" | "worker_invoked" | "waiting_for_user" | "command_received" | "session_updated" | "session_completed" | "session_blocked"
+    stage: string
     worker?: string
+    message: string
+    timestamp: string
+    seq?: number
     status?: string
-    event_type?: string
-    summary?: string
     occurred_at?: string
+    summary?: string
+    agent?: string
   }>
   updated_at: string
 }

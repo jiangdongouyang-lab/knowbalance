@@ -11,6 +11,8 @@ import type {
   RenderBlock,
   TestComparison,
 } from "../contracts/artifacts"
+export { classifyOutputContract } from "../contracts/output-contract"
+import { classifyOutputContract } from "../contracts/output-contract"
 import { stableId, type CitationRef } from "../contracts/common"
 import type { RagEvidencePack } from "../contracts/evidence-pack"
 import type { GenerationSpec } from "../contracts/generation-spec"
@@ -784,19 +786,26 @@ export function normalizeCodeLabSecureAuthorPayloadLenient(
   payload: CodeLabSecureAuthorPayload,
   plan: CodeLabSecurePlan,
   executionMode: CodeLabPublicPayload["execution_contract"]["execution_mode"],
+  publicInputs: unknown[] = [],
+  outputContract?: CodeLabPublicPayload["execution_contract"]["output_contract"],
 ): CodeLabSecureAuthorPayload {
   const normalized = structuredClone(payload)
   if (normalized.hidden_tests.length > plan.hidden_tests.length) {
     normalized.hidden_tests = normalized.hidden_tests.slice(0, plan.hidden_tests.length)
   }
   for (const test of normalized.hidden_tests) {
-    test.comparison = canonicalizeTestComparison(test.comparison as unknown, test.expected)
+    const outputKind = outputContract ? classifyOutputContract(outputContract) : undefined
+    test.comparison = outputKind === "number"
+      ? { kind: "numeric", abs_tolerance: 1e-9, rel_tolerance: 1e-9 }
+      : outputKind && outputKind !== "unknown"
+        ? { kind: "exact" }
+        : canonicalizeTestComparison(test.comparison as unknown, test.expected)
     if (test.comparison.kind === "numeric" && typeof test.expected === "string") {
       const coerced = Number(test.expected.trim())
       if (Number.isFinite(coerced)) test.expected = coerced
     }
     if (executionMode === "function") {
-      test.input = coerceFunctionInvocation(test.input)
+      test.input = chooseDistinctFunctionInput(coerceFunctionInvocation(test.input), publicInputs)
     } else {
       // stdin_stdout 模式：模型常按函数习惯写 args 封装，必须转换为 stdin 文本，
       // 否则 harness 无输入、reference 无输出，可信执行必然失败。
@@ -837,6 +846,38 @@ export function canonicalizeTestComparison(value: unknown, expected: unknown): T
  * (e.g. {"scores": [...]}) are treated as one named parameter whose value is
  * passed positionally; multi-key objects remain a single dict argument.
  */
+function flattenInputScalars(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value.flatMap(flattenInputScalars)
+  if (value && typeof value === "object") return Object.values(value as Record<string, unknown>).flatMap(flattenInputScalars)
+  return value === undefined ? [] : [value]
+}
+
+export function chooseDistinctFunctionInput(
+  input: unknown,
+  publicInputs: unknown[],
+): unknown {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input
+  const record = structuredClone(input) as Record<string, unknown>
+  if (!Array.isArray(record.args)) return input
+  const candidate = { ...record, args: [...record.args] }
+  const used = new Set(publicInputs.map((value) => JSON.stringify(value)))
+  const publicScalars = new Set(publicInputs.flatMap(flattenInputScalars).map((value) => JSON.stringify(value)))
+  const conflicts = () => used.has(JSON.stringify(candidate))
+    || flattenInputScalars(candidate).some((value) => publicScalars.has(JSON.stringify(value)))
+  for (let attempt = 0; attempt < 20 && conflicts(); attempt += 1) {
+    candidate.args = candidate.args.map((value, index) => {
+      if (index !== 0) return value
+      if (typeof value === "number") return value + 1 + attempt
+      if (typeof value === "string") return `${value}_hidden_${attempt + 1}`
+      if (typeof value === "boolean") return !value
+      if (Array.isArray(value)) return [...value, attempt + 1]
+      if (value && typeof value === "object") return { ...(value as Record<string, unknown>), __case: attempt + 1 }
+      return attempt + 1
+    })
+  }
+  return candidate
+}
+
 export function coerceFunctionInvocation(input: unknown): unknown {
   if (input === null || input === undefined) return { args: [], kwargs: {} }
   if (Array.isArray(input)) return { args: [input], kwargs: {} }
@@ -910,6 +951,21 @@ export function materializeCodeLabSecureAuthorPayload(
   return normalizeCodeLabSecure(spec, draft, publicPayload, suiteId, plan)
 }
 
+function normalizeCodeLabSecureHiddenInputs(
+  payload: CodeLabSecurePayload,
+  publicPayload: CodeLabPublicPayload,
+): CodeLabSecurePayload {
+  const normalized = structuredClone(payload)
+  if (normalized.execution_contract.execution_mode === "function") {
+    const publicInputs = publicPayload.public_tests.map((test) => test.input)
+    normalized.hidden_tests = normalized.hidden_tests.map((test) => ({
+      ...test,
+      input: chooseDistinctFunctionInput(coerceFunctionInvocation(test.input), publicInputs),
+    }))
+  }
+  return normalized
+}
+
 export function normalizeCodeLabSecure(
   spec: GenerationSpec,
   payload: CodeLabSecurePayload,
@@ -917,7 +973,7 @@ export function normalizeCodeLabSecure(
   suiteId: string,
   plan: CodeLabSecurePlan = buildCodeLabSecurePlan(spec, suiteId),
 ): CodeLabSecurePayload {
-  const normalized = structuredClone(payload)
+  const normalized = normalizeCodeLabSecureHiddenInputs(payload, publicPayload)
   normalized.lab_id = publicPayload.lab_id
   normalized.test_suite_id = suiteId
   normalized.execution_contract = structuredClone(publicPayload.execution_contract)
@@ -928,6 +984,13 @@ export function normalizeCodeLabSecure(
       ...identity,
     }
   })
+  if (normalized.execution_contract.execution_mode === "function") {
+    const publicInputs = publicPayload.public_tests.map((test) => test.input)
+    normalized.hidden_tests = normalized.hidden_tests.map((test) => ({
+      ...test,
+      input: chooseDistinctFunctionInput(test.input, publicInputs),
+    }))
+  }
   normalized.mutation_variants = plan.mutation_variants.length > 0
     ? plan.mutation_variants.map((entry, index) => ({
         ...structuredClone(payload.mutation_variants[index]!),
@@ -975,6 +1038,58 @@ export function normalizeCodeLabSecure(
   return normalized
 }
 
+export function expectedOnlyReferenceFailureCodes(feedback: { reference_failure_codes?: string[]; issues?: string[] }): string[] {
+  return feedback.reference_failure_codes
+    ?? (feedback.issues ?? []).flatMap((entry) => {
+      if (!entry.includes("reference_solution 未通过")) return []
+      const separator = entry.indexOf("：")
+      return separator >= 0 ? entry.slice(separator + 1).split(/、/).map((part) => part.trim()).filter(Boolean) : []
+    })
+}
+
+export function isExpectedOnlyReferenceFailure(failureCodes: string[] | undefined): boolean {
+  return Boolean(failureCodes?.length)
+    && failureCodes!.every((code) => {
+      const prefix = ":assertion_failed:expected="
+      const actualMarker = ":actual="
+      const prefixIndex = code.indexOf(prefix)
+      const actualIndex = code.indexOf(actualMarker, prefixIndex + prefix.length)
+      if (prefixIndex <= 0 || actualIndex < 0) return false
+      try {
+        JSON.parse(code.slice(actualIndex + actualMarker.length))
+        return true
+      } catch {
+        return false
+      }
+    })
+}
+
+export function patchExpectedFromReferenceFailures<T extends { hidden_tests: Array<{ test_id: string; expected: unknown; comparison: TestComparison }> }>(
+  securePayload: T,
+  failureCodes: string[],
+): T {
+  const patched = structuredClone(securePayload)
+  const byId = new Map(patched.hidden_tests.map((test) => [test.test_id, test]))
+  for (const code of failureCodes) {
+    const prefix = ":assertion_failed:expected="
+    const prefixIndex = code.indexOf(prefix)
+    const actualMarker = ":actual="
+    const actualIndex = code.indexOf(actualMarker, prefixIndex + prefix.length)
+    if (prefixIndex <= 0 || actualIndex < 0) continue
+    const testId = code.slice(0, prefixIndex)
+    const actualJson = code.slice(actualIndex + actualMarker.length)
+    const target = byId.get(testId)
+    if (!target) continue
+    try {
+      target.expected = JSON.parse(actualJson)
+      target.comparison = canonicalizeTestComparison(target.comparison, target.expected)
+    } catch {
+      // Keep the original expected value when the runner did not emit JSON.
+    }
+  }
+  return patched
+}
+
 /** Applies only executable semantics selected by stable IDs; structural fields remain prior-owned. */
 export function applyCodeLabExecutionRepairPatch(
   prior: CodeLabSecurePayload,
@@ -995,21 +1110,45 @@ export function applyCodeLabExecutionRepairPatch(
   return repaired
 }
 
+export function assessmentStarterIsIncomplete(starter: string | null | undefined): boolean {
+  if (!starter?.trim()) return false
+  const normalized = starter.normalize("NFKC")
+  if (/TODO|待完成|pass\b|NotImplementedError|补全|写出你的代码/u.test(normalized)) return true
+  if (/^\s*(?:print|console\.log)\s*\(/mu.test(normalized) && !/def\s+\w+\s*\(/u.test(normalized)) return false
+  return false
+}
+
+/** 确定性修复：从已有 starter_code 中提取函数签名，替换为未完成骨架。 */
+export function deterministicAssessmentStarterRepair(starter: string | null | undefined): string {
+  const source = starter?.trim() ?? ""
+  if (!source) return "def solve(data):\n    # TODO: 补全你的代码实现\n    pass\n"
+  const lines = source.split(/\r?\n/)
+  // 提取函数签名行（def 行 + 可能的装饰器）
+  const sigIndex = lines.findIndex((line) => /^\s*def\s+\w+\s*\(/.test(line))
+  if (sigIndex === -1) return "def solve(data):\n    # TODO: 补全你的代码实现\n    pass\n"
+  const sig = lines[sigIndex]!
+  const indent = sig.match(/^(\s*)/)?.[1] ?? ""
+  return `${sig}\n${indent}    # TODO: 补全你的代码实现\n${indent}    pass\n`
+}
+
+export function assessmentCompositionForBehavior(_behavior: GenerationSpec["targets"][number]["observable_behavior"]): AssessmentItemPublic["modality"][] {
+  return ["mcq", "mcq", "trace", "code", "code"]
+}
+
 export function buildAssessmentItemPlan(spec: GenerationSpec): AssessmentItemPlan[] {
   const tiers: Array<1 | 2 | 3> = [
     ...Array.from({ length: spec.assessment_blueprint.tier_1_count }, () => 1 as const),
     ...Array.from({ length: spec.assessment_blueprint.tier_2_count }, () => 2 as const),
     ...Array.from({ length: spec.assessment_blueprint.tier_3_count }, () => 3 as const),
   ]
-  const tierOffsets = new Map<number, number>()
-  const modalities = tiers.map((tier) => {
-    const offset = tierOffsets.get(tier) ?? 0
-    tierOffsets.set(tier, offset + 1)
-    if (tier === 1) return (["mcq", "true_false"] as const)[offset % 2]
-    if (tier === 2) return (["trace", "short_answer"] as const)[offset % 2]
-    return "code" as const
-  })
-  ensureRequiredModalities(modalities, tiers, spec.assessment_blueprint.required_modalities)
+  const primaryBehavior = spec.targets.find((target) => target.importance === "core")?.observable_behavior
+    ?? spec.targets[0]?.observable_behavior
+    ?? "apply"
+  const requiredComposition = assessmentCompositionForBehavior(primaryBehavior)
+  if (tiers.length !== requiredComposition.length) {
+    throw new ModelOutputValidationError("assessment.plan", ["正式测评必须固定为 5 题：2 道选择、1 道读代码、2 道代码题"])
+  }
+  const modalities = [...requiredComposition]
 
   const assignments = assignObjectives(spec, modalities)
   return tiers.map((tier, index) => {
@@ -1073,8 +1212,8 @@ export function validateAssessmentPublicAuthorAgainstPlan(
       issues.push(`items[${index}] 非选择题的 options 必须为 null`)
     }
     if (expected.modality === "code") {
-      if (!item.starter_code?.trim()) {
-        issues.push(`items[${index}] 代码题缺少 starter_code`)
+      if (!assessmentStarterIsIncomplete(item.starter_code)) {
+        issues.push(`items[${index}] 代码题必须提供明确未完成的函数 starter_code，不能直接给出完整答案`)
       }
     } else if (item.starter_code !== null) {
       issues.push(`items[${index}] 非代码题的 starter_code 必须为 null`)
@@ -1722,8 +1861,14 @@ function assignObjectives(
     if (assignments[index]) continue
     const compatible = spec.targets.filter((target) =>
       modalityMeasuresBehavior(target.observable_behavior, modalities[index]))
-    const pool = compatible.length > 0 ? compatible : spec.targets
-    assignments[index] = pool[cursor % pool.length]
+    if (compatible.length === 0) {
+      const fallbackTarget = spec.targets[cursor % spec.targets.length]!
+      modalities[index] = preferredModalityForBehavior(fallbackTarget.observable_behavior)
+      assignments[index] = fallbackTarget
+      cursor += 1
+      continue
+    }
+    assignments[index] = compatible[cursor % compatible.length]
     cursor += 1
   }
   return assignments as GenerationSpec["targets"]
