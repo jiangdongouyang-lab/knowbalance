@@ -94,12 +94,13 @@ export async function runReviewedCPipeline(
       report = deepFreeze(structuredClone(returned))
       reviewReports.push(report)
     } catch (error) {
+      const reviewFailure = reviewFailureCode(error)
       return failedCandidate(
         candidate,
         options.review_port.policy_version,
         reviewReports,
         "PROVIDER_ERROR",
-        "内容审核服务不可用或返回无效结果",
+        reviewFailure,
         pipelineInputHash,
         generationSpecHash,
       )
@@ -657,6 +658,14 @@ function blockedCandidate(
     pipeline_input_hash: pipelineInputHash,
     generation_spec_hash: generationSpecHash,
   }
+}
+
+function reviewFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : ""
+  if (/EVIDENCE_MUTATED|EVIDENCE_MISMATCH/u.test(message)) return "REVIEW_EVIDENCE_MISMATCH"
+  if (/RUN_MISMATCH|INPUT_HASH_MISMATCH|SPEC_HASH_MISMATCH|POLICY_MISMATCH|ROUND_MISMATCH/u.test(message)) return "REVIEW_IDENTITY_MISMATCH"
+  if (/RESULT_|INVALID_ARBITRATION|PASS_WITH_FINDINGS|INSTRUCTION_/u.test(message)) return "REVIEW_INVALID_RESULT"
+  return "REVIEW_TRANSPORT_ERROR"
 }
 
 function failedCandidate(

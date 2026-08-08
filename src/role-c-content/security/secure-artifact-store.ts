@@ -4,6 +4,7 @@ import { join } from "node:path"
 import type { AssessmentSecureArtifact, CodeLabSecureArtifact } from "../contracts/artifacts"
 import { contentHash } from "../contracts/common"
 import { validateRoleCSchema } from "../validators/runtime-schema-validator"
+import { protectSensitivePath } from "../../security/windows-secure-acl"
 
 export type SecureArtifact = CodeLabSecureArtifact | AssessmentSecureArtifact
 export type SecureStorePrincipal = "role-c-pipeline" | "role-c-grader" | "role-c-admin"
@@ -83,12 +84,14 @@ export class AtomicFileSecureArtifactStore implements SecureArtifactStore {
     })
     await mkdir(this.options.root_directory, { recursive: true, mode: 0o700 })
     await chmod(this.options.root_directory, 0o700)
+    await protectSensitivePath(this.options.root_directory, "directory")
     const batchToken = randomToken()
     const temporaryDirectory = join(this.options.root_directory, `.tmp-${batchToken}`)
     const finalDirectory = join(this.options.root_directory, `batch-${batchToken}`)
     const itemTokens = artifacts.map(() => randomToken())
     try {
       await mkdir(temporaryDirectory, { mode: 0o700 })
+      await protectSensitivePath(temporaryDirectory, "directory")
       for (const [index, artifact] of artifacts.entries()) {
         const artifactJson = JSON.stringify(artifact)
         const envelope: StoredEnvelope = {
@@ -99,13 +102,17 @@ export class AtomicFileSecureArtifactStore implements SecureArtifactStore {
           sha256: sha256(artifactJson),
           artifact,
         }
+        const artifactPath = join(temporaryDirectory, `${itemTokens[index]}.json`)
         await writeFile(
-          join(temporaryDirectory, `${itemTokens[index]}.json`),
+          artifactPath,
           JSON.stringify(envelope),
           { encoding: "utf8", flag: "wx", mode: 0o600 },
         )
+        await protectSensitivePath(artifactPath, "file")
       }
       await rename(temporaryDirectory, finalDirectory)
+      await chmod(finalDirectory, 0o700).catch(() => undefined)
+      await protectSensitivePath(finalDirectory, "directory")
       return itemTokens.map((itemToken) => secureRef(batchToken, itemToken))
     } catch (error) {
       await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined)

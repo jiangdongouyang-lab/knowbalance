@@ -1,10 +1,12 @@
 # Role C 内容生成与学习闭环设计
 
+> **实现状态标注（2026-08-08）**：本文描述的是 Role C **服务层能力设计**。其中"锚点优先测评 / 得分选路 / 路线冻结"（`routeRoleCAssessmentAnchors` / `openAnchorFirstSession`）在 **C 服务层仍然保留**并有独立测试，但**主 Agent 交互会话已不再调用**——正式测评直接按 B 初始画像生成整套五题 code-pair（mcq + true_false + trace + code 2 分 + code 4 分），每轮方向由正式测评分数决策（remediate/reinforce/advance/reprofile），无需锚点题。主 Agent 层的 `submit_anchor_answers` 命令及相关字段已彻底删除。
+
 | 项目 | 内容 |
 |---|---|
 | 设计版本 | 3.5 |
 | Schema 版本 | 1.0 |
-| Prompt manifest | `c-prompts-1.16.2` |
+| Prompt manifest | `c-prompts-1.16.7` |
 | 实现目录 | `src/role-c-content/` |
 | Schema 目录 | `schemas/role-c-content/` |
 | 自动检查 | `bun run check` |

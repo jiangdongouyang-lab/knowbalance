@@ -1,34 +1,44 @@
-import { mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { chmod, mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
 import { createHash, randomUUID } from "node:crypto"
-import { contentHash } from "../role-c-content/contracts/common"
 import { join } from "node:path"
 import { loadKnowledgeBase } from "../knowledge/loader"
 import { resolveLearningGoalSpec } from "../knowledge/curriculum"
 import { selectDiagnosticItems } from "../knowledge/diagnostic-selector"
-import { loadLearnerMemory } from "./learner-memory"
+import { loadLearnerMemory, saveLearnerMemory, appendPersistenceEvents, type PersistenceEvent } from "./learner-memory"
 import { createScaffoldWorkerInvocation, runWorkerAdapter } from "./worker-adapters"
 import { ORCHESTRATION_WORKER_SEQUENCE } from "./state-machine"
 import { validateWorkerResult } from "./worker-contract"
 import type { LearnerRequest, OrchestrationMode, WorkerName } from "./types"
 import type { BackgroundEvidence, DiagnosisItem, ObjectiveDiagnosisEvidence, SelfAssessmentEvidence } from "../role-b-profile/types"
-import type { AssessmentPublicArtifact, AssessmentSecureArtifact, SubmissionAnswer } from "../role-c-content/contracts/artifacts"
+import type { SubmissionAnswer } from "../role-c-content/contracts/artifacts"
 import type { NextRoundGenerationContext } from "../role-c-content/agents/types"
 import type { RoleCAdaptationInfo } from "../role-c-content/contracts/external-api"
 import type { DynamicFeedbackResult, ObjectiveRoundResult } from "../role-c-content/contracts/dynamic-feedback"
+import { DEFAULT_ROUND_ACTION_POLICY } from "../role-c-content/contracts/dynamic-feedback"
+import type { RagResult } from "../rag/retriever"
+import { retrieveStructuredEvidenceFromKnowledgeBase } from "../rag/structured-evidence"
 import {
   createAtomicRoleCLearningPersistence,
   generateRoleCForRoleDWithRuntime,
-  routeRoleCAssessmentAnchors,
+  runRoleCAssessmentCode,
   submitRoleCAssessment,
+  createRoleCRecoveryEvidenceRefreshPort,
   type RoleCForRoleDRuntimeOptions,
 } from "../role-d-integration/role-c-service"
+import { roleCGenerationBudgets, shouldRetryWholeGenerationReason } from "../role-d-integration/generation-budget"
 import type { LearnerProfile } from "../role-b-profile/types"
-import type { RagResult } from "../rag/retriever"
-import { advanceToNextNode, type FormalLearningPath } from "../role-b-profile/teaching-audit/formal-path"
 import type { LearningPathNode } from "../role-c-content/contracts/profile-adapter"
+import { buildFormalPath, advanceToNextNode, type FormalLearningPath } from "../role-b-profile/teaching-audit/formal-path"
+import { RoleBLearningProgressAdapter } from "../role-b-profile/teaching-audit/learning-progress-adapter"
+import { createLocalBPathPlanningPort } from "../role-c-content/review/local-b-path-planning-port"
+import type { KnowledgeBase } from "../knowledge/types"
+import type { LearnerProfileSnapshot } from "../role-c-content/contracts/profile-adapter"
 
 export type InteractiveSessionStatus = "waiting_for_user" | "running" | "completed" | "blocked" | "failed"
 export type InteractiveStage = "objective_diagnosis" | "assessment" | "completed" | "blocked" | "failed"
+
+/** 会话锁超过该时长（毫秒）视为陈旧：持有进程可能已崩溃，允许接管。 */
+const STALE_LOCK_MS = 60_000
 
 export interface PublicWorkerLedgerEntry {
   worker: WorkerName
@@ -58,6 +68,7 @@ export interface PublicDiagnosisItem {
 
 export interface InteractiveSessionRecord {
   schema_version: "1.0"
+  revision: number
   session_id: string
   run_id: string
   owner_id: string
@@ -67,18 +78,8 @@ export interface InteractiveSessionRecord {
   current_stage: InteractiveStage
   round_no: number
   waiting_for: null | {
-    type: "diagnosis_answers" | "anchor_answers" | "assessment_answers" | "clarification_answer"
+    type: "diagnosis_answers" | "assessment_answers" | "clarification_answer"
     items: unknown[]
-  }
-  /** 锚点路由状态：生成后为 ANCHOR_PENDING，锚点提交后为 ROUTE_LOCKED。 */
-  anchor_routing: null | {
-    phase: "ANCHOR_PENDING" | "ROUTE_LOCKED"
-    routing_request_id: string
-    anchor_item_ids: string[]
-    route_id?: string
-    action?: "remediate" | "reinforce" | "advance"
-    anchor_score_ratio?: number
-    required_item_ids?: string[]
   }
   worker_ledger: PublicWorkerLedgerEntry[]
   profile: unknown | null
@@ -89,6 +90,8 @@ export interface InteractiveSessionRecord {
   assessment: unknown | null
   /** 本轮生成相对上一轮的适配信息（remediate/reinforce 时存在）。 */
   adaptation: unknown | null
+  /** 最近一次正式测评代码运行的公开摘要；不含隐藏测试、参考答案或私有套件。 */
+  code_execution: unknown | null
   feedback: unknown | null
   blocked_reason: string | null
   events: InteractiveEvent[]
@@ -100,9 +103,14 @@ export interface InteractiveSessionRecord {
     upstream_artifacts: Record<string, unknown>
     /** 评分后暂存给后台生成的下一轮上下文；生成完成即清空。 */
     next_round_context: NextRoundGenerationContext | null
-    /** 锚点作答答案（路由锁定后暂存，最终提交时自动透传给 C 做一致性校验）。 */
-    anchor_answers: SubmissionAnswer[] | null
     role_c_generation_attempt: number
+    /** 画像纪元：初始 0，reprofile 重建画像时 +1，作为 profile_version 的一部分，
+     *  使新画像的 mastery 状态不与旧画像累积串扰（旧画像 evidence 不污染新画像）。 */
+    profile_epoch: number
+    /** 当前节点内已发生的补救轮次计数（advance/reprofile 时清零）。 */
+    node_remediate_rounds: number
+    /** 当前节点内已发生的巩固强化轮次计数（advance/reprofile 时清零）。 */
+    node_reinforce_rounds: number
     role_c: null | {
       data_directory: string
       session_id: string
@@ -116,7 +124,7 @@ export interface InteractiveSessionRecord {
   updated_at: string
 }
 
-export type InteractiveSessionPublicView = Omit<InteractiveSessionRecord, "private" | "processed_commands" | "learner_request" | "owner_id" | "events"> & {
+export type InteractiveSessionPublicView = Omit<InteractiveSessionRecord, "revision" | "private" | "processed_commands" | "learner_request" | "owner_id" | "events"> & {
   events?: never
 }
 
@@ -130,9 +138,11 @@ export interface CreateInteractiveSessionInput {
 
 export interface InteractiveSessionCommand {
   command_id: string
-  type: "submit_diagnosis_answers" | "submit_anchor_answers" | "submit_assessment_answers" | "retry"
+  type: "submit_diagnosis_answers" | "submit_assessment_answers" | "run_assessment_code" | "retry"
   payload?: {
     answers?: Record<string, string> | SubmissionAnswer[]
+    item_id?: string
+    code?: string
   }
 }
 
@@ -198,6 +208,7 @@ export class InteractiveSessionStore {
     ]
     const record: InteractiveSessionRecord = {
       schema_version: "1.0",
+      revision: 0,
       session_id: sessionId,
       run_id: safeId(input.run_id ?? `RUN-${randomUUID()}`),
       owner_id: input.owner_id,
@@ -219,16 +230,16 @@ export class InteractiveSessionStore {
       learning_resources: { concept_lesson: null, code_lab: null },
       assessment: null,
       adaptation: null,
-      anchor_routing: null,
       feedback: null,
       blocked_reason: null,
       events,
       processed_commands: {},
-      private: { diagnosis_answer_key: answerKey, diagnosis_answers: null, diagnosis_items: diagnosisItems, upstream_artifacts: {}, next_round_context: null, anchor_answers: null, role_c_generation_attempt: 0, role_c: null },
+      private: { diagnosis_answer_key: answerKey, diagnosis_answers: null, diagnosis_items: diagnosisItems, upstream_artifacts: {}, next_round_context: null, role_c_generation_attempt: 0, profile_epoch: 0, node_remediate_rounds: 0, node_reinforce_rounds: 0, role_c: null },
+      code_execution: null,
       created_at: now,
       updated_at: now,
     }
-    await this.save(record)
+    await this.save(record, null)
     return record
   }
 
@@ -236,6 +247,62 @@ export class InteractiveSessionStore {
     const record = await this.loadOptional(safeId(sessionId))
     if (!record) throw new InteractiveSessionError("SESSION_NOT_FOUND", `Session ${sessionId} was not found`, 404)
     return record
+  }
+
+  /** 已有旧会话若含 short_answer 或学习资源目标与当前B节点不一致，后台按当前节点重新生成。 */
+  async repairLegacyAssessment(sessionId: string): Promise<InteractiveSessionPublicView> {
+    const safeSessionId = safeId(sessionId)
+    return this.withSessionLock(safeSessionId, async () => {
+      const record = await this.load(safeSessionId)
+      const staleResources = learningResourcesTargetOtherNode(record)
+      if ((!assessmentHasShortAnswer(record.assessment) && !staleResources)
+        || record.status !== "waiting_for_user"
+        || !record.profile || !record.formal_path || !record.current_path_node || !record.rag_result) {
+        return publicSessionView(record)
+      }
+      record.status = "running"
+      record.current_stage = "assessment"
+      record.waiting_for = null
+      record.blocked_reason = null
+      record.private.role_c_generation_attempt = (record.private.role_c_generation_attempt ?? 0) + 1
+      record.updated_at = new Date().toISOString()
+      record.events.push(event(record.session_id, "session_updated", "assessment", staleResources ? "学习资源与当前节点不一致，正在通过C按当前节点重新生成" : "旧测评含简答题，正在通过C重新生成代码题", record.updated_at, "tiered-evaluator"))
+      const response = publicSessionView(record)
+      await this.save(record)
+      void this.repairLegacyAssessmentInBackground(safeSessionId)
+      return response
+    })
+  }
+
+  private async repairLegacyAssessmentInBackground(sessionId: string): Promise<void> {
+    try {
+      const record = structuredClone(await this.load(sessionId))
+      const path = record.formal_path as FormalLearningPath
+      const node = record.current_path_node as LearningPathNode
+      const canonicalNode = bindPathNodeFactsForRoleC(node, record.rag_result as RagResult)
+      const next = await generateFormalRoleCRound(record, path, canonicalNode, this.data_root)
+      const current = await this.load(sessionId)
+      if (current.status !== "running" || current.round_no !== record.round_no) return
+      if (!next.ok) {
+        current.status = "blocked"
+        current.current_stage = "blocked"
+        current.blocked_reason = next.reason
+        current.updated_at = new Date().toISOString()
+        await this.save(current)
+        return
+      }
+      applyFormalRoleCRound(current, next)
+      current.updated_at = new Date().toISOString()
+      await this.save(current)
+    } catch (error) {
+      const current = await this.loadOptional(sessionId)
+      if (!current || current.status !== "running") return
+      current.status = "blocked"
+      current.current_stage = "blocked"
+      current.blocked_reason = error instanceof Error ? error.message : "旧测评格式修复失败"
+      current.updated_at = new Date().toISOString()
+      await this.save(current)
+    }
   }
 
   async command(sessionId: string, command: InteractiveSessionCommand): Promise<InteractiveSessionPublicView> {
@@ -268,13 +335,18 @@ export class InteractiveSessionStore {
         throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not waiting for diagnosis answers", 409)
       }
       updated = await continueAfterDiagnosis(record, command, this.data_root)
-    } else if (command.type === "submit_anchor_answers") {
-      const waitingAnchor = record.waiting_for?.type === "anchor_answers"
-      const routeLocked = record.anchor_routing?.phase === "ROUTE_LOCKED"
-      if (record.status !== "waiting_for_user" || (!waitingAnchor && !routeLocked)) {
-        throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not waiting for anchor answers", 409)
+    } else if (command.type === "run_assessment_code") {
+      if (record.status !== "waiting_for_user" || record.waiting_for?.type !== "assessment_answers") {
+        throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not waiting for assessment code", 409)
       }
-      updated = await continueAfterAnchorAnswers(record, command, this.data_root)
+      const itemId = command.payload?.item_id
+      const code = command.payload?.code
+      const roleC = record.private.role_c
+      if (!roleC || !itemId || !code) throw new InteractiveSessionError("INVALID_COMMAND", "run_assessment_code requires item_id and code", 400)
+      const result = await runRoleCAssessmentCode({ executionId: `EXEC-${record.session_id}-${command.command_id}`, sessionId: roleC.session_id, runId: roleC.run_id, learnerId: roleC.learner_id, itemId, code }, roleCRuntime(this.data_root))
+      record.code_execution = result
+      record.updated_at = new Date().toISOString()
+      updated = record
     } else if (command.type === "submit_assessment_answers") {
       if (record.status !== "waiting_for_user" || record.waiting_for?.type !== "assessment_answers") {
         throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not waiting for assessment answers", 409)
@@ -282,14 +354,49 @@ export class InteractiveSessionStore {
       updated = await continueAfterAssessment(record, command, this.data_root)
       // 评分已返回；下一轮内容后台生成，完成后写回会话（前端轮询状态）。
       if (updated.status === "running" && updated.private.next_round_context) {
-        void this.generateNextRoundInBackground(
-          sessionId,
-          updated.private.next_round_context,
-        )
+        // 先由本方法保存 running 检查点，再启动后台任务，避免后台读取到旧快照。
+        const response = publicSessionView(updated)
+        updated.processed_commands[command.command_id] = { request_hash: requestHash, response }
+        await this.save(updated)
+        void this.generateNextRoundInBackground(sessionId, updated.private.next_round_context)
+        return response
       }
     } else {
-      if (record.status !== "blocked" && record.status !== "failed") {
+      const resumableNextRound = Boolean(record.private.next_round_context && record.formal_path && record.current_path_node)
+      // running 会话的后台生成进程可能随服务重启中断（nrc 为 null 但 checkpoint 完整）：
+      // 允许这类会话进入 retryInteractiveSession，由其按当前节点重新生成或恢复等待。
+      const resumeableCheckpoint = Boolean(record.private.role_c && record.assessment && record.current_path_node && record.formal_path)
+      if (record.status !== "blocked" && record.status !== "failed" && !(record.status === "running" && (resumableNextRound || resumeableCheckpoint))) {
         throw new InteractiveSessionError("COMMAND_NOT_ALLOWED", "This session is not blocked and cannot be retried", 409)
+      }
+      if (resumableNextRound) {
+        record.status = "running"
+        record.current_stage = "assessment"
+        record.waiting_for = null
+        record.blocked_reason = null
+        record.private.role_c_generation_attempt = (record.private.role_c_generation_attempt ?? 0) + 1
+        record.updated_at = new Date().toISOString()
+        record.events.push(event(record.session_id, "session_updated", "assessment", `round ${record.round_no} generation resumed from persisted feedback`, record.updated_at, "tiered-evaluator"))
+        const response = publicSessionView(record)
+        record.processed_commands[command.command_id] = { request_hash: requestHash, response }
+        await this.save(record)
+        // 持久化上下文可能携带上一轮节点目标（advance 旧缺陷）：C 合同要求
+        // focus 非空、不重复且属于当前 GenerationSpec，先对齐到当前节点目标再生成。
+        const node = record.current_path_node as LearningPathNode | null
+        const nodeObjectiveIds = (node?.objectives ?? [])
+          .map((objective) => objective.objective_id)
+          .filter((objectiveId): objectiveId is string => Boolean(objectiveId))
+        const persistedContext = record.private.next_round_context!
+        const persistedFocus = Array.isArray(persistedContext.focus_objective_ids)
+          ? persistedContext.focus_objective_ids
+          : []
+        const focusMatchesCurrentNode = persistedFocus.length > 0
+          && persistedFocus.every((objectiveId: string) => nodeObjectiveIds.includes(objectiveId))
+        const retryContext = focusMatchesCurrentNode
+          ? persistedContext
+          : { ...persistedContext, focus_objective_ids: nodeObjectiveIds }
+        void this.generateNextRoundInBackground(sessionId, retryContext)
+        return response
       }
       updated = await retryInteractiveSession(record, this.data_root)
     }
@@ -300,13 +407,39 @@ export class InteractiveSessionStore {
     return response
   }
 
-  async save(record: InteractiveSessionRecord): Promise<void> {
+  async save(record: InteractiveSessionRecord, expectedRevision: number | null = record.revision): Promise<void> {
     const dir = join(this.data_root, "sessions")
-    await mkdir(dir, { recursive: true })
+    await mkdir(dir, { recursive: true, mode: 0o700 })
+    await chmod(dir, 0o700).catch(() => undefined)
     const path = join(dir, `${safeId(record.session_id)}.json`)
-    const temporary = `${path}.${process.pid}.${Date.now()}.tmp`
-    await writeFile(temporary, `${JSON.stringify(record, null, 2)}\n`, "utf8")
-    await rename(temporary, path)
+    let current: InteractiveSessionRecord | null = null
+    try {
+      current = normalizeSessionRecord(JSON.parse(await readFile(path, "utf8")) as InteractiveSessionRecord)
+    } catch (error) {
+      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
+    }
+    if (expectedRevision === null) {
+      if (current || record.revision !== 0) {
+        throw new InteractiveSessionError("SESSION_REVISION_CONFLICT", `Session ${record.session_id} creation revision conflict`, 409)
+      }
+    } else if (!current || current.revision !== expectedRevision || record.revision !== expectedRevision) {
+      throw new InteractiveSessionError("SESSION_REVISION_CONFLICT", `Session ${record.session_id} revision conflict`, 409)
+    }
+    const persisted = structuredClone(record)
+    if (expectedRevision !== null) persisted.revision = expectedRevision + 1
+    const temporary = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
+    try {
+      await writeFile(temporary, `${JSON.stringify(persisted, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      })
+      await rename(temporary, path)
+      await chmod(path, 0o600).catch(() => undefined)
+      record.revision = persisted.revision
+    } catch (error) {
+      await rm(temporary, { force: true }).catch(() => undefined)
+      throw error
+    }
   }
 
   /**
@@ -323,10 +456,11 @@ export class InteractiveSessionStore {
       const path = record.formal_path as FormalLearningPath | null
       const node = record.current_path_node as LearningPathNode | null
       if (!path || !node) throw new Error("next round generation missing path or node")
+      const canonicalNode = record.rag_result ? bindPathNodeFactsForRoleC(node, record.rag_result as RagResult) : node
       const next = await generateFormalRoleCRound(
         record,
         path,
-        node,
+        canonicalNode,
         this.data_root,
         nextRoundContext,
       )
@@ -376,22 +510,43 @@ export class InteractiveSessionStore {
     const lockDirectory = join(this.data_root, "locks")
     await mkdir(lockDirectory, { recursive: true })
     const lockPath = join(lockDirectory, `${safeId(sessionId)}.lock`)
+    const ownerToken = randomUUID()
     let handle: Awaited<ReturnType<typeof open>> | undefined
     for (let attempt = 0; attempt < 200; attempt += 1) {
       try {
         handle = await open(lockPath, "wx")
+        const now = Date.now()
+        await handle.writeFile(JSON.stringify({ owner_token: ownerToken, pid: process.pid, acquired_at: now, heartbeat_at: now }))
         break
       } catch (error) {
         if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error
+        const stale = await staleLockIdentity(lockPath)
+        if (stale) {
+          await removeStaleLock(lockPath, stale)
+          continue
+        }
         await Bun.sleep(10)
       }
     }
     if (!handle) throw new InteractiveSessionError("SESSION_BUSY", `Session ${sessionId} is busy`, 409)
+    // The lock's authority is the owner token stored in the file, not an open
+    // descriptor. Close it before heartbeat replacement so Windows permits the
+    // atomic rename of the refreshed lock file.
+    await handle.close()
+    handle = undefined
+    let heartbeatRunning = false
+    const heartbeat = setInterval(() => {
+      if (heartbeatRunning) return
+      heartbeatRunning = true
+      void refreshOwnedLock(lockPath, ownerToken)
+        .catch(() => undefined)
+        .finally(() => { heartbeatRunning = false })
+    }, Math.min(500, Math.max(100, Math.floor(STALE_LOCK_MS / 3))))
     try {
       return await action()
     } finally {
-      await handle.close().catch(() => undefined)
-      await rm(lockPath, { force: true }).catch(() => undefined)
+      clearInterval(heartbeat)
+      await releaseOwnedLock(lockPath, ownerToken)
     }
   }
 
@@ -406,11 +561,78 @@ export class InteractiveSessionStore {
   }
 }
 
+interface LockIdentity {
+  owner_token?: string
+  heartbeat_at?: number
+  mtime_ms?: number
+}
+
+/** 锁文件是否陈旧：使用 owner heartbeat；老格式回退到 mtime。 */
+async function staleLockIdentity(lockPath: string): Promise<LockIdentity | null> {
+  try {
+    const parsed = JSON.parse(await readFile(lockPath, "utf8")) as { owner_token?: unknown; heartbeat_at?: unknown }
+    if (typeof parsed.heartbeat_at === "number" && Number.isFinite(parsed.heartbeat_at)) {
+      return Date.now() - parsed.heartbeat_at > STALE_LOCK_MS
+        ? { owner_token: typeof parsed.owner_token === "string" ? parsed.owner_token : undefined, heartbeat_at: parsed.heartbeat_at }
+        : null
+    }
+    const metadata = await stat(lockPath)
+    return Date.now() - metadata.mtimeMs > STALE_LOCK_MS ? { mtime_ms: metadata.mtimeMs } : null
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return {}
+    return null
+  }
+}
+
+async function removeStaleLock(lockPath: string, expected: LockIdentity): Promise<void> {
+  try {
+    if (expected.owner_token !== undefined || expected.heartbeat_at !== undefined) {
+      const current = JSON.parse(await readFile(lockPath, "utf8")) as { owner_token?: unknown; heartbeat_at?: unknown }
+      if (current.owner_token !== expected.owner_token || current.heartbeat_at !== expected.heartbeat_at) return
+    } else if (expected.mtime_ms !== undefined) {
+      if ((await stat(lockPath)).mtimeMs !== expected.mtime_ms) return
+    }
+    await rm(lockPath)
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return
+    throw error
+  }
+}
+
+async function refreshOwnedLock(lockPath: string, ownerToken: string): Promise<void> {
+  const parsed = JSON.parse(await readFile(lockPath, "utf8")) as { owner_token?: unknown; heartbeat_at?: unknown }
+  if (parsed.owner_token !== ownerToken) return
+  const now = Math.max(Date.now(), Number(parsed.heartbeat_at ?? 0) + 1)
+  const temporary = `${lockPath}.${ownerToken}.heartbeat.tmp`
+  await writeFile(temporary, JSON.stringify({ ...parsed, owner_token: ownerToken, heartbeat_at: now }), "utf8")
+  const current = JSON.parse(await readFile(lockPath, "utf8")) as { owner_token?: unknown }
+  if (current.owner_token !== ownerToken) {
+    await rm(temporary, { force: true })
+    return
+  }
+  await rename(temporary, lockPath)
+}
+
+async function releaseOwnedLock(lockPath: string, ownerToken: string): Promise<void> {
+  try {
+    const parsed = JSON.parse(await readFile(lockPath, "utf8")) as { owner_token?: unknown }
+    if (parsed.owner_token === ownerToken) await rm(lockPath)
+  } catch (error) {
+    if (error instanceof Error && "code" in error && error.code === "ENOENT") return
+    throw error
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+}
+
 /** 旧版本会话字段迁移：缺失的新增字段补默认值，避免 undefined 访问。 */
 function normalizeSessionRecord(record: InteractiveSessionRecord): InteractiveSessionRecord {
-  return {
+  const normalized: InteractiveSessionRecord = {
     ...record,
-    anchor_routing: record.anchor_routing ?? null,
+    revision: Number.isSafeInteger(record.revision) && record.revision >= 0 ? record.revision : 0,
+    code_execution: record.code_execution ?? null,
     adaptation: record.adaptation ?? null,
     private: {
       diagnosis_answer_key: record.private?.diagnosis_answer_key ?? {},
@@ -418,11 +640,18 @@ function normalizeSessionRecord(record: InteractiveSessionRecord): InteractiveSe
       diagnosis_items: record.private?.diagnosis_items ?? [],
       upstream_artifacts: record.private?.upstream_artifacts ?? {},
       next_round_context: record.private?.next_round_context ?? null,
-      anchor_answers: record.private?.anchor_answers ?? null,
       role_c_generation_attempt: record.private?.role_c_generation_attempt ?? 0,
+      profile_epoch: record.private?.profile_epoch ?? 0,
+      node_remediate_rounds: record.private?.node_remediate_rounds ?? 0,
+      node_reinforce_rounds: record.private?.node_reinforce_rounds ?? 0,
       role_c: record.private?.role_c ?? null,
     },
   }
+  // 剥离已废弃字段（锚点路由移除后的历史残留），防止经 publicSessionView 泄露给 D。
+  delete (normalized as unknown as Record<string, unknown>).anchor_routing
+  const privateRecord = normalized.private as unknown as Record<string, unknown>
+  delete privateRecord.anchor_answers
+  return normalized
 }
 
 export function publicSessionView(record: InteractiveSessionRecord): InteractiveSessionPublicView {
@@ -454,10 +683,9 @@ async function retryInteractiveSession(
     }
     // 重试生成：递增尝试序号避免 run_id 碰撞，并携带暂存的下一轮上下文。
     record.private.role_c_generation_attempt = (record.private.role_c_generation_attempt ?? 0) + 1
-    record.anchor_routing = null
-    record.private.anchor_answers = null
     const retryContext = record.private.next_round_context ?? undefined
-    const next = await generateFormalRoleCRound(record, path, node, dataRoot, retryContext)
+    const currentNode = record.rag_result ? bindPathNodeFactsForRoleC(node, record.rag_result as RagResult) : node
+    const next = await generateFormalRoleCRound(record, path, currentNode, dataRoot, retryContext)
     if (!next.ok) {
       record.status = "blocked"
       record.current_stage = "blocked"
@@ -468,20 +696,48 @@ async function retryInteractiveSession(
       return record
     }
     applyFormalRoleCRound(record, next)
+    record.private.next_round_context = null
+    record.updated_at = new Date().toISOString()
+    return record
+  }
+  if (record.private.next_round_context && record.formal_path && record.current_path_node) {
+    const path = record.formal_path as FormalLearningPath
+    const node = record.current_path_node as LearningPathNode
+    record.private.role_c_generation_attempt = (record.private.role_c_generation_attempt ?? 0) + 1
+    // 旧持久化上下文可能带空 focus（advance 满分反馈无 objective_results 的旧缺陷）；
+    // C 合同要求 focus 非空且属于当前节点目标，空时用当前节点目标补齐。
+    const nodeObjectiveIds = (node.objectives ?? [])
+      .map((objective) => objective.objective_id)
+      .filter((objectiveId): objectiveId is string => Boolean(objectiveId))
+    const persistedContext = record.private.next_round_context
+    const persistedFocus = Array.isArray(persistedContext.focus_objective_ids)
+      ? persistedContext.focus_objective_ids
+      : []
+    const focusMatchesCurrentNode = persistedFocus.length > 0
+      && persistedFocus.every((objectiveId: string) => nodeObjectiveIds.includes(objectiveId))
+    const retryContext = focusMatchesCurrentNode
+      ? persistedContext
+      : { ...persistedContext, focus_objective_ids: nodeObjectiveIds }
+    const currentNode = record.rag_result ? bindPathNodeFactsForRoleC(node, record.rag_result as RagResult) : node
+    const next = await generateFormalRoleCRound(record, path, currentNode, dataRoot, retryContext)
+    if (!next.ok) {
+      record.status = "blocked"
+      record.current_stage = "blocked"
+      record.waiting_for = null
+      record.blocked_reason = next.reason
+      record.events.push(event(record.session_id, "session_blocked", "blocked", next.reason, new Date().toISOString()))
+      record.updated_at = new Date().toISOString()
+      return record
+    }
+    applyFormalRoleCRound(record, next)
+    record.private.next_round_context = null
     record.updated_at = new Date().toISOString()
     return record
   }
   if (record.private.role_c && record.assessment && record.current_path_node && record.formal_path) {
     record.status = "waiting_for_user"
     record.current_stage = "assessment"
-    if (record.anchor_routing?.phase === "ANCHOR_PENDING") {
-      record.waiting_for = {
-        type: "anchor_answers",
-        items: anchorItemsOf(record.assessment, record.anchor_routing.anchor_item_ids),
-      }
-    } else {
-      record.waiting_for = { type: "assessment_answers", items: assessmentItems(record.assessment) }
-    }
+    record.waiting_for = { type: "assessment_answers", items: assessmentItems(record.assessment) }
     record.events.push(event(record.session_id, "session_updated", "assessment", "retry restored the assessment checkpoint", new Date().toISOString()))
     record.updated_at = new Date().toISOString()
     return record
@@ -490,7 +746,8 @@ async function retryInteractiveSession(
   const node = record.current_path_node as LearningPathNode | null
   if (record.profile && path && node && record.rag_result) {
     record.private.role_c_generation_attempt = (record.private.role_c_generation_attempt ?? 0) + 1
-    const next = await generateFormalRoleCRound(record, path, node, dataRoot)
+    const currentNode = bindPathNodeFactsForRoleC(node, record.rag_result as RagResult)
+    const next = await generateFormalRoleCRound(record, path, currentNode, dataRoot)
     if (!next.ok) {
       record.status = "blocked"
       record.current_stage = "blocked"
@@ -534,17 +791,27 @@ async function continueAfterAssessment(
   }
 
   const submissionId = `SUB-${record.session_id}-R${record.round_no}-${command.command_id}`
-  // 锚点路由后：学习者只作答路由新增题，锚点题答案自动透传（C 校验与冻结路由一致）。
-  const fullAnswers = mergeAnchorAnswers(answers, record.private.anchor_answers)
-  const outcome = await submitRoleCAssessment({
-    sessionId: roleC.session_id,
-    runId: roleC.run_id,
-    learnerId: roleC.learner_id,
-    formId: roleC.form_id,
-    attemptNo: roleC.attempt_no,
-    submissionId,
-    answers: fullAnswers,
-  }, roleCRuntime(dataRoot))
+  let outcome: Awaited<ReturnType<typeof submitRoleCAssessment>>
+  try {
+    outcome = await submitRoleCAssessment({
+      sessionId: roleC.session_id,
+      runId: roleC.run_id,
+      learnerId: roleC.learner_id,
+      formId: roleC.form_id,
+      attemptNo: roleC.attempt_no,
+      submissionId,
+      answers,
+    }, roleCRuntime(dataRoot))
+  } catch (error) {
+    // 评分服务异常（Docker runner、文件存储、并发冲突等）：转为可恢复的
+    // blocked 并落盘原因，避免裸抛 500 且会话时间线无痕迹。
+    record.status = "blocked"
+    record.current_stage = "blocked"
+    record.blocked_reason = `评分服务暂时不可用：${error instanceof Error ? error.message : "unknown grading error"}`
+    record.events.push(event(record.session_id, "session_blocked", "blocked", record.blocked_reason, new Date().toISOString(), "tiered-evaluator"))
+    record.updated_at = new Date().toISOString()
+    return record
+  }
   if (outcome.status === "blocked") {
     record.status = "blocked"
     record.current_stage = "blocked"
@@ -572,15 +839,38 @@ async function continueAfterAssessment(
       code_response: answer.code_response ?? null,
     })),
   }
+  // 评分证据写回 learner-memory：跨会话学习记忆必须随真实作答更新，
+  // 否则同一 learner 新会话诊断永远读不到历史掌握情况（此前交互流程只读不写）。
+  await persistMasteryToLearnerMemory(record, outcome.feedback, dataRoot)
+  // 通知 B 本轮评分结果：B 侧画像随 formal assessment 更新，
+  // 确保 reprofile 决策和下一会话诊断基于最新学习进展。
+  await reportProgressToBAfterGrading(record, outcome.feedback, dataRoot)
   record.events.push(event(record.session_id, "command_received", "assessment", "Role C accepted and graded assessment answers", new Date().toISOString(), "tiered-evaluator"))
   // 画像漂移：不推进路径、不生成下一轮，回到诊断阶段重建学习者画像。
   if (outcome.feedback.final_decision.action === "reprofile") {
     return resetToDiagnosisPhase(record, dataRoot)
   }
+
+  // 轮次上限保护：同一节点内 remediate/reinforce 各有一个上限，超过后
+  // 强制 advance（即使准确率未达标），避免学习者无限循环在同一节点。
+  let decisionAction = outcome.feedback.final_decision.action
+  if (decisionAction === "remediate") {
+    record.private.node_remediate_rounds = (record.private.node_remediate_rounds ?? 0) + 1
+    if (record.private.node_remediate_rounds > MAX_REMEDIATE_ROUNDS_PER_NODE) {
+      decisionAction = "advance"
+      record.events.push(event(record.session_id, "session_updated", "assessment", `remediate 轮次达到上限(${MAX_REMEDIATE_ROUNDS_PER_NODE})，强制推进下一节点`, new Date().toISOString(), "tiered-evaluator"))
+    }
+  } else if (decisionAction === "reinforce") {
+    record.private.node_reinforce_rounds = (record.private.node_reinforce_rounds ?? 0) + 1
+    if (record.private.node_reinforce_rounds > MAX_REINFORCE_ROUNDS_PER_NODE) {
+      decisionAction = "advance"
+      record.events.push(event(record.session_id, "session_updated", "assessment", `reinforce 轮次达到上限(${MAX_REINFORCE_ROUNDS_PER_NODE})，强制推进下一节点`, new Date().toISOString(), "tiered-evaluator"))
+    }
+  }
   const advance = advanceToNextNode({
     path,
     updatedProfileSnapshot: path.profile_snapshot,
-    decisionAction: outcome.feedback.final_decision.action,
+    decisionAction,
   })
   record.formal_path = advance.path
   if (advance.pathCompleted || !advance.nextPathNode) {
@@ -593,13 +883,20 @@ async function continueAfterAssessment(
     return record
   }
 
+  // 推进到下一节点：本节点轮次计数清零，新节点重新计数。
   record.current_path_node = advance.nextPathNode
+  record.private.node_remediate_rounds = 0
+  record.private.node_reinforce_rounds = 0
   record.private.role_c_generation_attempt = 0
   record.round_no += 1
+  const nextNodeObjectives = ((record.current_path_node as LearningPathNode | null)?.objectives ?? [])
+    .map((objective) => objective.objective_id)
+    .filter((objectiveId): objectiveId is string => Boolean(objectiveId))
   const nextRoundContext = buildNextRoundContext(
     outcome.feedback,
     roleC.run_id,
     `NRC-${record.session_id}-R${record.round_no}`,
+    nextNodeObjectives,
   )
   // 提交响应先返回评分反馈：下一轮内容在后台生成，前端轮询会话状态。
   record.status = "running"
@@ -619,6 +916,106 @@ async function continueAfterAssessment(
   return record
 }
 
+// 通知 B 本轮评分结果：B 侧画像随 formal assessment 更新，
+// 确保 reprofile 决策和下一会话诊断基于最新学习进展。
+async function reportProgressToBAfterGrading(
+  record: InteractiveSessionRecord,
+  feedback: DynamicFeedbackResult,
+  dataRoot: string,
+): Promise<void> {
+  try {
+    const learnerId = record.learner_request.learner_id ?? record.session_id
+    const node = record.current_path_node as LearningPathNode | null
+    if (!node) return
+    const knowledgeBase = await loadKnowledgeBase()
+    const progressPort = new RoleBLearningProgressAdapter({
+      knowledgeBase,
+      learners: [{
+        learnerIdHash: learnerId,
+        currentProfile: record.profile as LearnerProfile,
+        profileVersion: `${record.run_id}-profile-E${record.private.profile_epoch ?? 0}`,
+        profileRevision: record.round_no,
+      }],
+    })
+    const events: Array<import("../role-c-content/contracts/learning-evidence-event").LearningEvidenceEvent> = []
+    for (const result of feedback.objective_results) {
+      const objective = node.objectives.find((obj) => obj.objective_id === result.objective_id)
+      if (!objective) continue
+      events.push({
+        schema_version: "1.0" as const,
+        event_id: `EVID-${record.session_id}-R${record.round_no}-${result.objective_id}`,
+        learner_id_hash: learnerId,
+        profile_version: `${record.run_id}-profile-E${record.private.profile_epoch ?? 0}`,
+        path_node_id: node.node_id,
+        objective_id: result.objective_id,
+        source_id: objective.source_id,
+        evidence: {
+          modality: "mcq" as const,
+          raw_score: result.raw_score,
+          evidence_score: result.evidence_score,
+          grader_confidence: 1,
+          hint_level: 0,
+          attempt_no: record.round_no,
+        },
+        misconceptions: result.misconception_tags ?? [],
+        recommendation: {
+          action: feedback.final_decision.action,
+          confidence: 1,
+          reason_codes: [...feedback.final_decision.reason_codes],
+        },
+        provenance: {
+          artifact_id: feedback.grade_result.artifact_id,
+          idempotency_key: `sha256:${createHash("sha256").update(`INTERACTIVE-${record.session_id}-R${record.round_no}-${result.objective_id}`).digest("hex")}`,
+          item_id: result.objective_id,
+          grader_version: "interactive-v1",
+        },
+      })
+    }
+    if (events.length === 0) return
+    const { deliverRoleCToB } = await import("../role-c-content/contracts/external-api")
+    await deliverRoleCToB(progressPort, events)
+  } catch (error) {
+    // B 进度投递失败不阻断用户交互：D 侧 learner-memory 已写入，
+    // 且下一次生成/评估时可补偿。
+    console.warn(`[orchestrator] B 进度投递非致命失败：${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
+/**
+ * 将本轮正式评分的掌握度写回 learner-memory（按 source_id 维度）。
+ * 交互流程此前只 load 不 save，导致跨会话学习记忆永不更新；
+ * 这里把 C 侧 mastery_snapshot（objective_id 维度）映射回当前节点的
+ * target_source_ids 后落盘，使诊断选题能随历史掌握收敛。
+ */
+async function persistMasteryToLearnerMemory(
+  record: InteractiveSessionRecord,
+  feedback: DynamicFeedbackResult,
+  dataRoot: string,
+): Promise<void> {
+  const learnerId = record.learner_request.learner_id ?? record.session_id
+  const node = record.current_path_node as LearningPathNode | null
+  const objectiveToSource = new Map<string, string>()
+  for (const objective of node?.objectives ?? []) {
+    objectiveToSource.set(objective.objective_id, objective.source_id)
+  }
+  const events: PersistenceEvent[] = feedback.mastery_snapshot
+    .flatMap((state) => {
+      const sourceId = objectiveToSource.get(state.objective_id)
+      if (!sourceId) return []
+      return [{
+        event_type: "mastery_update" as const,
+        source: "learning-orchestrator" as const,
+        source_id: sourceId,
+        mastery: state.mastery,
+        evidence: `formal assessment round ${record.round_no}`,
+      }]
+    })
+  if (events.length === 0) return
+  const memory = await loadLearnerMemory(dataRoot, learnerId)
+  const updated = appendPersistenceEvents(memory, events)
+  await saveLearnerMemory(dataRoot, updated)
+}
+
 interface FormalRoleCRound {
   ok: true
   run_id: string
@@ -626,8 +1023,6 @@ interface FormalRoleCRound {
     session_id: string
     form_id: string
     attempt_no: number
-    routing_request_id?: string
-    anchor_item_ids?: string[]
   }
   concept_lesson: unknown
   code_lab: unknown
@@ -643,9 +1038,18 @@ export function roleCRoundRunId(baseRunId: string, roundNo: number, generationAt
   return `${baseRunId}-R${roundNo}-C${generationAttempt + 1}`
 }
 
-/** 与主 Agent 动态规划对齐的阈值：<40% 针对性补救，<80% 巩固强化。 */
-export const REMEDIATE_ACCURACY_THRESHOLD = 0.4
-export const REINFORCE_ACCURACY_THRESHOLD = 0.8
+/** 轮次决策阈值单点来源：与 C 侧 `DEFAULT_ROUND_ACTION_POLICY` 对齐，
+ *  <40% 针对性补救，≥80% 推进；避免主 Agent 与 C 各自维护一份导致调优漂移。 */
+export const REMEDIATE_ACCURACY_THRESHOLD = DEFAULT_ROUND_ACTION_POLICY.remediate_below
+export const REINFORCE_ACCURACY_THRESHOLD = DEFAULT_ROUND_ACTION_POLICY.advance_at_least
+
+/**
+ * 单节点内补救/巩固的最大轮次。超过后即使分数未达标也强制 advance，
+ * 避免学习者在同一节点无限循环「补救→再测评→强化→再测评」。
+ * 上限防止：连续低分永不 advance 导致会话永不结束、round_no/events 无限膨胀。
+ */
+export const MAX_REMEDIATE_ROUNDS_PER_NODE = 3
+export const MAX_REINFORCE_ROUNDS_PER_NODE = 2
 
 /**
  * 根据本轮评分结果选择下一轮的聚焦目标：
@@ -678,10 +1082,18 @@ export function buildNextRoundContext(
   feedback: DynamicFeedbackResult,
   parentSpecId: string,
   requestId: string,
+  fallbackObjectiveIds: string[] = [],
 ): NextRoundGenerationContext | undefined {
   const action = feedback.final_decision.action
   if (action === "reprofile") return undefined
   const focus = focusObjectivesForNextRound(feedback.objective_results, action)
+  // C 合同要求 focus_objective_ids 非空、不重复且属于当前 GenerationSpec。
+  // advance 表示已掌握本节点、进入下一节点：focus 必须是下一（当前）节点目标，
+  // 上一轮 feedback.objective_results 里的旧节点目标不能透传给 C；
+  // remediate/reinforce 时 focus 是当前节点子集，空则回落到当前节点目标。
+  const effectiveFocus = action === "advance"
+    ? (fallbackObjectiveIds.length > 0 ? fallbackObjectiveIds : focus)
+    : (focus.length > 0 ? focus : fallbackObjectiveIds)
   const misconceptionTags = focus.length > 0
     ? [
         ...new Set(feedback.objective_results
@@ -695,7 +1107,7 @@ export function buildNextRoundContext(
     prior_feedback_ref: feedback.feedback_id,
     trigger_grade_artifact_id: feedback.grade_result.artifact_id,
     action,
-    focus_objective_ids: focus,
+    focus_objective_ids: effectiveFocus,
     reason_codes: [...feedback.final_decision.reason_codes],
     ...(misconceptionTags.length > 0 ? { misconception_tags: misconceptionTags } : {}),
   }
@@ -706,6 +1118,10 @@ export function interactiveSessionProductionBoundary() {
     adapter_workers: ["profile-builder", "path-planner"] as const,
     reviewed_role_c_workers: ["concept-tutor", "code-lab", "tiered-evaluator"] as const,
     review_port: "local-ab-content-review" as const,
+    learning_progress_port: "role-b-learning-progress-adapter" as const,
+    continuation: "continue-role-c-after-submission" as const,
+    delivery_port: "durable-interactive-role-d" as const,
+    adaptive_journal: "atomic-file" as const,
   }
 }
 
@@ -715,6 +1131,8 @@ function roleCRuntime(dataRoot: string): RoleCForRoleDRuntimeOptions {
     providerMode: "model" as const,
     dataDirectory,
     learningPersistence: createAtomicRoleCLearningPersistence(dataDirectory),
+    // 每路径节点通常仅 1 个 objective：单目标画像冲突即可触发 reprofile。
+    profileDriftMinimumConflicts: 1,
   }
 }
 
@@ -725,47 +1143,77 @@ async function generateFormalRoleCRound(
   dataRoot: string,
   nextRoundContext?: NextRoundGenerationContext,
 ): Promise<FormalRoleCRoundResult> {
-  const runId = roleCRoundRunId(
-    record.run_id,
-    record.round_no,
-    record.private.role_c_generation_attempt ?? 0,
-  )
   const ragResult = record.rag_result as RagResult | null
   if (!ragResult) return { ok: false, reason: "A RAG result is missing for Role C generation" }
-  const result = await generateRoleCForRoleDWithRuntime({
-    profile: record.profile as LearnerProfile,
-    ragResult,
-    kbVersion: await resolveRoleCKnowledgeBaseVersion(),
-    runId,
-    pathNode: bindPathNodeFactsForRoleC(node, ragResult),
-    ...(nextRoundContext ? { next_round_context: nextRoundContext } : {}),
-  }, roleCRuntime(dataRoot))
-  if (result.status !== "ready") return { ok: false, reason: result.reason }
-  if (!result.reviewedRelease) return { ok: false, reason: "Role C ready result omitted reviewed public release" }
-  const [conceptLesson, codeLab, assessment] = result.reviewedRelease.artifacts
-  return {
-    ok: true,
-    run_id: result.runId,
-    learning_session: {
-      session_id: result.learningSession.sessionId,
-      form_id: result.learningSession.formId,
-      attempt_no: result.learningSession.attemptNo,
-      ...(result.learningSession.routing_request_id
-        ? {
-            routing_request_id: result.learningSession.routing_request_id,
-            anchor_item_ids: [...(result.learningSession.anchor_item_ids ?? [])],
-          }
-        : {}),
-    },
-    concept_lesson: conceptLesson,
-    code_lab: codeLab,
-    assessment,
-    rag_result: ragResult,
-    adaptation: result.reviewedRelease.adaptation,
+  // 每轮必须以B当前节点为唯一目标来源。旧会话/恢复流程可能把上一轮的RAG结果带入，
+  // 且路径推进到后续节点时首轮快照可能不含新节点证据（advance 后从未刷新）。
+  // 这里先按当前节点 target + prerequisite 补全缺失的 A 证据（按 source_id 从知识库
+  // 结构化读取，非文本检索），再过滤绑定，避免 C 依据旧 K001 讲义生成 K002 轮次，
+  // 也避免 advance 到新节点时因证据缺失而阻塞。
+  const ensured = await ensureCurrentNodeEvidence(ragResult, node)
+  if (!ensured.ok) {
+    return { ok: false, reason: `A 证据刷新失败：${ensured.missingSources.join("、")}` }
   }
+  const currentRagResult = filterRagToCurrentNode(ensured.ragResult, node)
+  const requiredSources = [...new Set([...node.target_source_ids, ...(node.prerequisite_source_ids ?? [])])]
+  const missingSources = requiredSources.filter((sourceId) => !currentRagResult.results.some((item) => (item.source_id ?? item.sourceId) === sourceId))
+  if (missingSources.length > 0) {
+    return { ok: false, reason: `A 知识库缺少当前节点或先修证据：${missingSources.join("、")}` }
+  }
+  const boundPathNode = bindPathNodeFactsForRoleC(node, currentRagResult)
+  // C 的 GenerationSpec 必须使用绑定了 A 真实事实 ID 的节点；原始 B 节点可能只有 source_id，
+  // 缺少 required_fact_ids 会让 code-lab secure 目标覆盖门禁拒绝整套互动资源。
+  // 模型生成 code-lab secure 内容时有可见的间歇性失败率（public/secure 值重复、参考实现不匹配），
+  // 模型阶段已有定向修复与 reviewed recovery；外层只做有限的完整重建，避免 6×5 级联等待。
+  const MAX_GENERATION_ATTEMPTS = roleCGenerationBudgets().outer_attempts
+  // 每次使用全新的 C 生成身份（runId 含 generation attempt），全部失败才返回 blocked。
+  const baseAttempt = record.private.role_c_generation_attempt ?? 0
+  let lastReason = ""
+  for (let attempt = 0; attempt < MAX_GENERATION_ATTEMPTS; attempt++) {
+    const runId = roleCRoundRunId(record.run_id, record.round_no, baseAttempt + attempt)
+    const result = await generateRoleCForRoleDWithRuntime({
+      profile: record.profile as LearnerProfile,
+      ragResult: currentRagResult,
+      kbVersion: await resolveRoleCKnowledgeBaseVersion(),
+      runId,
+      // 跨轮稳定的画像版本：mastery 状态按 learner+profile_version+objective
+      // 建 key。同一画像纪元（profile_epoch）内多轮 evidence 跨轮累积，
+      // reprofile（连续高分/低分与画像冲突）才可触发；reprofile 后 epoch+1
+      // 进入新纪元，新画像不与旧画像累积串扰。若改为每轮派生则退化为每轮独立评估。
+      profile_version: `${record.run_id}-profile-E${record.private.profile_epoch ?? 0}`,
+      pathNode: boundPathNode,
+      ...(nextRoundContext ? { next_round_context: nextRoundContext } : {}),
+    }, roleCRuntime(dataRoot))
+    if (result.status === "ready") {
+      if (!result.reviewedRelease) return { ok: false, reason: "Role C ready result omitted reviewed public release" }
+      const [conceptLesson, codeLab, assessment] = result.reviewedRelease.artifacts
+      record.private.role_c_generation_attempt = baseAttempt + attempt
+      return {
+        ok: true,
+        run_id: result.runId,
+        learning_session: {
+          session_id: result.learningSession.sessionId,
+          form_id: result.learningSession.formId,
+          attempt_no: result.learningSession.attemptNo,
+        },
+        concept_lesson: conceptLesson,
+        code_lab: codeLab,
+        assessment,
+        // 持久化完整刷新结果（含按需补全的节点证据），供后续轮次复用，
+        // 而非仅当前节点过滤后的子集。
+        rag_result: ensured.ragResult,
+        adaptation: result.reviewedRelease.adaptation,
+      }
+    }
+    lastReason = result.reason ?? `Role C generation failed (attempt ${attempt + 1})`
+    console.warn(`[orchestrator] Role C round ${record.round_no} attempt ${attempt + 1}/${MAX_GENERATION_ATTEMPTS} blocked: ${lastReason}`)
+    if (!shouldRetryWholeGenerationReason(lastReason)) break
+  }
+  return { ok: false, reason: lastReason }
 }
 
 function applyFormalRoleCRound(record: InteractiveSessionRecord, round: FormalRoleCRound): void {
+  record.blocked_reason = null
   record.rag_result = round.rag_result
   record.learning_resources = { concept_lesson: round.concept_lesson, code_lab: round.code_lab }
   record.assessment = round.assessment
@@ -780,25 +1228,10 @@ function applyFormalRoleCRound(record: InteractiveSessionRecord, round: FormalRo
   }
   record.status = "waiting_for_user"
   record.current_stage = "assessment"
-  // 新轮先清除旧锚点状态：锚点模式由下方重新初始化，否则保持无锚点。
-  record.anchor_routing = null
-  record.private.anchor_answers = null
-  if (round.learning_session.routing_request_id
-    && round.learning_session.anchor_item_ids?.length) {
-    record.anchor_routing = {
-      phase: "ANCHOR_PENDING",
-      routing_request_id: round.learning_session.routing_request_id,
-      anchor_item_ids: [...round.learning_session.anchor_item_ids],
-    }
-    record.waiting_for = {
-      type: "anchor_answers",
-      items: anchorItemsOf(record.assessment, round.learning_session.anchor_item_ids),
-    }
-  } else {
-    record.waiting_for = {
-      type: "assessment_answers",
-      items: assessmentItems(round.assessment),
-    }
+  // 每轮直接等待正式测评作答；下一轮走补救/巩固/推进由正式测评分数决策（C 动态反馈）。
+  record.waiting_for = {
+    type: "assessment_answers",
+    items: assessmentItems(round.assessment),
   }
 }
 
@@ -806,22 +1239,135 @@ export async function resolveRoleCKnowledgeBaseVersion(): Promise<string> {
   return (await loadKnowledgeBase()).version
 }
 
+export function filterRagToCurrentNode(ragResult: RagResult, node: Pick<LearningPathNode, "target_source_ids" | "prerequisite_source_ids">): RagResult {
+  const targetIds = new Set(node.target_source_ids)
+  const sourceIds = new Set([
+    ...node.target_source_ids,
+    ...(node.prerequisite_source_ids ?? []),
+  ])
+  return {
+    ...ragResult,
+    results: ragResult.results
+      .filter((item) => sourceIds.has(item.source_id ?? item.sourceId))
+      .map((item) => {
+        const sourceId = item.source_id ?? item.sourceId
+        const facts = Array.isArray(item.facts) ? item.facts : []
+        if (!targetIds.has(sourceId) || facts.length === 0) return item
+        const matchedFields = new Set(item.retrievalTrace.matchedFields)
+        matchedFields.add("facts")
+        matchedFields.add("taskIntent")
+        return {
+          ...item,
+          reason: `B 当前正式节点精确绑定 ${sourceId}，并使用 A 结构化事实`,
+          retrievalTrace: {
+            ...item.retrievalTrace,
+            matchedFields: [...matchedFields],
+            scoreBreakdown: {
+              ...item.retrievalTrace.scoreBreakdown,
+              facts: Math.max(item.retrievalTrace.scoreBreakdown.facts, facts.length),
+            },
+          },
+        }
+      }),
+  }
+}
+
+/**
+ * 确保当前节点所需的 A 证据就绪：路径推进到新节点后，首轮 RAG 快照可能缺少新节点的
+ * target / prerequisite 证据（advance 后从未刷新）。此处按 source_id 从知识库结构化
+ * 读取缺失来源并合并，返回刷新后的完整 RAG 结果；知识库本身缺失的来源才视为不可恢复。
+ */
+export async function ensureCurrentNodeEvidence(
+  ragResult: RagResult,
+  node: Pick<LearningPathNode, "target_source_ids" | "prerequisite_source_ids">,
+): Promise<{ ok: true; ragResult: RagResult } | { ok: false; missingSources: string[] }> {
+  const requiredSourceIds = [...new Set([
+    ...node.target_source_ids,
+    ...(node.prerequisite_source_ids ?? []),
+  ])]
+  const present = new Set(ragResult.results.map((item) => item.source_id ?? item.sourceId))
+  const missing = requiredSourceIds.filter((sourceId) => !present.has(sourceId))
+  if (missing.length === 0) return { ok: true, ragResult }
+
+  const knowledgeBase = await loadKnowledgeBase()
+  const structured = retrieveStructuredEvidenceFromKnowledgeBase(
+    { source_ids: missing },
+    knowledgeBase,
+  )
+  const stillMissing = structured.missing_source_ids
+  if (stillMissing.length > 0) {
+    return { ok: false, missingSources: stillMissing }
+  }
+  const knownIds = new Set(ragResult.results.map((item) => item.source_id ?? item.sourceId))
+  const merged = [...ragResult.results]
+  for (const item of structured.results) {
+    const sourceId = item.source_id ?? item.sourceId
+    if (!knownIds.has(sourceId)) {
+      knownIds.add(sourceId)
+      merged.push(item)
+    }
+  }
+  return {
+    ok: true,
+    ragResult: { ...ragResult, results: merged },
+  }
+}
+
+export function canonicalizePathNodeTopic(
+  node: LearningPathNode | null,
+  ragResult: Pick<RagResult, "results">,
+): LearningPathNode | null {
+  return node ? bindPathNodeFactsForRoleC(node, ragResult) : null
+}
+
+export function canonicalizeFormalPathNodeTopics(
+  path: FormalLearningPath,
+  ragResult: Pick<RagResult, "results">,
+): FormalLearningPath {
+  return {
+    ...path,
+    nodes: path.nodes.map((node) => ({
+      ...node,
+      ...bindPathNodeFactsForRoleC(node, ragResult),
+    })),
+  }
+}
+
 export function bindPathNodeFactsForRoleC(
   node: LearningPathNode,
   ragResult: Pick<RagResult, "results">,
 ): LearningPathNode {
+  const behaviors = new Set(node.objectives.map((objective) => objective.observable_behavior))
+  const permitsCode = [...behaviors].some((behavior) =>
+    behavior === "trace" || behavior === "apply" || behavior === "debug" || behavior === "create")
+  const requiredModalities = permitsCode ? ["mcq", "code"] as const : ["mcq", "trace"] as const
+  const targetTitle = node.target_source_ids
+    .map((sourceId) => ragResult.results.find((item) => (item.source_id ?? item.sourceId) === sourceId)?.title)
+    .find((title): title is string => typeof title === "string" && title.trim().length > 0)
   return {
     ...node,
+    // B 当前节点 source_id + A 知识标题共同定义本轮主题；总体学习目标只用于规划，
+    // 不能作为 C 本轮讲义/测评标题，否则 K003 会被“学习for循环”污染。
+    goal: targetTitle ?? node.goal,
     objectives: node.objectives.map((objective) => {
-      if (objective.required_fact_ids.length > 0) return objective
       const source = ragResult.results.find((item) => item.source_id === objective.source_id)
-      const fact = source?.facts[0]
+      const availableFactIds = (source?.facts ?? [])
+        .map((fact) => fact.fact_id)
+        .filter((factId): factId is string => typeof factId === "string" && factId.length > 0)
+      const requiredFactIds = objective.required_fact_ids.length > 0
+        ? objective.required_fact_ids.filter((factId) => availableFactIds.includes(factId))
+        : availableFactIds
       return {
         ...objective,
-        required_fact_ids: typeof fact?.fact_id === "string" ? [fact.fact_id] : [],
+        // B节点可能只给source_id；这里从A当前RAG结果绑定全部真实事实，
+        // 不能把空required_fact_ids继续传给C可信门禁。
+        required_fact_ids: requiredFactIds,
       }
     }),
-    assessment_blueprint: { ...node.assessment_blueprint },
+    assessment_blueprint: {
+      ...node.assessment_blueprint,
+      required_modalities: [...requiredModalities],
+    },
   }
 }
 
@@ -837,182 +1383,18 @@ function assessmentItems(assessment: unknown): unknown[] {
   return []
 }
 
-function anchorItemsOf(assessment: unknown, anchorItemIds: string[]): unknown[] {
-  const all = assessmentItems(assessment)
-  const idSet = new Set(anchorItemIds)
-  return all.filter((item) =>
-    typeof item === "object" && item !== null && "item_id" in item
-      ? idSet.has((item as { item_id: string }).item_id)
-      : false)
+function assessmentHasShortAnswer(assessment: unknown): boolean {
+  return assessmentItems(assessment).some((item) =>
+    typeof item === "object" && item !== null && (item as { modality?: unknown }).modality === "short_answer")
 }
 
-/**
- * 锚点作答提交：C 评分锚点并冻结路由，返回按路由揭示的题目集合。
- * 后续正式提交必须使用路由后的题目。
- */
-async function continueAfterAnchorAnswers(
-  original: InteractiveSessionRecord,
-  command: InteractiveSessionCommand,
-  dataRoot: string,
-): Promise<InteractiveSessionRecord> {
-  const answers = command.payload?.answers
-  if (!assertSubmissionAnswers(answers, "submit_anchor_answers")) {
-    throw new InteractiveSessionError("INVALID_COMMAND", "submit_anchor_answers requires answers array", 400)
-  }
-  const record = structuredClone(original)
-  const roleC = record.private.role_c
-  const routing = record.anchor_routing
-  if (!roleC || !routing) {
-    throw new InteractiveSessionError("SESSION_ARTIFACT_MISSING", "Anchor routing is missing", 409)
-  }
-  // ROUTE_LOCKED 后重放相同锚点答案：幂等返回当前状态（与 C 侧语义一致）；
-  // 答案不同则拒绝（最终提交必须与冻结路由时一致）。
-  if (routing.phase === "ROUTE_LOCKED") {
-    if (record.private.anchor_answers
-      && sameAnchorAnswers(record.private.anchor_answers, answers)) {
-      return record
-    }
-    throw new InteractiveSessionError("ANCHOR_ANSWERS_CHANGED", "Anchor routing is already locked with different answers", 409)
-  }
-  const anchorIds = routing.anchor_item_ids
-  const answerIds = answers.map((answer: { item_id: string }) => answer.item_id)
-  const issues = [
-    ...anchorIds.filter((id) => !answerIds.includes(id)).map((id) => `missing anchor answer ${id}`),
-    ...answerIds.filter((id) => !anchorIds.includes(id)).map((id) => `unknown anchor item ${id}`),
-  ]
-  if (issues.length > 0) {
-    throw new InteractiveSessionError("INVALID_ANCHOR_ANSWERS", "Anchor answers do not match the requested items", 400, issues)
-  }
-  const outcome = await routeRoleCAssessmentAnchors({
-    routingRequestId: routing.routing_request_id,
-    sessionId: roleC.session_id,
-    runId: roleC.run_id,
-    learnerId: roleC.learner_id,
-    formId: roleC.form_id,
-    attemptNo: roleC.attempt_no,
-    submissionId: `SUB-${record.session_id}-R${record.round_no}-ANCHOR-${command.command_id}`,
-    answers: structuredClone(answers),
-  }, roleCRuntime(dataRoot))
-  if (outcome.status !== "routed") {
-    record.status = "blocked"
-    record.current_stage = "blocked"
-    record.blocked_reason = outcome.status === "needs_review"
-      ? `anchor assessment requires review: ${outcome.unresolved_anchor_item_ids.join(",")}`
-      : `anchor routing blocked: ${outcome.issues.join("；")}`
-    record.events.push(event(record.session_id, "session_blocked", "blocked", record.blocked_reason, new Date().toISOString()))
-    record.updated_at = new Date().toISOString()
-    return record
-  }
-  record.anchor_routing = {
-    ...routing,
-    phase: "ROUTE_LOCKED",
-    route_id: outcome.route_id,
-    action: outcome.action,
-    anchor_score_ratio: outcome.anchor_score_ratio,
-    required_item_ids: [...outcome.required_item_ids],
-  }
-  record.private.anchor_answers = structuredClone(answers)
-  // 展示全部路由题（含锚点题：学习者可查看，最终提交时锚点答案以冻结版为准）。
-  record.waiting_for = {
-    type: "assessment_answers",
-    items: assessmentItems(record.assessment)
-      .filter((item) => typeof item === "object" && item !== null && "item_id" in item
-        ? outcome.required_item_ids.includes((item as { item_id: string }).item_id)
-        : false),
-  }
-  record.events.push(event(
-    record.session_id,
-    "session_updated",
-    "assessment",
-    `anchor route locked (${outcome.action}, ratio ${outcome.anchor_score_ratio})`,
-    new Date().toISOString(),
-  ))
-  record.updated_at = new Date().toISOString()
-  return record
-}
-
-async function generateRoundArtifacts(
-  record: InteractiveSessionRecord,
-  path: FormalLearningPath,
-  node: LearningPathNode,
-): Promise<
-  | {
-      ok: true
-      upstreamArtifacts: Record<string, unknown>
-      pathArtifacts: { a_rag_result: unknown }
-      conceptArtifacts: { concept_lesson: unknown }
-      codeArtifacts: { code_lab_public: unknown }
-      assessmentArtifacts: { assessment_public: AssessmentPublicArtifact; assessment_secure: AssessmentSecureArtifact }
-    }
-  | { ok: false; reason: string }
-> {
-  const prior = structuredClone(record.private.upstream_artifacts)
-  const pathArtifacts = prior["path-planner"] as Record<string, unknown>
-  const currentPathArtifacts = {
-    ...pathArtifacts,
-    formal_path: path,
-    next_path_node: node,
-    path_completed: false,
-  }
-  let upstreamArtifacts: Record<string, unknown> = {
-    ...prior,
-    "path-planner": currentPathArtifacts,
-  }
-  let inputRefs = ["path-planner:interactive-next-round"]
-  for (const step of ORCHESTRATION_WORKER_SEQUENCE.slice(5)) {
-    const invocation = {
-      ...createScaffoldWorkerInvocation({
-        session_id: record.session_id,
-        run_id: `${record.run_id}-R${record.round_no}`,
-        step_index: ORCHESTRATION_WORKER_SEQUENCE.findIndex((entry) => entry.worker === step.worker) + 1,
-        stage: step.from,
-        worker: step.worker,
-        learner_request: record.learner_request,
-        upstream_artifacts: upstreamArtifacts,
-        input_refs: inputRefs,
-        evidence_refs: [],
-      }),
-      mode: record.mode,
-    }
-    const result = await runWorkerAdapter(invocation)
-    const validation = validateWorkerResult(invocation, result)
-    if (!validation.ok || result.status !== "completed") {
-      return {
-        ok: false,
-        reason: validation.ok
-          ? result.errors[0]?.message ?? result.summary
-          : validation.errors[0]?.message ?? "next round worker contract invalid",
-      }
-    }
-    upstreamArtifacts[step.worker] = result.artifacts
-    inputRefs = result.output_refs
-    record.events.push(event(record.session_id, "worker_completed", "assessment", result.summary, new Date().toISOString(), step.worker))
-  }
-  return {
-    ok: true,
-    upstreamArtifacts,
-    pathArtifacts: currentPathArtifacts as unknown as { a_rag_result: unknown },
-    conceptArtifacts: upstreamArtifacts["concept-tutor"] as { concept_lesson: unknown },
-    codeArtifacts: upstreamArtifacts["code-lab"] as { code_lab_public: unknown },
-    assessmentArtifacts: upstreamArtifacts["tiered-evaluator"] as { assessment_public: AssessmentPublicArtifact; assessment_secure: AssessmentSecureArtifact },
-  }
-}
-
-/**
- * 将冻结路由时的锚点答案合并进最终提交：锚点题答案一律使用冻结版本
- * （与路由时哈希一致，学习者对锚点题的作答不会改变路由结果），
- * 非锚点题使用前端提交。
- */
-function mergeAnchorAnswers(
-  submitted: SubmissionAnswer[],
-  anchorAnswers: SubmissionAnswer[] | null,
-): SubmissionAnswer[] {
-  if (!anchorAnswers || anchorAnswers.length === 0) return structuredClone(submitted)
-  const anchorById = new Map(anchorAnswers.map((answer) => [answer.item_id, answer]))
-  return [
-    ...structuredClone(anchorAnswers),
-    ...structuredClone(submitted).filter((answer) => !anchorById.has(answer.item_id)),
-  ]
+function learningResourcesTargetOtherNode(record: InteractiveSessionRecord): boolean {
+  const node = record.current_path_node as LearningPathNode | null
+  const lesson = (record.learning_resources?.concept_lesson as { payload?: { objective_ids?: string[]; objective_coverage?: Array<{ objective_id: string }> } } | null)?.payload
+  const covered = [...(lesson?.objective_ids ?? []), ...(lesson?.objective_coverage?.map((entry) => entry.objective_id) ?? [])]
+  if (covered.length === 0) return false
+  const nodeObjectiveIds = new Set((node?.objectives ?? []).map((objective) => objective.objective_id))
+  return !covered.some((objectiveId) => nodeObjectiveIds.has(objectiveId))
 }
 
 /** 校验提交答案数组的元素形状（item_id 必须存在且安全）。 */
@@ -1025,17 +1407,6 @@ function assertSubmissionAnswers(answers: unknown, commandType: string): answers
     throw new InteractiveSessionError("INVALID_COMMAND", `${commandType} requires answers array with valid item_id entries`, 400)
   }
   return true
-}
-
-/** 锚点答案是否逐项一致（顺序无关）。 */
-function sameAnchorAnswers(prior: SubmissionAnswer[], current: SubmissionAnswer[]): boolean {
-  if (prior.length !== current.length) return false
-  const byId = new Map(prior.map((answer) => [answer.item_id, answer]))
-  return current.every((answer) => {
-    const expected = byId.get(answer.item_id)
-    if (!expected) return false
-    return contentHash({ ...expected }) === contentHash({ ...answer })
-  })
 }
 
 /**
@@ -1085,9 +1456,13 @@ async function resetToDiagnosisPhase(
     learning_resources: { concept_lesson: null, code_lab: null },
     assessment: null,
     adaptation: null,
-    anchor_routing: null,
     feedback: null,
     blocked_reason: null,
+    code_execution: null,
+    // 新画像生命周期：清空旧画像阶段的 worker 账本，避免 D 看到上一轮画像的 worker。
+    worker_ledger: [],
+    // 清空命令账本：新画像阶段的 command_id 从零开始，旧键复用不再重放旧响应。
+    processed_commands: {},
     private: {
       ...record.private,
       diagnosis_items: diagnosisItems,
@@ -1095,9 +1470,13 @@ async function resetToDiagnosisPhase(
       diagnosis_answers: null,
       upstream_artifacts: {},
       next_round_context: null,
-      anchor_answers: null,
       // 递增而非归零：reprofile 后新 run 的 runId 不与首轮冲突（C 侧 run 幂等）。
       role_c_generation_attempt: (record.private.role_c_generation_attempt ?? 0) + 1,
+      // 新画像纪元：新画像的 mastery 状态从零开始，不与旧画像累积串扰。
+      profile_epoch: (record.private.profile_epoch ?? 0) + 1,
+      // 回到诊断阶段：当前节点轮次计数清零。
+      node_remediate_rounds: 0,
+      node_reinforce_rounds: 0,
       role_c: null,
     },
     events: [
@@ -1230,19 +1609,38 @@ async function continueAfterDiagnosis(
     next_path_node: LearningPathNode | null
     a_rag_result: unknown
   }
+  // 校验上游 worker 产物形状：completed 结果若缺关键字段，直接进入
+  // blocked 并给出原因，避免后续解构得到 undefined 使会话停在 running
+  // 且 retry 无法恢复（永久卡死）。
+  const missingArtifacts = [
+    ...(isRecord(profileArtifacts) && profileArtifacts.profile ? [] : ["profile-builder.profile"]),
+    ...(isRecord(pathArtifacts) && isRecord(pathArtifacts.formal_path) ? [] : ["path-planner.formal_path"]),
+    ...(isRecord(pathArtifacts) && isRecord(pathArtifacts.a_rag_result) ? [] : ["path-planner.a_rag_result"]),
+  ]
+  if (missingArtifacts.length > 0) {
+    record.status = "blocked"
+    record.current_stage = "blocked"
+    record.waiting_for = null
+    record.blocked_reason = `上游 Worker 产物缺少必要字段：${missingArtifacts.join("、")}`
+    record.events.push(event(record.session_id, "session_blocked", "blocked", record.blocked_reason, new Date().toISOString(), "path-planner"))
+    record.updated_at = new Date().toISOString()
+    return record
+  }
   record.profile = profileArtifacts.profile
-  record.formal_path = pathArtifacts.formal_path
-  record.current_path_node = pathArtifacts.next_path_node
+  const canonicalPath = canonicalizeFormalPathNodeTopics(pathArtifacts.formal_path, pathArtifacts.a_rag_result as RagResult)
+  const canonicalNextNode = canonicalizePathNodeTopic(pathArtifacts.next_path_node, pathArtifacts.a_rag_result as RagResult)
+  record.formal_path = canonicalPath
+  record.current_path_node = canonicalNextNode
   record.rag_result = pathArtifacts.a_rag_result
   record.private.upstream_artifacts = publicUpstreamArtifacts(upstreamArtifacts)
-  if (!pathArtifacts.next_path_node) {
+  if (!canonicalNextNode) {
     record.status = "completed"
     record.current_stage = "completed"
     record.waiting_for = null
     record.updated_at = new Date().toISOString()
     return record
   }
-  const formalRound = await generateFormalRoleCRound(record, pathArtifacts.formal_path, pathArtifacts.next_path_node, dataRoot)
+  const formalRound = await generateFormalRoleCRound(record, canonicalPath, canonicalNextNode, dataRoot)
   if (!formalRound.ok) {
     record.status = "blocked"
     record.current_stage = "blocked"
@@ -1286,7 +1684,7 @@ function validateCommand(command: InteractiveSessionCommand): void {
   if (!command || typeof command !== "object" || !/^[A-Za-z0-9_-]{1,120}$/.test(command.command_id ?? "")) {
     throw new InteractiveSessionError("INVALID_COMMAND", "command_id is required and must be safe", 400)
   }
-  if (!["submit_diagnosis_answers", "submit_anchor_answers", "submit_assessment_answers", "retry"].includes(command.type)) {
+  if (!["submit_diagnosis_answers", "submit_assessment_answers", "run_assessment_code", "retry"].includes(command.type)) {
     throw new InteractiveSessionError("INVALID_COMMAND", "Unsupported command type", 400)
   }
 }
@@ -1300,7 +1698,11 @@ function normalizeAnswer(value: string): string {
 }
 
 function normalizeDifficulty(value: string | undefined): "beginner" | "basic" | "intermediate" | "integrated" | null {
-  return value === "beginner" || value === "basic" || value === "intermediate" || value === "integrated" ? value : null
+  if (value === "beginner" || value === "basic" || value === "intermediate" || value === "integrated") return value
+  // 前端学习者自评枚举（new/advanced）映射到 B 画像难度词表。
+  if (value === "new") return "beginner"
+  if (value === "advanced") return "integrated"
+  return null
 }
 
 function stageForWorker(worker: WorkerName): InteractiveStage {

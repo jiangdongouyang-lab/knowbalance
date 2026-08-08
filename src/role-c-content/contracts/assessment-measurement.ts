@@ -10,7 +10,7 @@ const MEASURING_MODALITIES: Record<ObservableBehavior, AssessmentModality[]> = {
   recognize: ["mcq", "true_false", "trace", "short_answer", "code"],
   explain: ["short_answer"],
   trace: ["trace", "code"],
-  apply: ["trace", "short_answer", "code"],
+  apply: ["mcq", "true_false", "trace", "short_answer", "code"],
   debug: ["code"],
   create: ["code"],
 }

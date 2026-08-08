@@ -18,7 +18,7 @@
     },
     "session": {
       "oneOf": [
-        { "$ref": "#/$defs/anchor_pending" },
+        { "$ref": "#/$defs/preselected" },
         { "$ref": "#/$defs/route_locked" }
       ]
     }
@@ -41,7 +41,7 @@
         }
       }
     },
-    "anchor_pending": {
+    "preselected": {
       "type": "object",
       "required": [
         "phase",
@@ -53,7 +53,7 @@
         "required_item_ids"
       ],
       "properties": {
-        "phase": { "const": "anchor_pending" },
+        "phase": { "const": "preselected" },
         "routing_request_id": { "$ref": "#/$defs/base_properties/properties/routing_request_id" },
         "session_id": { "$ref": "#/$defs/base_properties/properties/session_id" },
         "run_id": { "$ref": "#/$defs/base_properties/properties/run_id" },

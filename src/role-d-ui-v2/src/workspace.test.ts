@@ -5,6 +5,7 @@ import {
   createEmptyWorkspace,
   deletePlan,
   loadWorkspace,
+  markPlanConceptMastered,
   masteredConceptsForUser,
   planNameFromGoal,
   recordPlanPublicState,
@@ -54,7 +55,7 @@ describe("Role D local workspace", () => {
     expect(planNameFromGoal({ mode: "custom", customGoal: "  用 Python 做一个单词统计器  " })).toBe("用 Python 做一个单词统计器")
   })
 
-  test("records only main Agent public known concepts as the learner history", () => {
+  test("records profile-known concepts separately from formally mastered concepts", () => {
     let workspace = addUser(createEmptyWorkspace(), {
       id: "learner-lin",
       name: "林晓",
@@ -72,14 +73,8 @@ describe("Role D local workspace", () => {
       stage: "assessment",
       knownConcepts: ["变量与赋值", "for 循环"],
     })
-    workspace = addPlan(workspace, "learner-lin", { id: "plan-list", name: "列表" })
-    workspace = recordPlanPublicState(workspace, "learner-lin", "plan-list", {
-      sessionId: "SESSION-2",
-      status: "waiting_for_user",
-      stage: "assessment",
-      knownConcepts: ["for 循环", "列表"],
-    })
-
-    expect(masteredConceptsForUser(workspace, "learner-lin")).toEqual(["变量与赋值", "for 循环", "列表"])
+    expect(masteredConceptsForUser(workspace, "learner-lin")).toEqual([])
+    workspace = markPlanConceptMastered(workspace, "learner-lin", "plan-loop", "for 循环")
+    expect(masteredConceptsForUser(workspace, "learner-lin")).toEqual(["for 循环"])
   })
 })

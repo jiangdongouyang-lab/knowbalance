@@ -12,6 +12,7 @@ import { analyzePythonSource } from "../security/python-static-analyzer"
 import { validateCitations, type ValidationIssue } from "./citation-validator"
 import { validateCodeLabPublicSecureSeparation, validatePublicArtifactNoSecrets } from "./public-secure-leak-validator"
 import { validateRoleCSchema, validateRoleCSchemaFragment } from "./runtime-schema-validator"
+import { classifyExpectedValue, classifyOutputContract } from "../contracts/output-contract"
 
 export interface CodeLabDraftValidationReport {
   ok: boolean
@@ -131,13 +132,23 @@ export function validateCodeLabDraftStructure(
   for (const test of publicPayload.public_tests) {
     if (!targetIds.has(test.objective_id)) issues.push(issue("unknown_public_test_objective", `$.public_tests.${test.test_id}`, `公开测试包含 Spec 外 objective ${test.objective_id}`))
   }
-  for (const test of securePayload.hidden_tests) {
+  for (const [authorIndex, test] of securePayload.hidden_tests.entries()) {
     if (!targetIds.has(test.objective_id)) issues.push(issue("unknown_hidden_test_objective", `$.hidden_tests.${test.test_id}`, `隐藏测试包含 Spec 外 objective ${test.objective_id}`))
-    for (const message of validateHiddenTestComparisonCompatibility(test.comparison, test.expected)) {
+    for (const message of validateHiddenTestComparisonCompatibility(
+      test.comparison,
+      test.expected,
+      publicPayload.execution_contract.output_contract,
+    )) {
       issues.push(issue("invalid_test_comparison", `$.hidden_tests.${test.test_id}.comparison`, message))
     }
     for (const message of validateHiddenTestExpectedAgainstOutputContract(publicPayload.execution_contract.output_contract, test.expected)) {
-      issues.push(issue("invalid_expected_type", `$.hidden_tests.${test.test_id}.expected`, message))
+      issues.push(buildInvalidExpectedTypeIssue(
+        publicPayload.execution_contract.output_contract,
+        test.expected,
+        authorIndex,
+        test.objective_id,
+        message,
+      ))
     }
   }
 
@@ -230,6 +241,54 @@ export function validateCodeLabDraftStructure(
   issues.push(...validateCodeLabPublicSecureSeparation(publicPayload, securePayload).issues)
   const objectiveCoverage = coreTargets.length === 0 ? 1 : coveredCore / coreTargets.length
   return { ok: issues.length === 0, issues, citations: contentCitations, objective_coverage: objectiveCoverage }
+}
+
+export interface CodeLabVerificationDiagnosticInput {
+  issues: string[]
+  reference_failed?: boolean
+  reference_failure_codes?: string[]
+  starter_status?: "passed" | "failed" | "timeout" | "runner_error"
+  failed_mutations?: Array<{ mutation_id: string; status: string; failure_codes: string[] }>
+  public_payload?: { public_tests?: Array<{ input?: unknown }> }
+  secure_payload?: { hidden_tests?: Array<{ input?: unknown }> }
+}
+
+export interface CodeLabVerificationFailureDiagnostic {
+  code: "RUNNER_IDENTITY_MISMATCH" | "REFERENCE_SOLUTION_FAILED" | "STARTER_ALREADY_SOLVES_LAB" | "STARTER_EXECUTION_UNSTABLE" | "MUTATION_NOT_DETECTED" | "CODE_LAB_EXECUTION_UNVERIFIED"
+  stage: "code_lab_secure_execution"
+  safe_message: string
+  private_details: string[]
+}
+
+export function classifyCodeLabVerificationFailure(input: CodeLabVerificationDiagnosticInput): CodeLabVerificationFailureDiagnostic {
+  const issues = input.issues.filter((entry) => {
+    if (!entry.includes("hidden_test_input_leak")) return true
+    const empty = (value: unknown) => Boolean(value && typeof value === "object" && !Array.isArray(value)
+      && Array.isArray((value as { args?: unknown }).args)
+      && (value as { args: unknown[] }).args.length === 0
+      && Object.keys(((value as { kwargs?: unknown }).kwargs ?? {}) as object).length === 0)
+    return !((input.public_payload?.public_tests ?? []).every((test) => empty(test.input))
+      && (input.secure_payload?.hidden_tests ?? []).every((test) => empty(test.input)))
+  })
+  if (issues.some((entry) => entry.includes("runner_image_digest"))) {
+    return { code: "RUNNER_IDENTITY_MISMATCH", stage: "code_lab_secure_execution", safe_message: "可信执行镜像身份不一致", private_details: [...issues] }
+  }
+  if (input.reference_failed) {
+    const details = input.reference_failure_codes ?? input.issues
+    const infrastructure = details.some((code) => /runner|timeout|docker|identity|unverified/u.test(code))
+    if (!infrastructure) return { code: "REFERENCE_SOLUTION_FAILED", stage: "code_lab_secure_execution", safe_message: "参考实现未通过可信隐藏测试", private_details: [...details] }
+  }
+  if (input.starter_status === "passed") {
+    return { code: "STARTER_ALREADY_SOLVES_LAB", stage: "code_lab_secure_execution", safe_message: "起始代码意外完成了实验任务", private_details: [...issues] }
+  }
+  if (input.starter_status === "timeout" || input.starter_status === "runner_error") {
+    return { code: "STARTER_EXECUTION_UNSTABLE", stage: "code_lab_secure_execution", safe_message: "起始代码无法稳定进入可信执行", private_details: [...issues] }
+  }
+  const mutationDetails = (input.failed_mutations ?? []).flatMap((entry) => entry.failure_codes)
+  if (mutationDetails.length > 0) {
+    return { code: "MUTATION_NOT_DETECTED", stage: "code_lab_secure_execution", safe_message: "错误实现未被隐藏测试稳定检出", private_details: mutationDetails }
+  }
+  return { code: "CODE_LAB_EXECUTION_UNVERIFIED", stage: "code_lab_secure_execution", safe_message: "代码实验未通过可信执行验证", private_details: [...issues] }
 }
 
 export interface TrustedCodeLabVerifierOptions {
@@ -468,27 +527,47 @@ export function validateHiddenTestExpectedAgainstOutputContract(
   outputContract: CodeLabPublicPayload["execution_contract"]["output_contract"],
   expected: unknown,
 ): string[] {
-  const type = outputContract.type.normalize("NFKC").trim().toLocaleLowerCase()
-  if (/(?:stdout|标准输出|text|string|字符串|文本)/u.test(type)) {
-    return typeof expected === "string" ? [] : ["stdout text 只允许字符串 expected"]
-  }
-  if (/(?:number|numeric|float|integer|int|数值|数字|整数|浮点)/u.test(type)) {
-    return typeof expected === "number" && Number.isFinite(expected) ? [] : ["数值输出合同只允许有限数值 expected"]
-  }
-  if (/(?:array|list|数组|列表)/u.test(type)) return Array.isArray(expected) ? [] : ["列表输出合同只允许数组 expected"]
-  if (/(?:object|dict|map|对象|字典|映射)/u.test(type)) {
-    return expected !== null && typeof expected === "object" && !Array.isArray(expected) ? [] : ["对象输出合同只允许对象 expected"]
-  }
-  if (/(?:boolean|bool|布尔)/u.test(type)) return typeof expected === "boolean" ? [] : ["布尔输出合同只允许布尔 expected"]
-  return []
+  const required = classifyOutputContract(outputContract)
+  const actual = classifyExpectedValue(expected)
+  if (required === "unknown") return ["未知 output_contract 类型，拒绝验证 expected"]
+  if (required === actual) return []
+  const messages = {
+    string: "stdout text 只允许字符串 expected",
+    number: "数值输出合同只允许有限数值 expected",
+    array: "列表输出合同只允许数组 expected",
+    object: "对象输出合同只允许对象 expected",
+    boolean: "布尔输出合同只允许布尔 expected",
+  } as const
+  return [messages[required]]
+}
+
+export function buildInvalidExpectedTypeIssue(
+  outputContract: CodeLabPublicPayload["execution_contract"]["output_contract"],
+  expected: unknown,
+  authorIndex: number,
+  objectiveId: string,
+  message: string,
+): ValidationIssue {
+  return issue(
+    "invalid_expected_type",
+    `$.hidden_tests[${authorIndex}].expected`,
+    `author_index=${authorIndex}; objective_id=${objectiveId}; required_kind=${classifyOutputContract(outputContract)}; actual_kind=${classifyExpectedValue(expected)}; ${message}`,
+  )
 }
 
 export function validateHiddenTestComparisonCompatibility(
   comparison: CodeLabSecurePayload["hidden_tests"][number]["comparison"],
   expected: unknown,
+  outputContract?: CodeLabPublicPayload["execution_contract"]["output_contract"],
 ): string[] {
-  if (comparison.kind !== "numeric") return []
-  return typeof expected === "number" && Number.isFinite(expected)
+  const required = outputContract ? classifyOutputContract(outputContract) : classifyExpectedValue(expected)
+  if (required === "unknown") return ["未知 output_contract 类型，无法选择 comparison"]
+  if (required === "number") {
+    return comparison.kind === "numeric" && classifyExpectedValue(expected) === "number"
+      ? []
+      : ["数值输出合同必须使用 numeric 且 expected 为有限数值"]
+  }
+  return comparison.kind === "exact"
     ? []
     : ["numeric 比较只允许有限数值 expected；对象、数组、字符串或布尔结果必须使用 exact"]
 }

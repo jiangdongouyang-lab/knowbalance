@@ -188,6 +188,7 @@
           "type": "object",
           "required": ["type"],
           "properties": {
+            "kind": { "enum": ["string", "number", "array", "object", "boolean"] },
             "type": { "type": "string", "minLength": 1 },
             "constraints": { "type": "array", "items": { "type": "string", "minLength": 1 } }
           },

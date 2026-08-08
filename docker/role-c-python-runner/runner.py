@@ -77,6 +77,11 @@ def compile_submission(code, contract, platform_allowed_imports):
         "delattr",
         "memoryview",
     }
+    blocked_attributes = {
+        "f_back", "f_locals", "f_globals", "gi_frame", "cr_frame", "ag_frame",
+        "__class__", "__bases__", "__mro__", "__subclasses__", "__globals__",
+        "__code__", "__closure__", "__builtins__",
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             roots = {alias.name.split(".")[0] for alias in node.names}
@@ -89,8 +94,14 @@ def compile_submission(code, contract, platform_allowed_imports):
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
             if node.func.id in blocked_calls:
                 raise PermissionError("call_policy")
-        if isinstance(node, ast.Attribute) and node.attr.startswith("__"):
+        if isinstance(node, ast.Attribute) and (node.attr.startswith("__") or node.attr in blocked_attributes):
             raise PermissionError("attribute_policy")
+        if isinstance(node, ast.Subscript):
+            key = node.slice
+            if isinstance(key, ast.Constant) and isinstance(key.value, str) and (
+                key.value in blocked_calls or key.value in blocked_attributes
+            ):
+                raise PermissionError("subscript_policy")
     return compile(tree, "submission.py", "exec")
 
 

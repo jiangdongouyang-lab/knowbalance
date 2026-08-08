@@ -197,6 +197,12 @@ export interface GenerateRoleCForRoleDInput {
   runId: string
   /** Formal B path consumed verbatim by C. */
   pathNode: LearningPathNode
+  /**
+   * 跨轮稳定的画像版本标识。缺省时回退为 `${runId}-profile-v1`（runId 每轮变化
+   * → 每轮独立评估）。传入稳定值（如会话级 run_id）后，同一画像生命周期内的
+   * 多轮 evidence 会在 mastery 状态上跨轮累积，reprofile 才可能触发。
+   */
+  profile_version?: string
   /** 本轮相对上一轮的决策与反馈上下文（主 Agent 传入，C 用于定向生成与 adaptation 回传）。 */
   next_round_context?: NextRoundGenerationContext
 }
@@ -210,6 +216,34 @@ export interface SubmitRoleCAssessmentInput {
   submissionId: string
   answers: SubmissionEnvelope["answers"]
 }
+
+export interface RunRoleCAssessmentCodeInput {
+  executionId: string
+  sessionId: string
+  runId: string
+  learnerId: string
+  itemId: string
+  code: string
+}
+
+export type RunRoleCAssessmentCodeResult =
+  | {
+      status: "passed" | "failed" | "timeout"
+      executionId: string
+      runId: string
+      itemId: string
+      passedChecks: number
+      totalChecks: number
+      scoreRatio: number
+      feedback: RoleCCodeLabFeedback[]
+    }
+  | {
+      status: "blocked"
+      executionId: string
+      itemId: string
+      code: "INVALID_REQUEST" | "SESSION_NOT_FOUND" | "LEARNER_IDENTITY_MISMATCH" | "RUN_NOT_FOUND" | "ITEM_NOT_FOUND" | "SECURE_ASSESSMENT_UNAVAILABLE" | "RUNNER_UNAVAILABLE"
+      message: string
+    }
 
 export interface RunRoleCCodeLabInput {
   executionId: string

@@ -1,5 +1,20 @@
 # Learning Orchestrator Runtime Design
 
+> **实现状态标注（2026-08-08）**：本文是 Runtime 的**设计基线文档**（设计目标/验收标准），描述的是 runner + 13 态状态机的全量编排路径。当前代码的实际实现已在此设计上演进，阅读时请以代码为准：
+>
+> - **两条运行路径并存**：一次性 runner（`learning-orchestrator-runner.ts`，scaffold/deterministic 双模式，13 态状态机，用于演示与验收）+ **持久交互会话**（`interactive-session.ts`，HTTP 8787，**当前开发重心与 D 的实际接入路径**）。
+> - **交互会话的阶段机简化**：不是 13 态线性转移，而是 `objective_diagnosis → assessment → (completed|blocked|failed)` 的循环；`ORCHESTRATION_WORKER_SEQUENCE` 中的 profile-builder / path-planner 在诊断后被直接调用（`slice(3,5)`），C 内容生成走 `generateFormalRoleCRound`（最多 6 次尝试，独立 `roleCRoundRunId`）。
+> - **评分四路决策**：remediate / reinforce / advance / reprofile（阈值 0.4 / 0.8），下一轮内容**后台生成**（提交响应先返回 feedback，会话置 `running`，前端轮询），会话可跨服务重启恢复（`retry` + 持久化 `next_round_context`）。
+> - **锚点路由已彻底移除**：`submit_anchor_answers` 命令、`anchor_routing`/`anchor_answers` 字段、`continueAfterAnchorAnswers`/`mergeAnchorAnswers` 等函数及 UI 客户端函数全部删除；正式测评直接按 B 初始画像生成。
+> - **A 证据随节点推进**：`ensureCurrentNodeEvidence` 在每轮 C 生成前按当前节点 target/先修从知识库按 source_id 补全缺失证据，advance 到新节点不再因首轮 RAG 快照缺证据而阻塞。
+> - **测评结构升级**：五题 code-pair（mcq + true_false + trace + code 2 分 + code 4 分），不再含 `short_answer`；新增 `run_assessment_code` 即时试运行命令与 `code_execution` 公开字段。
+> - **旧会话自动迁移**：`GET /sessions/:id` 触发 `repairLegacyAssessment`，检测到 short_answer 或资源目标漂移时后台重新生成。
+> - **补救/强化差异合同全段生效**：`projectNextRoundContext` 不再因某段无 focus 目标而丢弃差异指令，teaching_strategy + variation_requirements 作用于整轮所有段。
+> - **reprofile 触发链路修复**：画像预期按 B 画像 known/weak_concepts 映射（`profileExpectationForTarget`）；`profile_version` 跨轮稳定（`<run_id>-profile-E<epoch>`，reprofile 后 epoch+1）；`profile_drift_minimum_conflicts=1` 适配每节点单 objective——reprofile 从"永不触发的死代码"变为可触发的画像校正。
+> - 交互会话仅接受 `deterministic` 模式（scaffold 模式被 `orchestrator-api-schema.ts` 明确拒绝）。
+>
+> 交互会话的 HTTP API、公开字段与命令详见 [`orchestrator_session_api.md`](./orchestrator_session_api.md)。
+
 ## 1. 核心结论
 
 KnowBalance 已经注册 `learning-orchestrator` 主 Agent 和 8 个角色子 Agent，但当前可复现业务链路主要由 TypeScript service、demo 和 test 直接串联。为了让系统从“有主 Agent 名义”升级为“主 Agent 真实可审计编排”，需要新增一层 **Learning Orchestrator Runtime**。

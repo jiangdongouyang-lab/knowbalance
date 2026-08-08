@@ -12,12 +12,11 @@
 .profile-level-track i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg,#1768d4,#6d55b7); opacity: .7; }
 .profile-level-track b { position: absolute; top: -5px; width: 21px; height: 21px; border: 4px solid white; border-radius: 50%; background: #6d55b7; box-shadow: 0 2px 8px rgba(109,85,183,.3); transform: translateX(-50%); }
 .profile-level-labels { display: flex; justify-content: space-between; color: #89918c; font-size: 10px; }
-.ability-radar { position: relative; width: 180px; height: 156px; margin: 19px auto 2px; overflow: hidden; }
-.radar-ring { position: absolute; left: 50%; top: 50%; width: 126px; height: 126px; border: 1px solid #d9d5e7; transform: translate(-50%,-50%) rotate(45deg); }.radar-ring.ring-middle { width: 84px; height: 84px; }.radar-ring.ring-inner { width: 42px; height: 42px; }
-.radar-axis { position: absolute; left: 50%; top: 50%; width: 1px; height: 130px; background: #e2dfeb; transform-origin: center; transform: translate(-50%,-50%); }.radar-axis.axis-b { transform: translate(-50%,-50%) rotate(60deg); }.radar-axis.axis-c { transform: translate(-50%,-50%) rotate(-60deg); }
+.ability-radar { position: relative; width: 240px; height: 240px; margin: 8px auto 0; }
 .ability-radar > div:last-child { position: absolute; z-index: 2; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #756b92; text-align: center; }.ability-radar > div:last-child b { font-size: 13px; }.ability-radar > div:last-child span { margin-top: 4px; color: #9891aa; font-size: 9px; }
-.ability-radar svg { position: absolute; z-index: 2; inset: 0; width: 100%; height: 100%; }.ability-radar polygon { fill: rgba(109,85,183,.24); stroke: #6d55b7; stroke-width: 2; }
+.ability-radar svg { display: block; width: 100%; height: 100%; }
 .radar-caption { margin: 0; color: #817a9c; text-align: center; font-size: 10px; font-weight: 700; }
+.radar-legend { margin: 13px 0 0; padding: 12px 14px; border-radius: 8px; background: #f8f6fc; }.radar-legend p { margin: 4px 0; color: #5c4b7a; font-size: 10px; line-height: 1.65; }.radar-legend b { color: #7c3aed; }
 .profile-visual-card dl { margin: 22px 0 0; }
 .profile-visual-card dl div { display: grid; grid-template-columns: 62px 1fr; gap: 12px; padding: 10px 0; border-top: 1px solid #eceae7; }
 .profile-visual-card dt { color: #8a839e; font-size: 11px; }.profile-visual-card dd { margin: 0; color: #4a465c; font-size: 12px; line-height: 1.55; }

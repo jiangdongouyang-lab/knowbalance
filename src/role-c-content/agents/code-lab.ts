@@ -13,7 +13,7 @@ import {
   unsupportedTargetEnvelope,
 } from "./harness"
 import type { CodeLabAgent, CodeLabDraftVerifier, CodeLabRequest, RoleCContentProvider } from "./types"
-import { validateCodeLabDraftStructure } from "../validators/code-lab-validator"
+import { validateCodeLabDraftStructure, classifyCodeLabVerificationFailure } from "../validators/code-lab-validator"
 
 export function generateCodeLab(
   request: CodeLabRequest,
@@ -81,6 +81,15 @@ export function createCodeLabAgent(
                 failure_codes: [...entry.failure_codes],
                 must_fail_test_ids: [...entry.must_fail_test_ids],
               })),
+              failure_diagnostic: classifyCodeLabVerificationFailure({
+                issues: verification.issues,
+                reference_failed: verification.reference_failed,
+                reference_failure_codes: verification.reference_failure_codes,
+                starter_status: verification.starter_status,
+                failed_mutations: verification.failed_mutations,
+                public_payload: draft.public_draft.payload,
+                secure_payload: draft.secure_draft.payload,
+              }),
             },
           ))
           structural = validateCodeLabDraftStructure(request, draft)

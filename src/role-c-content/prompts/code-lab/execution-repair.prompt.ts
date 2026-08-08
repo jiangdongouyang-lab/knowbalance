@@ -31,4 +31,7 @@ ${ROLE_C_NEXT_ROUND_CONTEXT_POLICY}
 3. 不得删除测试、降低覆盖、改写 public payload、访问网络/宿主文件/进程，或泄露答案。
 4. function 模式的隐藏输入仍使用 {"args": [...], "kwargs": {...}}；文件类任务仍使用内存文本或 io.StringIO 合同。
 5. reference 不得动态访问双下划线属性、使用动态执行或内省；普通类的 __init__ 定义可用；import 只能来自冻结 execution_contract.allowed_imports。
-6. ${JSON_ONLY}`
+6. trusted_execution_report.diagnostic_code 是权威修复类别：REFERENCE_SOLUTION_FAILED 时只修 reference_solution 或与失败码直接对应的 hidden_test_repairs；STARTER_ALREADY_SOLVES_LAB 时不得改 secure；RUNNER_IDENTITY_MISMATCH 时不得编造补丁。
+7. 若 trusted_execution_report 只提供 failed hidden_test ids 而没有 expected/actual 细节，仍必须修改这些失败 id 对应的 reference_solution 或 hidden_test_repairs；不得返回与上一轮完全相同的补丁。
+8. frozen_fields：public_payload、staged_contract、未点名失败的隐藏测试和所有稳定 ID 均不可改动；补丁中不得回传这些字段。
+8. ${JSON_ONLY}`

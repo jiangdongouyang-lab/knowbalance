@@ -26,6 +26,44 @@ export interface AssessmentDraftValidationReport {
   objective_coverage: number
 }
 
+export function validateAssessmentPublicSecureCodeContract(
+  publicItem: Pick<AssessmentItemPublic, "objective_id" | "modality" | "prompt" | "starter_code">,
+  suite: { execution_contract: { execution_mode: string }; reference_solution: string; hidden_tests: unknown[] },
+): ValidationIssue[] {
+  if (publicItem.modality !== "code" || suite.execution_contract.execution_mode !== "stdin_stdout") return []
+  const publicText = `${publicItem.prompt}\n${publicItem.starter_code ?? ""}`.normalize("NFKC").toLocaleLowerCase()
+  const publicOwnsInput = /input\s*\(/u.test(publicItem.starter_code ?? "")
+    || /(?:读取|获取|输入).{0,16}(?:用户|标准输入|stdin|数值|温度|分数)/u.test(publicText)
+  const secureRequiresInput = /input\s*\(|sys\.stdin/u.test(suite.reference_solution)
+    || suite.hidden_tests.length > 0
+  return secureRequiresInput && !publicOwnsInput
+    ? [issue("public_secure_code_contract_mismatch", "$.secure.code_test_suite", "私有评分合同引入了公开题目未声明或未提供的 stdin/input 必做能力")]
+    : []
+}
+
+export function validateAssessmentObjectiveScope(
+  request: Pick<TieredEvaluatorRequest, "generation_spec" | "evidence_pack">,
+  item: Pick<AssessmentItemPublic, "objective_id" | "modality" | "prompt" | "starter_code">,
+): ValidationIssue[] {
+  const target = request.generation_spec.targets.find((entry) => entry.objective_id === item.objective_id)
+  if (!target || item.modality !== "code") return []
+  const facts = request.evidence_pack.results
+    .filter((entry) => entry.source_id === target.source_id)
+    .flatMap((entry) => entry.facts)
+    .filter((fact) => target.required_fact_ids.includes(fact.fact_id))
+    .map((fact) => fact.content)
+    .join(" ")
+    .normalize("NFKC")
+    .toLocaleLowerCase()
+  const visible = `${item.prompt}\n${item.starter_code ?? ""}`.normalize("NFKC").toLocaleLowerCase()
+  const inputIsTarget = /(?:input|输入|读取)/u.test(facts)
+  const requiresInput = /(?:读取|获取|输入).{0,12}(?:input|用户|数值|温度)|input\s*\(/u.test(item.prompt.normalize("NFKC").toLocaleLowerCase())
+  const inputProvided = /input\s*\(/u.test(item.starter_code ?? "")
+  return !inputIsTarget && requiresInput && !inputProvided
+    ? [issue("off_objective_required_skill", "$.item.prompt", "代码题把当前目标外的输入解析设为必做步骤；应在 starter 中提供旁支输入，仅评分当前目标行为")]
+    : []
+}
+
 /** Public-stage gate so question/citation defects are repaired before answers are authored. */
 export function validateAssessmentPublicStage(
   request: TieredEvaluatorRequest,
@@ -53,6 +91,7 @@ export function validateAssessmentPublicStage(
     else if (!item.citations.some((citation) =>
       citation.source_id === target.source_id && target.required_fact_ids.includes(citation.fact_id),
     )) issues.push(issue("missing_required_fact", `$.items[${index}].citations`, "题目未引用所属目标的必要事实"))
+    issues.push(...validateAssessmentObjectiveScope(request, item))
   })
   for (const target of coreTargets) {
     const citedFactIds = new Set(publicPayload.items
@@ -170,6 +209,7 @@ export function validateAssessmentDraftStructure(
     )) {
       issues.push(issue("missing_required_fact", `$.public_draft.payload.items[${index}].citations`, "题目未引用所属目标的必要事实"))
     }
+    issues.push(...validateAssessmentObjectiveScope(request, publicItem))
     if (privateItem.answer_spec.kind === "concept_rubric") validateRubric(privateItem, index, issues)
     if (privateItem.answer_spec.kind === "numeric" &&
       (!Number.isFinite(privateItem.answer_spec.target) ||
@@ -178,6 +218,15 @@ export function validateAssessmentDraftStructure(
     }
     if (privateItem.answer_spec.kind === "code" && !suites.has(privateItem.answer_spec.test_suite_id)) {
       issues.push(issue("missing_code_suite", `$.secure_draft.payload.items[${index}].answer_spec`, "代码答案引用未知测试套件"))
+    }
+    if (privateItem.answer_spec.kind === "code") {
+      const suite = suites.get(privateItem.answer_spec.test_suite_id)
+      if (suite) {
+        issues.push(...validateAssessmentPublicSecureCodeContract(publicItem, suite))
+        if (suite.execution_contract.execution_mode !== "function") {
+          issues.push(issue("public_secure_code_contract_mismatch", `$.secure_draft.payload.code_test_suites`, "正式代码题必须使用 function 模式"))
+        }
+      }
     }
   })
   for (const privateItem of securePayload.items) {

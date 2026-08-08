@@ -5,6 +5,7 @@ import type {
   AssessmentPublicArtifact,
   AssessmentSecureArtifact,
   GradeItemResult,
+  HiddenTest,
   RubricCriterion,
   RubricCriterionResult,
   SessionState,
@@ -209,7 +210,7 @@ async function gradeOne(
       max_output_bytes: suite.execution_contract.resource_limits.max_output_bytes,
       network_allowed: false,
     }, options.max_tool_retries ?? 2)
-    if (!validCodeExecutionResult(result, suite.hidden_tests.length) || result.runner_image_digest !== options.code_runner.runner_image_digest) {
+    if (!validCodeExecutionResult(result, suite.hidden_tests) || result.runner_image_digest !== options.code_runner.runner_image_digest) {
       return { status: "blocked", score: 0, confidence: 0, feedback_code: "invalid_code_runner_result" }
     }
     return {
@@ -450,17 +451,40 @@ function validCodeExecutionResult(result: {
   total_tests: number
   score_ratio: number
   failure_codes: string[]
-}, expectedTests: number): boolean {
+}, expectedTests: number | HiddenTest[]): boolean {
+  const tests = Array.isArray(expectedTests) ? expectedTests : undefined
+  const expectedCount = tests?.length ?? expectedTests
   const shapeOk = ["passed", "failed", "timeout", "runner_error"].includes(result.status)
     && Number.isSafeInteger(result.passed_tests) && Number.isSafeInteger(result.total_tests)
-    && result.passed_tests >= 0 && result.total_tests === expectedTests && result.passed_tests <= result.total_tests
+    && result.passed_tests >= 0 && result.total_tests === expectedCount && result.passed_tests <= result.total_tests
     && Number.isFinite(result.score_ratio) && result.score_ratio >= 0 && result.score_ratio <= 1
     && Array.isArray(result.failure_codes) && result.failure_codes.every((code) => typeof code === "string")
   if (!shapeOk) return false
-  if (result.status === "passed") return result.passed_tests === expectedTests && result.score_ratio === 1 && result.failure_codes.length === 0
-  if (result.status === "failed") return result.passed_tests < expectedTests && result.score_ratio < 1 && result.failure_codes.length > 0
+  if (tests && !scoreRatioMatchesSomePassedSubset(result.score_ratio, result.passed_tests, tests)) return false
+  if (result.passed_tests === 0 && result.score_ratio !== 0) return false
+  if (result.passed_tests === result.total_tests && result.score_ratio !== 1) return false
+  if (result.status === "passed") return result.passed_tests === expectedCount && result.score_ratio === 1 && result.failure_codes.length === 0
+  if (result.status === "failed") return result.passed_tests < expectedCount && result.score_ratio < 1 && result.failure_codes.length > 0
   if (result.status === "timeout") return result.score_ratio === 0 && result.failure_codes.length > 0
   return false
+}
+
+function scoreRatioMatchesSomePassedSubset(
+  ratio: number,
+  passedCount: number,
+  tests: HiddenTest[],
+): boolean {
+  const totalWeight = tests.reduce((sum, test) => sum + test.weight, 0)
+  if (!(totalWeight > 0)) return ratio === 0
+  let sums: number[][] = [[]]
+  for (let selected = 0; selected < passedCount; selected += 1) {
+    sums = sums.flatMap((indices) => tests.flatMap((test, index) =>
+      indices.includes(index) ? [] : [[...indices, index]]))
+  }
+  return sums.some((indices) => {
+    const passedWeight = indices.reduce((sum, index) => sum + tests[index]!.weight, 0)
+    return Math.abs(passedWeight / totalWeight - ratio) <= 1e-9
+  })
 }
 
 function parseNumericResponse(

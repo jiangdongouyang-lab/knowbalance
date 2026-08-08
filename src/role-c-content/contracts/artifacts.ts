@@ -120,7 +120,12 @@ export interface ExecutionContract {
   entry_point?: string
   allowed_imports: string[]
   input_contract: { type: string; constraints: string[] }
-  output_contract: { type: string; constraints?: string[] }
+  output_contract: {
+    /** Canonical semantic classifier; type is retained only as display/backward-compatible prose. */
+    kind?: "string" | "number" | "array" | "object" | "boolean"
+    type: string
+    constraints?: string[]
+  }
   resource_limits: {
     timeout_ms: number
     memory_mb: number

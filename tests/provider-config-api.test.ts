@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import { createLearningOrchestratorApiHandler } from "../src/orchestration/learning-orchestrator-api"
@@ -53,6 +53,26 @@ describe("local provider configuration API", () => {
     expect(persisted).toContain("test-secret-that-must-not-return")
   })
 
+  test("loads a persisted provider configuration into the runtime environment on restart", async () => {
+    const root = await mkdtemp(join(tmpdir(), "provider-config-"))
+    roots.push(root)
+    await writeFile(join(root, "provider-config.json"), JSON.stringify({
+      provider_mode: "model",
+      endpoint: "https://api.deepseek.com/chat/completions",
+      model_id: "deepseek-chat",
+      api_key: "persisted-secret",
+    }))
+    const environment: Record<string, string | undefined> = {}
+    createLearningOrchestratorApiHandler({ data_root: root, provider_environment: environment })
+
+    expect(environment).toMatchObject({
+      ROLE_C_PROVIDER_MODE: "model",
+      ROLE_C_MODEL_ENDPOINT: "https://api.deepseek.com/chat/completions",
+      ROLE_C_MODEL_ID: "deepseek-chat",
+      ROLE_C_MODEL_API_KEY: "persisted-secret",
+    })
+  })
+
   test("rejects provider changes sent to a non-loopback host", async () => {
     const root = await mkdtemp(join(tmpdir(), "provider-config-"))
     roots.push(root)
@@ -60,6 +80,34 @@ describe("local provider configuration API", () => {
     const response = await handle(new Request("http://example.com/orchestrator/provider-config", {
       method: "PUT",
       headers: { "content-type": "application/json", origin: "http://example.com" },
+      body: JSON.stringify({ endpoint: "https://api.example.com/v1/chat/completions", model_id: "model", api_key: "secret" }),
+    }))
+    expect(response.status).toBe(403)
+  })
+
+  test("rejects cross-origin provider configuration writes even on loopback", async () => {
+    const root = await mkdtemp(join(tmpdir(), "provider-config-"))
+    roots.push(root)
+    const handle = createLearningOrchestratorApiHandler({ data_root: root, provider_environment: {} })
+    const response = await handle(new Request("http://127.0.0.1/orchestrator/provider-config", {
+      method: "PUT",
+      headers: { "content-type": "application/json", origin: "https://evil.example" },
+      body: JSON.stringify({ endpoint: "https://api.example.com/v1/chat/completions", model_id: "model", api_key: "secret" }),
+    }))
+    expect(response.status).toBe(403)
+  })
+
+  test("disables provider configuration writes when the server is bound to a non-loopback host", async () => {
+    const root = await mkdtemp(join(tmpdir(), "provider-config-"))
+    roots.push(root)
+    const handle = createLearningOrchestratorApiHandler({
+      data_root: root,
+      provider_environment: {},
+      server_hostname: "0.0.0.0",
+    })
+    const response = await handle(new Request("http://127.0.0.1/orchestrator/provider-config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ endpoint: "https://api.example.com/v1/chat/completions", model_id: "model", api_key: "secret" }),
     }))
     expect(response.status).toBe(403)

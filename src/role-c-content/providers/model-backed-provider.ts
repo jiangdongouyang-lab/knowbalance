@@ -45,6 +45,7 @@ import {
   CODE_LAB_STARTER_REPAIR_SYSTEM_PROMPT,
   CONCEPT_SEGMENT_SYSTEM_PROMPT,
   STAGED_AUTHOR_PROMPT_VERSION,
+  ROLE_C_PROMPT_MANIFEST_VERSION,
   stagedRepairPrompt,
 } from "../prompts"
 import { validateCodeLabDraftStructure, validateCodeLabPublicStage } from "../validators/code-lab-validator"
@@ -75,13 +76,18 @@ import {
   canonicalizeTestComparison,
   asStandardInput,
   normalizeAssessmentPair,
+  expectedOnlyReferenceFailureCodes,
+  isExpectedOnlyReferenceFailure,
   normalizeCodeLabSecure,
+  patchExpectedFromReferenceFailures,
   normalizeCodeLabSecureAuthorPayloadLenient,
   normalizeConceptSegmentAuthorPayloadLenient,
   splitConceptRequest,
   validateAssessmentPublicAuthorAgainstPlan,
   validateAssessmentSecureAuthorAgainstPublic,
   validateAssessmentSecureAgainstPublic,
+  deterministicAssessmentStarterRepair,
+  assessmentStarterIsIncomplete,
   validateCodeLabPublicAuthorAgainstPlan,
   validateCodeLabSecureAuthorAgainstPlan,
   validateCodeLabSecureAgainstPlan,
@@ -112,6 +118,41 @@ export interface ModelBackedProviderOptions {
   assessment_max_tokens?: number
   assessment_public_max_tokens?: number
   assessment_secure_max_tokens?: number
+  stage_failure_diagnostic_sink?: (diagnostic: SafeStageFailureDiagnostic) => void | Promise<void>
+}
+
+export interface StageFailureDiagnostic {
+  task: string
+  attempt: number
+  max_repairs: number
+  output_schema_id: string
+  issues: string[]
+  output_hash?: string
+}
+
+export interface SafeStageFailureDiagnostic {
+  task: string
+  attempt: number
+  max_repairs: number
+  output_schema_id: string
+  issue_codes: string[]
+  issue_count: number
+  output_hash?: string
+}
+
+export function sanitizeStageFailureDiagnostic(input: StageFailureDiagnostic): SafeStageFailureDiagnostic {
+  return {
+    task: input.task,
+    attempt: input.attempt,
+    max_repairs: input.max_repairs,
+    output_schema_id: input.output_schema_id,
+    issue_codes: input.issues.map((entry) => {
+      const coded = /^\[([^\]]+)\]/.exec(entry)
+      return coded?.[1] ?? entry.split(":", 1)[0]!.trim()
+    }),
+    issue_count: input.issues.length,
+    ...(input.output_hash ? { output_hash: input.output_hash } : {}),
+  }
 }
 
 interface StructuredStage<T> {
@@ -125,6 +166,7 @@ interface StructuredStage<T> {
   idempotency_identity: Record<string, unknown>
   max_repairs: number
   validate: (value: T) => string[]
+  diagnostic_sink?: (diagnostic: SafeStageFailureDiagnostic) => void | Promise<void>
 }
 
 interface CodeLabStarterRepairPatch {
@@ -157,6 +199,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
   private readonly assessmentMaxTokens: number
   private readonly assessmentPublicMaxTokens: number
   private readonly assessmentSecureMaxTokens: number
+  private readonly stageFailureDiagnosticSink?: (diagnostic: SafeStageFailureDiagnostic) => void | Promise<void>
 
   constructor(
     private readonly gateway: ModelGateway,
@@ -177,6 +220,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
     this.assessmentMaxTokens = options.assessment_max_tokens ?? 8_000
     this.assessmentPublicMaxTokens = positiveInteger(options.assessment_public_max_tokens, 4_500, "assessment_public_max_tokens")
     this.assessmentSecureMaxTokens = positiveInteger(options.assessment_secure_max_tokens, 5_500, "assessment_secure_max_tokens")
+    this.stageFailureDiagnosticSink = options.stage_failure_diagnostic_sink
   }
 
   async generateConceptLesson(
@@ -215,6 +259,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
           seed: segment.generation_spec.policies.seed,
         },
         max_repairs: maxRepairs,
+        diagnostic_sink: this.stageFailureDiagnosticSink,
         validate: (payload) => {
           const schema = validateRoleCSchemaFragment(
             "concept_lesson_payload.schema.json",
@@ -287,6 +332,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
       },
       max_repairs: maxRepairs,
+      diagnostic_sink: this.stageFailureDiagnosticSink,
       validate: (payload) => {
         const schema = validateRoleCSchemaFragment(
           "code_lab_draft.schema.json",
@@ -322,6 +368,8 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       request.generation_spec,
       identity.test_suite_id,
     )
+    const publicTestInputs = normalizedPublic.public_tests.map((test) => test.input)
+    const secureInputRules = `\n\nPRIVATE INPUT RULES (must follow):\n- Compare every hidden_tests[].input against these public inputs using exact JSON equality: ${JSON.stringify(publicTestInputs)}\n- No hidden input may be exactly equal to any public input.\n- Do not copy any concrete value from public tests, starter, examples, hints, or prompt.\n- For function entries with parameters, use a structurally different non-empty envelope and recompute expected.`
     const secureAuthorPayload = await this.generateStage<CodeLabSecureAuthorPayload>({
       task: "role-c.code-lab.secure",
       system_prompt: CODE_LAB_SECURE_STAGE_SYSTEM_PROMPT,
@@ -338,6 +386,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         },
         revision_objections: modelInput.revision_objections,
         external_revision_round: modelInput.external_revision_round,
+        private_input_rules: secureInputRules,
       },
       output_schema_id: "role_c_code_lab_secure_author_payload_v1",
       output_schema: fragment("code_lab_draft.schema.json", "/$defs/secure_author_payload"),
@@ -351,6 +400,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
       },
       max_repairs: maxRepairs,
+      diagnostic_sink: this.stageFailureDiagnosticSink,
       validate: (payload) => {
         const schema = validateRoleCSchemaFragment("code_lab_draft.schema.json", "/$defs/secure_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
@@ -359,6 +409,8 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
             payload,
             securePlan,
             normalizedPublic.execution_contract.execution_mode,
+            normalizedPublic.public_tests.map((test) => test.input),
+            normalizedPublic.execution_contract.output_contract,
           ),
           normalizedPublic.execution_contract,
         )
@@ -389,6 +441,8 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         secureAuthorPayload,
         securePlan,
         normalizedPublic.execution_contract.execution_mode,
+        normalizedPublic.public_tests.map((test) => test.input),
+        normalizedPublic.execution_contract.output_contract,
       ),
       normalizedPublic.execution_contract,
     )
@@ -469,6 +523,22 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
     }
 
     const needsSecureRepair = trustedReferenceFailed(feedback)
+    const expectedOnlyCodes = expectedOnlyReferenceFailureCodes(feedback)
+    if (needsSecureRepair && expectedOnlyCodes.length > 0 && isExpectedOnlyReferenceFailure(expectedOnlyCodes)) {
+      const repaired = patchExpectedFromReferenceFailures(draft.secure_draft.payload, expectedOnlyCodes)
+      return {
+        public_draft: { payload: publicPayload },
+        secure_draft: {
+          payload: normalizeCodeLabSecure(
+            request.generation_spec,
+            repaired,
+            publicPayload,
+            identity.test_suite_id,
+            objectivePlan,
+          ),
+        },
+      }
+    }
     if (!needsSecureRepair) {
       return {
         public_draft: { payload: publicPayload },
@@ -494,9 +564,13 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         prior_secure_payload: draft.secure_draft.payload,
         trusted_execution_report: {
           revision_round: feedback.revision_round,
+          diagnostic_code: feedback.failure_diagnostic?.code ?? null,
+          diagnostic_message: feedback.failure_diagnostic?.safe_message ?? null,
           issues: verificationIssues,
           reference_failed: feedback.reference_failed ?? false,
           reference_failure_codes: feedback.reference_failure_codes ?? [],
+          reference_failure_raw: expectedOnlyReferenceFailureCodes(feedback),
+          reference_failure_ids: [...trustedReferenceFailureTestIds(feedback)],
           starter_status: feedback.starter_status ?? null,
           starter_repaired_by_public_patch: feedback.starter_status === "passed",
           failed_mutations: [],
@@ -525,9 +599,10 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         trusted_execution_feedback_hash: contentHash(verificationIssues),
         verification_revision_round: feedback.revision_round,
         stage: "secure-execution-repair",
-        prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
+        prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
       },
       max_repairs: maxRepairs,
+      diagnostic_sink: this.stageFailureDiagnosticSink,
       validate: (patch) => {
         const schema = validateRoleCSchemaFragment(
           "code_lab_draft.schema.json",
@@ -578,12 +653,17 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
       draft.secure_draft.payload,
       publicPayload.execution_contract,
     )
+    const repairedSecure = applyCodeLabExecutionRepairPatch(
+      draft.secure_draft.payload,
+      normalizedRepairPatch,
+    )
+    const securedWithExpected = patchExpectedFromReferenceFailures(
+      repairedSecure,
+      verificationIssues,
+    )
     const securePayload = normalizeCodeLabSecure(
       request.generation_spec,
-      applyCodeLabExecutionRepairPatch(
-        draft.secure_draft.payload,
-        normalizedRepairPatch,
-      ),
+      securedWithExpected,
       publicPayload,
       identity.test_suite_id,
       objectivePlan,
@@ -624,7 +704,19 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
       },
       max_repairs: maxRepairs,
+      diagnostic_sink: this.stageFailureDiagnosticSink,
       validate: (payload) => {
+        // 确定性修复：代码题 starter_code 直接给出完整答案时，
+        // 提取函数签名替换为未完成骨架，避免消耗模型修复预算。
+        if (Array.isArray((payload as any).items)) {
+          for (let i = 0; i < (payload as any).items.length; i++) {
+            const item = (payload as any).items[i]
+            const expected = plan[i]
+            if (expected?.modality === "code" && item?.starter_code && !assessmentStarterIsIncomplete(item.starter_code)) {
+              item.starter_code = deterministicAssessmentStarterRepair(item.starter_code)
+            }
+          }
+        }
         const schema = validateRoleCSchemaFragment("assessment_draft.schema.json", "/$defs/public_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
         const planIssues = validateAssessmentPublicAuthorAgainstPlan(payload, plan)
@@ -672,6 +764,7 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
       },
       max_repairs: maxRepairs,
+      diagnostic_sink: this.stageFailureDiagnosticSink,
       validate: (payload) => {
         const schema = validateRoleCSchemaFragment("assessment_draft.schema.json", "/$defs/secure_author_payload", payload)
         if (!schema.ok) return validationIssues(schema)
@@ -765,9 +858,10 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         trusted_verification_feedback_hash: contentHash(verificationIssues),
         verification_revision_round: feedback.revision_round,
         stage: "secure-execution-repair",
-        prompt_version: STAGED_AUTHOR_PROMPT_VERSION,
+        prompt_version: ROLE_C_PROMPT_MANIFEST_VERSION,
       },
       max_repairs: maxRepairs,
+      diagnostic_sink: this.stageFailureDiagnosticSink,
       validate: (payload) => {
         const schema = validateRoleCSchemaFragment(
           "assessment_draft.schema.json",
@@ -875,7 +969,23 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         secure_draft: { payload: frozenSecure },
       }))
     }
+    const issueCodes = validateCodeLabDraftStructure(request, {
+      public_draft: { payload: input.public_payload },
+      secure_draft: { payload: input.secure_payload },
+    }).issues.map((issue) => issue.code)
+    const deterministicRepair = shouldUseDeterministicPublicSafetyRepair(issueCodes)
     let patch: CodeLabPublicSafetyRepairPatch
+    if (deterministicRepair) {
+      patch = conservativeCodeLabPublicSafetyPatch(input.public_payload)
+      const fallbackIssues = validatePatch(patch)
+      if (fallbackIssues.length > 0) {
+        throw new ModelOutputValidationError(
+          "role-c.code-lab.public.safety-repair",
+          fallbackIssues,
+        )
+      }
+      return applyCodeLabPublicSafetyPatch(input.public_payload, patch)
+    }
     try {
       patch = await this.generateStage<CodeLabPublicSafetyRepairPatch>({
         task: "role-c.code-lab.public.safety-repair",
@@ -1057,9 +1167,31 @@ export class ModelBackedRoleCContentProvider implements RoleCContentProvider {
         }
         throw error
       }
+      const priorOutput = previousOutput
       previousOutput = structuredClone(value)
       issues = stage.validate(value)
       if (issues.length === 0) return value
+      const progressIssues = validateStageRepairProgress(priorOutput, value)
+      if (progressIssues.length > 0) {
+        issues = [...issues, ...progressIssues]
+        await stage.diagnostic_sink?.(sanitizeStageFailureDiagnostic({
+          task: stage.task,
+          attempt,
+          max_repairs: stage.max_repairs,
+          output_schema_id: stage.output_schema_id,
+          issues,
+          output_hash: contentHash(value),
+        }))
+        break
+      }
+      await stage.diagnostic_sink?.(sanitizeStageFailureDiagnostic({
+        task: stage.task,
+        attempt,
+        max_repairs: stage.max_repairs,
+        output_schema_id: stage.output_schema_id,
+        issues,
+        output_hash: contentHash(value),
+      }))
     }
     throw new ModelOutputValidationError(stage.task, issues)
   }
@@ -1204,9 +1336,9 @@ function hasRepairablePublicAnswerLeak(
 function validationIssuesExcludingRepairablePublicAnswerLeak(
   report: ReturnType<typeof validateCodeLabDraftStructure>,
 ): string[] {
-  return report.issues
-    .filter((issue) => !REPAIRABLE_STARTER_LEAK_CODES.has(issue.code))
-    .map((issue) => `${issue.path}: ${issue.message}`)
+  return validationIssueStrings({
+    issues: report.issues.filter((issue) => !REPAIRABLE_STARTER_LEAK_CODES.has(issue.code)),
+  })
 }
 
 function validateCodeLabPublicSafetyPatchShape(
@@ -1233,7 +1365,7 @@ function validateCodeLabPublicSafetyPatchShape(
   return issues
 }
 
-function applyCodeLabPublicSafetyPatch(
+export function applyCodeLabPublicSafetyPatch(
   prior: CodeLabPublicPayload,
   patch: CodeLabPublicSafetyRepairPatch,
 ): CodeLabPublicPayload {
@@ -1269,7 +1401,11 @@ function applyCodeLabPublicSafetyPatch(
   }
 }
 
-function conservativeCodeLabPublicSafetyPatch(
+export function shouldUseDeterministicPublicSafetyRepair(issueCodes: string[]): boolean {
+  return issueCodes.some((code) => REPAIRABLE_STARTER_LEAK_CODES.has(code))
+}
+
+export function conservativeCodeLabPublicSafetyPatch(
   prior: CodeLabPublicPayload,
 ): CodeLabPublicSafetyRepairPatch {
   return {
@@ -1637,7 +1773,11 @@ function validateCodeLabExecutionRepairProgress(
       failedTestIds,
     )
     if (!referenceChanged && !testsChanged) {
-      issues.push("参考实现未通过隐藏测试，修订稿却未改变参考源码或相应隐藏测试")
+      const referenceFailureCodes = expectedOnlyReferenceFailureCodes(feedback)
+      const suffix = referenceFailureCodes.length > 0
+        ? `；reference_failure_kinds=${referenceFailureCodes.map(referenceFailureKind).join("|")}；reference_failure_shapes=${referenceFailureCodes.map(referenceFailureShape).join("|")}`
+        : ""
+      issues.push(`参考实现未通过隐藏测试，修订稿却未改变参考源码或相应隐藏测试${suffix}`)
     }
   }
   return issues
@@ -1689,6 +1829,28 @@ function trustedReferenceFailed(feedback: CodeLabVerificationFeedback): boolean 
     ?? feedback.issues.some((entry) => entry.includes("reference_solution 未通过"))
 }
 
+function referenceFailureKind(code: string): string {
+  const separator = code.indexOf(":")
+  if (separator <= 0) return "other"
+  const reason = code.slice(separator + 1)
+  if (reason.includes("assertion_failed")) return "assertion_failed"
+  if (reason.includes("runtime_")) return reason.slice(reason.indexOf("runtime_"))
+  if (reason.includes("timeout")) return "timeout"
+  if (reason.includes("runner_error")) return "runner_error"
+  return "other"
+}
+
+function referenceFailureShape(code: string): string {
+  const separator = code.indexOf(":")
+  if (separator <= 0) return "unknown"
+  const rest = code.slice(separator + 1)
+  if (rest.includes("assertion_failed")) return rest.includes("expected=") && rest.includes("actual=") ? "assertion_diff" : "assertion_tag_only"
+  if (rest.includes("runtime_")) return rest.startsWith("runtime_") ? "runtime_error" : "runtime_unknown"
+  if (rest.includes("timeout")) return "timeout"
+  if (rest.includes("runner_error")) return "runner_error"
+  return "other"
+}
+
 function trustedReferenceFailureTestIds(
   feedback: CodeLabVerificationFeedback,
 ): Set<string> {
@@ -1696,10 +1858,9 @@ function trustedReferenceFailureTestIds(
     ?? feedback.issues.flatMap((entry) => {
       if (!entry.includes("reference_solution 未通过")) return []
       const separator = entry.indexOf("：")
-      return separator >= 0 ? entry.slice(separator + 1).split(/[、,]/) : []
+      return separator >= 0 ? entry.slice(separator + 1).split(/、/).map((part) => part.trim()).filter(Boolean) : []
     })
   return new Set(failureCodes.flatMap((entry) => {
-    // failure_codes 格式：<test_id>:<reason>[:expected=...:actual=...]，取首个冒号前的 test_id。
     const separator = entry.indexOf(":")
     if (separator <= 0) return []
     return [entry.slice(0, separator)]
@@ -1727,8 +1888,18 @@ function relevantHiddenTestsChanged(
   })
 }
 
-function validationIssues(report: { issues: Array<{ path: string; message: string }> }): string[] {
-  return report.issues.map((entry) => `${entry.path}: ${entry.message}`)
+export function validationIssueStrings(report: { issues: Array<{ code?: string; path: string; message: string }> }): string[] {
+  return report.issues.map((entry) => `${entry.code ? `[${entry.code}] ` : ""}${entry.path}: ${entry.message}`)
+}
+
+export function validateStageRepairProgress<T>(previous: T | undefined, current: T): string[] {
+  if (previous === undefined) return []
+  return contentHash(previous) === contentHash(current)
+    ? ["[NO_REPAIR_PROGRESS] staged repair output is identical to the previous attempt"]
+    : []
+}
+function validationIssues(report: { issues: Array<{ code?: string; path: string; message: string }> }): string[] {
+  return validationIssueStrings(report)
 }
 
 function boundedRepairs(

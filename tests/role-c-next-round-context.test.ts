@@ -19,6 +19,12 @@ describe("next round context projection", () => {
 
     expect(remediate?.teaching_strategy).toBe("reduce_load")
     expect(reinforce?.teaching_strategy).toBe("same_difficulty_new_variant")
+    expect(remediate?.variation_requirements.lesson_structure).toContain("错误与修正对照")
+    expect(remediate?.variation_requirements.code_lab_policy).toContain("纠错目标")
+    expect(reinforce?.variation_requirements.lesson_structure).toContain("全新场景迁移")
+    expect(reinforce?.variation_requirements.scenario_policy).toContain("禁止继续使用成绩")
+    expect(reinforce?.variation_requirements.code_lab_policy).toContain("改变任务结构")
+    expect(remediate?.variation_requirements).not.toEqual(reinforce?.variation_requirements)
     expect(remediate).not.toEqual(reinforce)
   })
 
@@ -54,5 +60,27 @@ describe("next round context projection", () => {
 
     expect(concept.upstream.next_round_context?.teaching_strategy).toBe("reduce_load")
     expect(lab.next_round_context?.teaching_strategy).toBe("same_difficulty_new_variant")
+  })
+
+  test("keeps the variation contract on segments without a focus objective (no silent drop)", () => {
+    // 分段生成时，某一段可能不含 focus 目标。差异合同（teaching_strategy +
+    // variation_requirements）必须仍然作用于该段，否则补救/强化轮次中
+    // 部分讲义退回普通生成，导致“有区别但不严格按主题”。
+    const projected = projectNextRoundContext(
+      { ...baseContext, action: "remediate", focus_objective_ids: ["O2"] },
+      ["O1", "O3"],
+    )
+    expect(projected).toBeDefined()
+    expect(projected?.teaching_strategy).toBe("reduce_load")
+    expect(projected?.variation_requirements.lesson_structure).toContain("错误与修正对照")
+    // focus 过滤为本段可见目标；本段不含 O2 时为空数组，但差异合同不丢失。
+    expect(projected?.focus_objective_ids).toEqual([])
+
+    const reinforceProjected = projectNextRoundContext(
+      { ...baseContext, action: "reinforce", focus_objective_ids: ["O2"] },
+      ["O1"],
+    )
+    expect(reinforceProjected?.teaching_strategy).toBe("same_difficulty_new_variant")
+    expect(reinforceProjected?.variation_requirements.scenario_policy).toContain("禁止继续使用成绩")
   })
 })

@@ -10,6 +10,7 @@
 import { canonicalizeConcept } from "./concept-canonicalizer"
 import type { KnowledgeBase, KnowledgeDifficulty } from "../knowledge/types"
 import type {
+  AbilityDimension,
   BackgroundEvidence,
   ConceptProvenance,
   ObjectiveDiagnosisEvidence,
@@ -167,6 +168,7 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
     known_concepts: knownConcepts,
     weak_concepts: weakConcepts,
     goal,
+    ability_dimensions: computeAbilityDimensions(knownConcepts, weakConcepts, levelResolution.value, objectiveDiagnosis),
   }
 
   return { profile, provenance, rag_request: buildRagRequest(profile) }
@@ -188,6 +190,43 @@ function alignToObjectiveSource(
 
 // level 级联：客观封顶 → 多题全对的保守上调 → 自评 → 默认 beginner。
 // 答错仍是强信号；答对只有在至少 3 道真实题全部通过时才允许上调，且单轮最多一档。
+
+/** 从已知/薄弱概念和客观诊断结果推导 B 能力维度（0-1 标度，3 维度）。 */
+function computeAbilityDimensions(
+  knownConcepts: string[],
+  weakConcepts: string[],
+  level: KnowledgeDifficulty,
+  objectiveDiagnosis: ObjectiveDiagnosisEvidence,
+): AbilityDimension[] {
+  const totalConcepts = knownConcepts.length + weakConcepts.length
+  const conceptScore = totalConcepts > 0
+    ? clamp(knownConcepts.length / totalConcepts, 0.2, 0.95)
+    : 0.5
+
+  const levelScore: Record<KnowledgeDifficulty, number> = {
+    beginner: 0.2,
+    basic: 0.45,
+    intermediate: 0.7,
+    integrated: 0.9,
+  }
+
+  const answeredItems = objectiveDiagnosis.items.filter((item) => item.verdict !== "unanswered")
+  const correctItems = answeredItems.filter((item) => item.verdict === "correct")
+  const diagnosisScore = answeredItems.length > 0
+    ? clamp(correctItems.length / answeredItems.length, 0.15, 1)
+    : 0.5
+
+  return [
+    { label: "概念理解", value: conceptScore },
+    { label: "代码认知", value: levelScore[level] ?? 0.25 },
+    { label: "诊断表现", value: diagnosisScore },
+  ]
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(Math.max(value, min), max)
+}
+
 function resolveLevel(
   selfRating: KnowledgeDifficulty | null,
   objectiveDiagnosis: ObjectiveDiagnosisEvidence,

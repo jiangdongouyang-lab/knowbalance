@@ -118,13 +118,14 @@ export interface RoleCReviewedReleaseDelivery {
 
 export type RoleCLearningSessionHandoff =
   | {
-      phase: "anchor_pending"
+      /** New production path: all formal assessment items are preselected by trusted C. */
+      phase: "preselected"
       routing_request_id: string
       session_id: string
       run_id: string
       form_id: string
       attempt_no: number
-      /** Exactly the public anchor set; no route has been selected yet. */
+      /** Exactly the backend-selected formal assessment item set. */
       required_item_ids: string[]
     }
   | {
@@ -514,17 +515,17 @@ export function validateLearningSessionHandoff(
     || session.form_id !== assessment.payload.form_id) {
     throw new Error("ROLE_C_D_SESSION_HANDOFF_INVALID")
   }
-  const anchorIds = assessment.payload.routing.anchor_item_ids
-  if (session.phase === "anchor_pending") {
+  const assessmentItemIds = assessment.payload.items.map((item) => item.item_id)
+  if (session.phase === "preselected") {
     if (session.required_item_ids.length === 0
       || new Set(session.required_item_ids).size
         !== session.required_item_ids.length
-      || !sameStringSet(session.required_item_ids, anchorIds)) {
+      || !sameStringSet(session.required_item_ids, assessmentItemIds)) {
       throw new Error("ROLE_C_D_SESSION_ITEMS_MISMATCH")
     }
     return {
       ...structuredClone(session),
-      required_item_ids: [...anchorIds],
+      required_item_ids: [...assessmentItemIds],
     }
   }
   if (!session.route_lock_id.trim() || !session.route_id.trim()
@@ -550,6 +551,7 @@ export function validateLearningSessionHandoff(
   if (route.action !== session.action || !ratioMatchesRoute) {
     throw new Error("ROLE_C_D_SESSION_ROUTE_MISMATCH")
   }
+  const anchorIds = assessment.payload.routing.anchor_item_ids
   const anchorIdSet = new Set(anchorIds)
   const expectedItemIds = assessment.payload.items
     .filter((item) =>

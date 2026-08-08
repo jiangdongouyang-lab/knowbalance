@@ -7,6 +7,7 @@ import {
 } from "../src/orchestration/worker-adapters"
 import { ORCHESTRATION_WORKER_SEQUENCE } from "../src/orchestration/state-machine"
 import type { OrchestrationStepDefinition, WorkerInvocation } from "../src/orchestration/types"
+import { readFile } from "node:fs/promises"
 
 function invocationFor(step: OrchestrationStepDefinition, index: number): WorkerInvocation {
   return createScaffoldWorkerInvocation({
@@ -52,6 +53,12 @@ async function runDeterministicRoleBPrefix(): Promise<{
 }
 
 describe("orchestration worker adapters", () => {
+  test("production adapter does not instantiate the host subprocess runner", async () => {
+    const source = await readFile("src/orchestration/worker-adapters.ts", "utf8")
+    expect(source).not.toContain("new SubprocessCodeRunner()")
+    expect(source).toContain("createDockerPythonCodeRunnerFromEnv")
+  })
+
   test("scaffold mode provides a valid adapter result for every canonical worker", async () => {
     for (const [index, step] of ORCHESTRATION_WORKER_SEQUENCE.entries()) {
       const invocation = invocationFor(step, index + 1)

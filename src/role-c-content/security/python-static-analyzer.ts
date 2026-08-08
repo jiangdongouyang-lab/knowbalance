@@ -52,6 +52,9 @@ const DANGEROUS_PATTERNS: Array<[RegExp, string]> = [
   [/\b(?:globals|locals|vars)\s*\(/, "namespace_introspection"],
   [/\b(?:getattr|setattr|delattr)\s*\(/, "dynamic_attribute_access"],
   [/\bmemoryview\s*\(/, "raw_memory_access"],
+  [/\b__builtins__\b/, "builtins_introspection"],
+  [/\.(?:f_back|f_locals|f_globals|gi_frame|cr_frame|ag_frame)\b/, "frame_introspection"],
+  [/\b(?:__class__|__bases__|__mro__|__subclasses__|__globals__|__code__|__closure__)\b/, "object_introspection"],
 ]
 
 /** Conservative preflight. Isolation remains mandatory even when this report passes. */

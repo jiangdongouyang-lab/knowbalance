@@ -1,3 +1,12 @@
+/**
+ * 遗留前端（role-d-ui）的 C 延续契约。
+ *
+ * 废弃标注（2026-08-08）：本文件属于已被 `src/role-d-ui-v2` 取代的旧前端。
+ * 它描述的 `/api/role-c/*` HTTP facade（含锚点路由）**没有对应的后端实现**，
+ * 仅被演示/参考路径 `src/orchestration/dynamic-planning-orchestrator.ts` 及其
+ * 测试引用。生产主路径（主 Agent 交互会话 + role-d-ui-v2）不依赖本模块。
+ * 若旧前端下线，本文件应连同 `dynamic-planning-orchestrator` 一并移除。
+ */
 import type {
   CodeLabPublicArtifact,
   ConceptLessonArtifact,

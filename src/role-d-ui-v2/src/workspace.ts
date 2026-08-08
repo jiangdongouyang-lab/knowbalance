@@ -18,6 +18,7 @@ export interface LearningPlanDraft {
   status?: string
   stage?: string
   knownConcepts?: string[]
+  masteredConcepts?: string[]
   createdAt: string
   updatedAt: string
 }
@@ -96,7 +97,10 @@ export function recordPlanPublicState(
       sessionId: state.sessionId,
       status: state.status,
       stage: state.stage,
-      knownConcepts: [...new Set(state.knownConcepts ?? [])],
+      knownConcepts: state.knownConcepts === undefined
+        ? plan.knownConcepts
+        : [...new Set(state.knownConcepts)],
+      masteredConcepts: plan.masteredConcepts,
       updatedAt: new Date().toISOString(),
     } : plan),
   }))
@@ -133,10 +137,21 @@ export function activePlan(workspace: WorkspaceState): LearningPlanDraft | undef
   return user?.plans.find((plan) => plan.id === user.activePlanId)
 }
 
+export function markPlanConceptMastered(workspace: WorkspaceState, userId: string, planId: string, concept: string): WorkspaceState {
+  const normalized = concept.trim()
+  if (!normalized) return workspace
+  return updateUser(workspace, userId, (user) => ({
+    ...user,
+    plans: user.plans.map((plan) => plan.id === planId
+      ? { ...plan, masteredConcepts: [...new Set([...(plan.masteredConcepts ?? []), normalized])], updatedAt: new Date().toISOString() }
+      : plan),
+  }))
+}
+
 export function masteredConceptsForUser(workspace: WorkspaceState, userId: string): string[] {
   const user = workspace.users.find((candidate) => candidate.id === userId)
   if (!user) return []
-  return [...new Set(user.plans.flatMap((plan) => plan.knownConcepts ?? []))]
+  return [...new Set(user.plans.flatMap((plan) => plan.masteredConcepts ?? []))]
 }
 
 export function planNameFromGoal(input: { mode: "catalog"; chapterTitle: string } | { mode: "custom"; customGoal: string }): string {
@@ -175,6 +190,9 @@ function isWorkspace(value: unknown): value is WorkspaceState {
         && typeof (plan as Record<string, unknown>).name === "string"
         && ((plan as Record<string, unknown>).knownConcepts === undefined
           || (Array.isArray((plan as Record<string, unknown>).knownConcepts)
-            && ((plan as Record<string, unknown>).knownConcepts as unknown[]).every((item) => typeof item === "string"))))
+            && ((plan as Record<string, unknown>).knownConcepts as unknown[]).every((item) => typeof item === "string")))
+        && ((plan as Record<string, unknown>).masteredConcepts === undefined
+          || (Array.isArray((plan as Record<string, unknown>).masteredConcepts)
+            && ((plan as Record<string, unknown>).masteredConcepts as unknown[]).every((item) => typeof item === "string"))))
   })
 }

@@ -27,6 +27,24 @@ assertResult(
   "禁止导入必须在执行前被拒绝",
 )
 
+results.builtins_import_escape = await execute(
+  'def solve(value):\n    return __builtins__["__import__"]("inspect").currentframe()',
+)
+assertResult(
+  results.builtins_import_escape.status === "failed"
+    && results.builtins_import_escape.failure_codes.some((code) => code.startsWith("static:")),
+  "通过 __builtins__ 间接导入 inspect 必须被拒绝",
+)
+
+results.frame_introspection = await execute(
+  "def solve(value):\n    return value.f_back.f_locals",
+)
+assertResult(
+  results.frame_introspection.status === "failed"
+    && results.frame_introspection.failure_codes.some((code) => code.startsWith("static:")),
+  "frame 调用栈反射必须被拒绝",
+)
+
 results.syntax_error = await execute("def solve(value)\n    return value * 2")
 assertResult(
   results.syntax_error.status === "failed" &&

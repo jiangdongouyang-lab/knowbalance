@@ -52,12 +52,18 @@ export interface ObjectiveDiagnosisEvidence {
 }
 
 // 标准学习者画像：字段与 schemas/rag_request.schema.json 的 learner_profile 一一对应
+export interface AbilityDimension {
+  label: string
+  value: number
+}
+
 export interface LearnerProfile {
   learner_id: string
   level: KnowledgeDifficulty
   known_concepts: string[]
   weak_concepts: string[]
   goal: string
+  ability_dimensions?: AbilityDimension[]
 }
 
 // 单个概念进入画像的溯源：来自哪类证据、是否映射到知识库词表、命中哪些知识点

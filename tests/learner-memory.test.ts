@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdtemp, readFile, rm } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import {
@@ -84,5 +84,26 @@ describe("learner memory store", () => {
     expect(summary.claimed_known).toContain("K002")
     expect(summary.claimed_weak).toContain("K007")
     expect(summary.quotes[0]?.text).toContain("learner memory")
+  })
+
+  test("does not silently replace corrupted persisted memory with an empty snapshot", async () => {
+    const root = await tempRoot()
+    await mkdir(join(root, "learner-memory"), { recursive: true })
+    await Bun.write(join(root, "learner-memory", "learner-corrupt.json"), "{not-json")
+
+    await expect(loadLearnerMemory(root, "learner-corrupt")).rejects.toThrow()
+  })
+
+  test("writes learner memory through an atomic temporary file", async () => {
+    const root = await tempRoot()
+    const path = join(root, "learner-memory", "learner-atomic.json")
+    const snapshot = appendPersistenceEvents(await loadLearnerMemory(root, "learner-atomic"), [
+      { event_type: "mastery_update", source: "learning-orchestrator", source_id: "K001", mastery: 0.9, evidence: "test" },
+    ])
+    await saveLearnerMemory(root, snapshot)
+    await saveLearnerMemory(root, { ...snapshot, completed_sessions: ["SESSION-ATOMIC"] })
+    const persisted = JSON.parse(await readFile(path, "utf8"))
+    expect(persisted.completed_sessions).toEqual(["SESSION-ATOMIC"])
+    expect(await Array.fromAsync(new Bun.Glob("*.tmp").scan({ cwd: join(root, "learner-memory") }))).toEqual([])
   })
 })
