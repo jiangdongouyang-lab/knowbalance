@@ -103,7 +103,7 @@ describe("local provider configuration API", () => {
     const handle = createLearningOrchestratorApiHandler({
       data_root: root,
       provider_environment: {},
-      server_hostname: "0.0.0.0",
+      server_hostname: "203.0.113.1", // TEST-NET-3: non-loopback, non-private
     })
     const response = await handle(new Request("http://127.0.0.1/orchestrator/provider-config", {
       method: "PUT",

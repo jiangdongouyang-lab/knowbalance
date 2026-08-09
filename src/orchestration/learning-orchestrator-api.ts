@@ -1,6 +1,53 @@
 import { readFileSync } from "node:fs"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+
+async function checkDockerImage(): Promise<{ ready: boolean; digest?: string; error?: string }> {
+  if (!Bun.which("docker")) {
+    return { ready: false, error: "未找到 Docker。请安装 Docker Desktop：https://www.docker.com/products/docker-desktop/" }
+  }
+  // 真实连通性测试：检查 Docker 引擎是否在运行
+  const proc = Bun.spawn(["docker", "info"], { stdout: "pipe", stderr: "pipe" })
+  const timer = setTimeout(() => proc.kill(), 8000)
+  const exitCode = await proc.exited
+  clearTimeout(timer)
+  const stderr = await new Response(proc.stderr).text()
+  if (exitCode !== 0 || stderr.includes("daemon is not running")) {
+    return { ready: false, error: "Docker 引擎未运行。请从开始菜单启动 Docker Desktop 并等待鲸鱼图标变绿。" }
+  }
+  // 检查镜像是否存在
+  const image = process.env.ROLE_C_DOCKER_IMAGE?.trim() || "knowbalance-role-c-python-runner:1.0.0"
+  try {
+    const inspect = Bun.spawn(["docker", "image", "inspect", image], { stdout: "pipe", stderr: "pipe" })
+    const timer2 = setTimeout(() => inspect.kill(), 10000)
+    const ec = await inspect.exited
+    clearTimeout(timer2)
+    if (ec !== 0) {
+      // 自动构建镜像
+      const build = Bun.spawn(["docker", "build", "-t", image, "-f", "docker/role-c-python-runner/Dockerfile", "docker/role-c-python-runner/"], {
+        stdout: "pipe", stderr: "pipe", cwd: process.cwd(),
+      })
+      const timer3 = setTimeout(() => build.kill(), 120000)
+      const buildEc = await build.exited
+      clearTimeout(timer3)
+      if (buildEc !== 0) {
+        const buildErr = await new Response(build.stderr).text()
+        return { ready: false, error: `Docker 镜像构建失败。请在终端运行 bun run docker:role-c:build：${buildErr.slice(0, 200)}` }
+      }
+    }
+    return { ready: true, digest: "docker-ready" }
+  } catch {
+    return { ready: false, error: "Docker 镜像检查失败，请确认 Docker Desktop 已启动" }
+  }
+}
+
+let cachedDockerStatus: { ready: boolean; digest?: string; error?: string } | null = null
+
+async function getDockerStatus(): Promise<{ ready: boolean; digest?: string; error?: string }> {
+  if (cachedDockerStatus) return cachedDockerStatus
+  cachedDockerStatus = await checkDockerImage()
+  return cachedDockerStatus
+}
 import { protectSensitivePath } from "../security/windows-secure-acl"
 import { runLearningOrchestrator } from "./learning-orchestrator-runner"
 import {
@@ -45,6 +92,7 @@ export function createLearningOrchestratorApiHandler(
   const providerConfigPath = options.provider_config_path ?? join(dataRoot, "provider-config.json")
   const providerEnvironment = options.provider_environment ?? process.env
   const providerWritesEnabled = isLoopbackHostname(options.server_hostname ?? "127.0.0.1")
+    || isPrivateNetworkHostname(options.server_hostname ?? "127.0.0.1")
   hydrateProviderEnvironmentFromDisk(providerConfigPath, providerEnvironment)
   const sessions = new InteractiveSessionStore(dataRoot)
 
@@ -53,11 +101,14 @@ export function createLearningOrchestratorApiHandler(
       const url = new URL(request.url)
 
       if (request.method === "GET" && url.pathname === "/health") {
+        const docker = await getDockerStatus()
         return jsonResponse({
           status: "ok",
           service: "learning-orchestrator",
+          docker,
           endpoints: [
             "GET /health",
+            "GET /orchestrator/docker-setup",
             "GET /orchestrator/provider-config",
             "PUT /orchestrator/provider-config",
             "POST /orchestrator/runs",
@@ -68,6 +119,70 @@ export function createLearningOrchestratorApiHandler(
             "GET /orchestrator/sessions/:id/events",
           ],
         })
+      }
+
+      // Docker 一键自动配置：检测→启动→构建镜像
+      if (request.method === "GET" && url.pathname === "/orchestrator/docker-setup") {
+        const steps: string[] = []
+        if (!Bun.which("docker")) {
+          return jsonResponse({ ready: false, steps: ["Docker 未安装"], error: "请安装 Docker Desktop：https://www.docker.com/products/docker-desktop/" })
+        }
+        steps.push("找到 Docker 二进制")
+        // 尝试启动 Docker Desktop
+        const proc = Bun.spawn(["docker", "info"], { stdout: "pipe", stderr: "pipe" })
+        const timer = setTimeout(() => proc.kill(), 5000)
+        const exitCode = await proc.exited
+        clearTimeout(timer)
+        if (exitCode !== 0) {
+          // 尝试启动 Docker Desktop
+          steps.push("Docker 引擎未运行，尝试启动…")
+          try {
+            const ps = Bun.spawn(["powershell", "-Command", "Start-Process 'Docker Desktop' -WindowStyle Hidden"], { stdout: "pipe", stderr: "pipe" })
+            await ps.exited
+            steps.push("已发送启动指令，等待引擎就绪…")
+            // 等待最多 30 秒
+            for (let i = 0; i < 30; i++) {
+              await new Promise(r => setTimeout(r, 2000))
+              const check = Bun.spawn(["docker", "info"], { stdout: "pipe", stderr: "pipe" })
+              const ct = setTimeout(() => check.kill(), 3000)
+              const ec = await check.exited
+              clearTimeout(ct)
+              if (ec === 0) { steps.push(`引擎就绪（${(i+1)*2}秒）`); break }
+            }
+          } catch { steps.push("无法自动启动 Docker Desktop") }
+        }
+        // 重新检查状态
+        const finalCheck = Bun.spawn(["docker", "info"], { stdout: "pipe", stderr: "pipe" })
+        const ft = setTimeout(() => finalCheck.kill(), 5000)
+        const fec = await finalCheck.exited
+        clearTimeout(ft)
+        if (fec !== 0) {
+          return jsonResponse({ ready: false, steps, error: "Docker 引擎未能启动。请手动从开始菜单打开 Docker Desktop，等待鲸鱼图标变绿后重试。" })
+        }
+        steps.push("Docker 引擎已运行")
+        // 构建镜像
+        const image = process.env.ROLE_C_DOCKER_IMAGE?.trim() || "knowbalance-role-c-python-runner:1.0.0"
+        const inspect = Bun.spawn(["docker", "image", "inspect", image], { stdout: "pipe", stderr: "pipe" })
+        const it = setTimeout(() => inspect.kill(), 8000)
+        const iec = await inspect.exited
+        clearTimeout(it)
+        if (iec !== 0) {
+          steps.push("正在构建代码沙箱镜像…")
+          const build = Bun.spawn(["docker", "build", "-t", image, "-f", "docker/role-c-python-runner/Dockerfile", "docker/role-c-python-runner/"], {
+            stdout: "pipe", stderr: "pipe", cwd: process.cwd(),
+          })
+          const bt = setTimeout(() => build.kill(), 120000)
+          const bec = await build.exited
+          clearTimeout(bt)
+          if (bec !== 0) {
+            const buildErr = await new Response(build.stderr).text()
+            return jsonResponse({ ready: false, steps, error: `镜像构建失败：${buildErr.slice(0, 200)}` })
+          }
+          steps.push("镜像构建完成")
+        }
+        // 刷新缓存
+        cachedDockerStatus = { ready: true, digest: "docker-setup-ok" }
+        return jsonResponse({ ready: true, steps, digest: "setup-complete" })
       }
 
       if (url.pathname === "/orchestrator/provider-config") {
@@ -223,15 +338,20 @@ function isLoopbackHostname(hostname: string): boolean {
   return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1" || normalized === "[::1]"
 }
 
+function isPrivateNetworkHostname(hostname: string): boolean {
+  const normalized = hostname.trim().toLowerCase()
+  return /^(?:10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])|192\.168)\.\d{1,3}\.\d{1,3}$/.test(normalized)
+}
+
 function requireLoopbackOrigin(request: Request): void {
   const origin = request.headers.get("origin")
   if (!origin) return
   let parsed: URL
   try { parsed = new URL(origin) } catch {
-    throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration origin must be a loopback HTTP origin", 403)
+    throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration origin must be a loopback or private HTTP origin", 403)
   }
-  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || !isLoopbackHostname(parsed.hostname)) {
-    throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration origin must be a loopback HTTP origin", 403)
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || (!isLoopbackHostname(parsed.hostname) && !isPrivateNetworkHostname(parsed.hostname))) {
+    throw new InteractiveSessionError("LOCAL_CONFIGURATION_ONLY", "Provider configuration origin must be a loopback or private HTTP origin", 403)
   }
 }
 

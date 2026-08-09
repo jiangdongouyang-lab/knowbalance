@@ -158,9 +158,12 @@ export class OpenAICompatibleModelGateway implements ModelGateway {
           signal: controller.signal,
         })
         if (!response.ok) {
+          let detail = ""
+          try { const errBody = await response.json() as any; detail = errBody?.error?.message || errBody?.message || "" } catch { /* ignore */ }
+          const isAuth = response.status === 401 || response.status === 403
           const error = new ModelGatewayError(
-            response.status === 429 || response.status >= 500 ? "RETRIABLE_HTTP_ERROR" : "HTTP_ERROR",
-            `模型服务返回 HTTP ${response.status}`,
+            response.status === 429 || response.status >= 500 ? "RETRIABLE_HTTP_ERROR" : isAuth ? "AUTH_ERROR" : "HTTP_ERROR",
+            isAuth ? `API Key 认证失败（HTTP ${response.status}）${detail ? "：" + detail : "——请检查 API Key 是否正确、未过期"}` : `模型服务返回 HTTP ${response.status}${detail ? "：" + detail : ""}`,
           )
           if (error.code === "RETRIABLE_HTTP_ERROR" && attempt < this.options.max_transport_retries) {
             lastError = error
@@ -215,6 +218,7 @@ export class ModelGatewayError extends Error {
     readonly code:
       | "HTTP_ERROR"
       | "RETRIABLE_HTTP_ERROR"
+      | "AUTH_ERROR"
       | "TIMEOUT"
       | "NETWORK_ERROR"
       | "INVALID_RESPONSE"

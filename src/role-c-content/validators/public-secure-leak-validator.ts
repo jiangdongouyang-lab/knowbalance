@@ -86,10 +86,14 @@ export function validateCodeLabPublicSecureSeparation(
       publicLearnerText,
       test.expected,
     )) {
+      const expectedStr = typeof test.expected === "string"
+        ? test.expected.slice(0, 80)
+        : JSON.stringify(test.expected).slice(0, 80)
+      const leakedIn = findLeakLocation(publicLearnerStrings, publicLearnerText, test.expected)
       issues.push(issue(
         "hidden_test_expected_leak",
         "$.public",
-        `公开产物包含隐藏测试 ${test.test_id} 的预期值`,
+        `隐藏测试 ${test.test_id} 的预期值 "…${expectedStr}" 泄漏${leakedIn ? "到：" + leakedIn : ""}。请修改公开文字中与此值重叠的部分，或更换隐藏测试的预期输出。`,
       ))
     }
   }
@@ -328,6 +332,26 @@ function carriesPrivateTestCase(input: unknown): boolean {
   return input !== null && input !== undefined && JSON.stringify(input) !== "{}"
 }
 
+/** 定位预期值泄漏到哪段公开文字中，给模型修复提示具体位置。 */
+function findLeakLocation(publicStrings: string[], publicText: string, value: unknown): string {
+  const candidates: string[] = []
+  if (typeof value === "string" && value.trim().length >= 4) {
+    const escaped = value.trim().toLowerCase()
+    for (const s of publicStrings) {
+      if (s.toLowerCase().includes(escaped)) candidates.push(s.slice(0, 100))
+    }
+  }
+  if (Array.isArray(value) || (value && typeof value === "object")) {
+    const compact = JSON.stringify(value).replace(/\s/g, "")
+    if (compact.length >= 4 && publicText.replace(/\s/g, "").includes(compact)) {
+      for (const s of publicStrings) {
+        if (s.replace(/\s/g, "").includes(compact)) candidates.push(s.slice(0, 100))
+      }
+    }
+  }
+  return candidates.length ? `"${candidates[0]}"` : ""
+}
+
 function containsExpectedSecret(
   publicStrings: string[],
   publicText: string,
@@ -462,10 +486,8 @@ function codeLabLearnerStrings(payload: CodeLabPublicPayload): string[] {
     payload.title,
     payload.starter_code,
     ...((payload.instructions ?? []).flatMap(renderBlockLearnerStrings)),
-    ...((payload.public_tests ?? []).flatMap((test) => [
-      test.description,
-      // expected_behavior 天然描述预期输出，不应被 hidden_test_expected_leak 判定为泄漏
-    ])),
+    // public_tests 的 description 和 expected_behavior 均描述公开测试行为，
+    // 不应被 hidden_test_expected_leak 判定为泄漏。
     ...((payload.hint_ladders ?? []).flatMap((ladder) =>
       ladder.hints.map((hint) => hint.text))),
     ...(payload.reflection_questions ?? []),

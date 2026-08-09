@@ -136,6 +136,7 @@ export function App() {
   const [diagnosisAnswers, setDiagnosisAnswers] = useState<Record<string, string>>({})
   const [assessmentAnswers, setAssessmentAnswers] = useState<Record<string, string>>({})
   const [provider, setProvider] = useState({ configured: false, provider_mode: "model" as const, endpoint: "", model_id: "" })
+  const [dockerStatus, setDockerStatus] = useState<{ ready: boolean; error?: string }>({ ready: false })
   const [providerOpen, setProviderOpen] = useState(false)
   const [userOpen, setUserOpen] = useState(false)
   const [profileOpen, setProfileOpen] = useState(false)
@@ -154,6 +155,10 @@ export function App() {
 
   useEffect(() => {
     getProviderConfiguration().then(setProvider).catch(() => setProvider({ configured: false, provider_mode: "model", endpoint: "", model_id: "" }))
+    // 检测 Docker 状态
+    fetch("/health").then(r => r.json()).then(data => {
+      setDockerStatus(data?.docker ?? { ready: false, error: "无法检测 Docker 状态" })
+    }).catch(() => setDockerStatus({ ready: false, error: "无法连接主 Agent，请确认已启动" }))
   }, [])
 
   useEffect(() => {
@@ -420,7 +425,7 @@ export function App() {
         {profileOpen && <ProfileModal onClose={() => setProfileOpen(false)} onCreate={(profile) => { setWorkspace((value) => addUser(value, profile)); setProfileOpen(false); setPage("home") }} />}
         {userOpen && createPortal(<UserSwitcher workspace={workspace} onClose={() => setUserOpen(false)} onAdd={() => { setUserOpen(false); setProfileOpen(true) }} onSelect={(id) => { setConfirmSwitchUserId(id); setUserOpen(false) }} />, document.body)}
         {confirmSwitchUserId && createPortal(<ConfirmSwitchUserModal targetUser={workspace.users.find(u => u.id === confirmSwitchUserId)} currentUser={currentUser} onCancel={() => setConfirmSwitchUserId(null)} onConfirm={() => { setWorkspace((value) => selectUser(value, confirmSwitchUserId)); setPage("home"); setConfirmSwitchUserId(null) }} />, document.body)}
-        {providerOpen && <ApiConfigModal current={provider} onClose={() => { setProviderOpen(false); setOpenPlanAfterProvider(false) }} onSave={async (input) => { const saved = await saveProviderConfiguration(input); setProvider(saved); setProviderOpen(false); if (openPlanAfterProvider && currentUser) { const id = newClientId("plan"); setWorkspace((value) => addPlan(value, currentUser.id, { id, name: "待选择学习目标" })); setOpenPlanAfterProvider(false); setPage("goal") } }} />}
+        {providerOpen && <ApiConfigModal current={provider} dockerStatus={dockerStatus} onDockerSetup={() => { fetch("/orchestrator/docker-setup").then(r => r.json()).then(d => { if (d.ready) setDockerStatus({ ready: true }) }) }} onClose={() => { setProviderOpen(false); setOpenPlanAfterProvider(false) }} onSave={async (input) => { const saved = await saveProviderConfiguration(input); setProvider(saved); setProviderOpen(false); if (openPlanAfterProvider && currentUser) { const id = newClientId("plan"); setWorkspace((value) => addPlan(value, currentUser.id, { id, name: "待选择学习目标" })); setOpenPlanAfterProvider(false); setPage("goal") } }} />}
       </div>
     </LiveContext.Provider>
   )
@@ -493,14 +498,38 @@ function ProfileModal({ onClose, onCreate }: { onClose: () => void; onCreate: (p
 }
 
 
-function ApiConfigModal({ current, onClose, onSave }: { current: { configured: boolean; endpoint: string; model_id: string }; onClose: () => void; onSave: (input: { endpoint: string; modelId: string; apiKey: string }) => Promise<void> }) {
+function ApiConfigModal({ current, dockerStatus, onDockerSetup, onClose, onSave }: { current: { configured: boolean; endpoint: string; model_id: string }; dockerStatus: { ready: boolean; error?: string }; onDockerSetup: () => void; onClose: () => void; onSave: (input: { endpoint: string; modelId: string; apiKey: string }) => Promise<void> }) {
   const [endpoint, setEndpoint] = useState(current.endpoint || "https://api.deepseek.com/chat/completions")
   const [modelId, setModelId] = useState(current.model_id || "deepseek-chat")
   const [apiKey, setApiKey] = useState("")
   const [saving, setSaving] = useState(false)
   const [failure, setFailure] = useState("")
   const submit = async () => { setSaving(true); setFailure(""); try { await onSave({ endpoint: endpoint.trim(), modelId: modelId.trim(), apiKey: apiKey.trim() }) } catch (reason) { setFailure(reason instanceof Error ? reason.message : "保存失败") } finally { setSaving(false) } }
-  return <Modal title={current.configured ? "切换通用模型 API" : "先连接你的通用模型"} subtitle="密钥只发送到本机主 Agent并保存于本地运行目录，浏览器不会保存或再次读取它。" onClose={onClose}><div className="api-security-note"><ShieldCheck size={19} /><div><b>本机配置，不进入前端计划</b><p>保存后主 Agent立即使用新配置；接口响应只返回模型名称和地址，不返回密钥。</p></div></div><div className="form-grid"><label className="full-field"><span>兼容接口地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://.../chat/completions" /></label><label><span>模型 ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="deepseek-chat" /></label><label><span>API Key</span><input type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={current.configured ? "输入新密钥以切换" : "仅发送到本机主 Agent"} /></label></div>{failure && <p className="form-error">{failure}</p>}<div className="modal-actions"><button className="secondary-action" type="button" onClick={onClose}>取消</button><button className="primary-action" disabled={saving || !endpoint.trim() || !modelId.trim() || !apiKey.trim()} type="button" onClick={() => void submit()}>{saving ? "正在安全保存…" : "保存并启用"}</button></div></Modal>
+  return <Modal title={current.configured ? "切换通用模型 API" : "先连接你的通用模型"} subtitle="密钥只发送到本机主 Agent并保存于本地运行目录，浏览器不会保存或再次读取它。" onClose={onClose}>
+    <div className={`docker-status-banner ${dockerStatus.ready ? "is-ready" : "is-warning"}`}>
+      {dockerStatus.ready
+        ? <><CheckCircle2 size={16} /><span>Docker 代码沙箱已就绪</span></>
+        : <><ShieldCheck size={16} /><span>{dockerStatus.error ?? "正在检测 Docker…"}</span></>}
+      {!dockerStatus.ready && <button className="docker-setup-button" type="button" onClick={() => {
+        setFailure("正在配置 Docker，请稍候…（可能需要 30 秒）")
+        onDockerSetup()
+        // 轮询直到 Docker 就绪
+        const poll = setInterval(async () => {
+          try {
+            const res = await fetch("/health")
+            const data = await res.json()
+            if (data?.docker?.ready) {
+              clearInterval(poll)
+              setFailure("")
+              location.reload()
+            }
+          } catch {}
+        }, 3000)
+        setTimeout(() => { clearInterval(poll); setFailure("Docker 配置超时。请手动启动 Docker Desktop 后刷新页面。") }, 45000)
+      }}>🔧 一键配置 Docker</button>}
+    </div>
+    <div className="api-security-note"><ShieldCheck size={19} /><div><b>本机配置，不进入前端计划</b><p>保存后主 Agent立即使用新配置；接口响应只返回模型名称和地址，不返回密钥。</p></div></div>
+    <div className="form-grid"><label className="full-field"><span>兼容接口地址</span><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="https://.../chat/completions" /></label><label><span>模型 ID</span><input value={modelId} onChange={(event) => setModelId(event.target.value)} placeholder="deepseek-chat" /></label><label><span>API Key</span><input type="password" autoComplete="new-password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={current.configured ? "输入新密钥以切换" : "仅发送到本机主 Agent"} /></label></div>{failure && <p className="form-error">{failure}</p>}<div className="modal-actions"><button className="secondary-action" type="button" onClick={onClose}>取消</button><button className="primary-action" disabled={saving || !endpoint.trim() || !modelId.trim() || !apiKey.trim()} type="button" onClick={() => void submit()}>{saving ? "正在安全保存…" : "保存并启用"}</button></div></Modal>
 }
 
 function Modal({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) {
@@ -657,7 +686,7 @@ function LessonContent({ lesson, onActive }: { lesson: LessonPayload; onActive: 
     <LessonSection id="concept" title="核心概念" tone="plain" icon={<Lightbulb />} onActive={onActive}>{lesson.explanation_blocks.map((block) => <RenderLessonBlock block={block} key={block.block_id} />)}</LessonSection>
     <LessonSection id="examples" title="分步示例" tone="blue" icon={<Braces />} onActive={onActive}>{lesson.worked_examples.length ? lesson.worked_examples.map((block) => <RenderLessonBlock block={block} key={block.block_id} />) : <MissingContent text="C 未公开 worked_examples" />}</LessonSection>
     <LessonSection id="misconceptions" title="常见误区" tone="amber" icon={<MessageCircleQuestion />} onActive={onActive}>{lesson.misconceptions.length ? <div className="misconception-grid">{lesson.misconceptions.map((item) => <article key={item.misconception_tag}><b>{item.objective_id}</b><p>{item.explanation}</p><small>{formatCitations(item.citations)}</small></article>)}</div> : <MissingContent text="C 未公开 misconceptions" />}</LessonSection>
-    <LessonSection id="summary" title="本节小结" tone="mint" icon={<CheckCircle2 />} onActive={onActive}>{lesson.summary.length ? lesson.summary.map((block) => <RenderLessonBlock block={block} key={block.block_id} />) : <MissingContent text="C 未公开 summary" />}</LessonSection>
+    <LessonSection id="summary" title="本节小结" tone="mint" icon={<CheckCircle2 />} onActive={onActive}>{lesson.summary.length ? <ol className="summary-list">{lesson.summary.flatMap((block) => { const raw = "text" in block ? (block as any).text ?? "" : ""; const cleaned = stripClaimTextFromBody(raw, (block as any).claims ?? []); return cleaned.split(/\n+/).filter(Boolean).map((line, j, arr) => { const globalIndex = arr.length > 1 ? j : 0; return <li key={`${block.block_id}-${j}`}><span className="summary-num">{globalIndex + 1}.</span><p className="summary-line">{line.trim()}</p></li>; }) })}</ol> : <MissingContent text="C 未公开 summary" />}</LessonSection>
   </div>
 }
 
@@ -670,21 +699,40 @@ function SemanticLessonText({ text }: { text: string }) {
   return <>{semanticLessonLines(indented).map((line, index) => <span className="semantic-lesson-line" key={`${index}-${line}`}>{line}</span>)}</>
 }
 
-/** 事实证据：C 公开的 claim 文本，离上文空一行，紫色小字。 */
-function ClaimEvidence({ claims }: { claims: Array<{ claim_id: string; text: string }> }) {
-  if (!claims.length) return null
+/** 事实证据：C 公开的 claim 文本 + 引用来源，离上文空一行，紫色小字。 */
+function ClaimEvidence({ claims, citations }: { claims: Array<{ claim_id: string; text: string }>; citations: Citation[] }) {
+  if (!claims.length && !citations.length) return null
   return <div className="claim-evidence">
+    <div className="claim-label">证据事实：</div>
+    {citations.length > 0 && <div className="claim-citations">{formatCitations(citations)}</div>}
     {claims.map((claim) => <p key={claim.claim_id} className="claim-text">{claim.text}</p>)}
   </div>
 }
 
+/** 从段落文本中移除已作为 ClaimEvidence 独立展示的 claim 文本，避免重复。 */
+function stripClaimTextFromBody(bodyText: string, claims: Array<{ text: string }>): string {
+  if (!claims.length) {
+    return bodyText.replace(/\s*证据事实[：:]\s*/gu, "").trim()
+  }
+  let cleaned = bodyText
+  for (const claim of claims) {
+    const escaped = claim.text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+    cleaned = cleaned.replace(new RegExp(`\\s*${escaped}\\s*[；;]?`, "gu"), "")
+    cleaned = cleaned.replace(new RegExp(`\\s*证据事实[：:]\\s*${escaped}\\s*`, "gu"), "")
+  }
+  cleaned = cleaned.replace(/\s*证据事实[：:]\s*/gu, "")
+  return cleaned.replace(/^[；;，,。.\s]+/u, "").replace(/[；;\s]+$/u, "").trim()
+}
+
 function RenderLessonBlock({ block }: { block: LessonPayload["explanation_blocks"][number] }) {
   const claims = ("claims" in block && Array.isArray((block as any).claims) ? (block as any).claims as Array<{ claim_id: string; text: string }> : [])
+  const citations = claims.flatMap((claim) => (claim as any).citations ?? [])
+  const bodyText = "text" in block ? stripClaimTextFromBody((block as any).text ?? "", claims) : ""
   if (block.block_type === "heading") return <h3 className="block-heading">{block.text}</h3>
-  if (block.block_type === "paragraph") return <article className="prose-block"><p><SemanticLessonText text={block.text} /></p><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /><ClaimEvidence claims={claims} /></article>
-  if (block.block_type === "code") return <article className="code-example"><div className="code-head"><span>{block.caption ?? "Python 示例"}</span><small>{block.language}</small></div><CodeViewer code={block.code} /><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /><ClaimEvidence claims={claims} /></article>
-  if (block.block_type === "callout") return <article className={`callout callout-${block.tone}`}><b>{block.title}</b><p><SemanticLessonText text={block.text} /></p><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /><ClaimEvidence claims={claims} /></article>
-  if (block.block_type === "comparison") return <article className="comparison-block"><h3>{block.title}</h3><div>{block.columns.map((column) => <section key={column.heading}><b>{column.heading}</b><p><SemanticLessonText text={column.content} /></p></section>)}</div><CitationChips citations={block.claims.flatMap((claim) => claim.citations)} /><ClaimEvidence claims={claims} /></article>
+  if (block.block_type === "paragraph") return <article className="prose-block"><p><SemanticLessonText text={bodyText} /></p><ClaimEvidence claims={claims} citations={citations} /></article>
+  if (block.block_type === "code") return <article className="code-example"><div className="code-head"><span>{block.caption ?? "Python 示例"}</span><small>{block.language}</small></div><CodeViewer code={block.code} /><ClaimEvidence claims={claims} citations={citations} /></article>
+  if (block.block_type === "callout") return <article className={`callout callout-${block.tone}`}><b>{block.title}</b><p><SemanticLessonText text={bodyText} /></p><ClaimEvidence claims={claims} citations={citations} /></article>
+  if (block.block_type === "comparison") return <article className="comparison-block"><h3>{block.title}</h3><div>{block.columns.map((column) => <section key={column.heading}><b>{column.heading}</b><p><SemanticLessonText text={stripClaimTextFromBody(column.content, claims)} /></p></section>)}</div><ClaimEvidence claims={claims} citations={citations} /></article>
   return null
 }
 

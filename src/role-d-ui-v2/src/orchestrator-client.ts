@@ -181,8 +181,17 @@ async function publicRequestJson(path: string, fetcher: Fetcher, init: RequestIn
 }
 
 async function executeJson(path: string, fetcher: Fetcher, init: RequestInit): Promise<any> {
-  const response = await fetcher(path, init)
-  const payload: any = await response.json().catch(() => ({ error: { code: "INVALID_RESPONSE", message: "主 Agent返回了无效响应" } }))
+  let response: Response
+  try {
+    response = await fetcher(path, init)
+  } catch {
+    throw new OrchestratorClientError(
+      "BACKEND_UNREACHABLE",
+      "无法连接到主 Agent。请确认已双击运行「启动KnowBalance.bat」或主 Agent 正在 http://127.0.0.1:8787 运行。",
+      503,
+    )
+  }
+  const payload: any = await response.json().catch(() => ({ error: { code: "INVALID_RESPONSE", message: "主 Agent返回了无效响应，可能是服务刚启动还未就绪，请稍后重试。" } }))
   if (!response.ok) {
     throw new OrchestratorClientError(
       payload?.error?.code ?? "ORCHESTRATOR_REQUEST_FAILED",
