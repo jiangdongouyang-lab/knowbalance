@@ -59,6 +59,13 @@ export const WORKER_DEFINITIONS = [
     responsibility: "Generate objective-aligned public assessment items without exposing private grading material.",
     next: "continue",
   },
+  {
+    name: "teaching-auditor",
+    stage: "teaching_audit",
+    description: "Audits generated content against learner profile across four dimensions: difficulty, prerequisites, weak concepts, and goal alignment.",
+    responsibility: "Produce a structured audit result (pass/revise/reject) with failed dimensions and recovery hints. Coordinates with fact-audit via arbitration when both audits are available.",
+    next: "continue",
+  },
 ] as const satisfies readonly WorkerDefinition[]
 
 export function createWorkerAgents(): Record<

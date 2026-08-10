@@ -20,7 +20,6 @@ import type {
 } from "./types"
 import { buildRagRequest } from "./rag-bridge"
 
-// 难度顺序与 schemas/rag_request.schema.json 的 level 枚举一致
 const LEVEL_ORDER: readonly KnowledgeDifficulty[] = ["beginner", "basic", "intermediate", "integrated"]
 
 const EVIDENCE_STRENGTH = { objective: 3, self: 2, background: 1 } as const
@@ -46,20 +45,18 @@ export interface SynthesizeProfileInput {
 export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthesis {
   const { background, selfAssessment, objectiveDiagnosis, knowledgeBase } = input
 
-  // goal 红线：无目标不合成画像（schema 要求 goal minLength 1，编造目标会污染检索与教学）
   const goal = background.goal_raw?.trim() ?? ""
   if (goal.length === 0) {
     throw new Error("学习者目标缺失：orchestrator 应通过 question 工具补问 goal，禁止编造目标")
   }
 
-  // 第一步：把三类证据统一成概念主张列表（全部先过词表规范化）
+  // 第一步：把三类证据统一成概念主张列表
   const claims: ConceptClaim[] = []
   const objectiveCanonicalBySource = new Map<string, Set<string>>()
 
   for (const item of objectiveDiagnosis.items) {
-    if (item.verdict === "unanswered") continue // 未作答不构成证据
+    if (item.verdict === "unanswered") continue
     const mapped = canonicalizeConcept(item.concept, knowledgeBase)
-    // 诊断题自带的 source_id 是硬事实（题就是从那个知识点抽的），必须并入映射结果
     const sourceIds = [...new Set([...(mapped.matched ? mapped.sourceIds : []), item.source_id])].sort()
     const sourceCanonicals = objectiveCanonicalBySource.get(item.source_id) ?? new Set<string>()
     sourceCanonicals.add(mapped.canonical)
@@ -87,7 +84,7 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
     claims.push({ canonical: mapped.canonical, bucket: "known", source: "background", matched: mapped.matched, sourceIds: mapped.sourceIds })
   }
 
-  // 第二步：同概念按证据强度归并；同强度内 weak 优先（宁多补不漏诊，代价不对称）
+  // 第二步：同概念按证据强度归并
   const resolved = new Map<string, ConceptClaim>()
   for (const claim of claims) {
     const existing = resolved.get(claim.canonical)
@@ -105,15 +102,44 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
     }
   }
 
-  // 第三步：记录自评 vs 客观的冲突（解决结果已在第二步产生，这里补溯源）
+  // 第三步：自评空洞修复
+  // D 砍掉自评环节 → claimed_known/claimed_weak 为空 → ProfileConflict 断路。
+  // 从客观诊断反向填充自评，激活冲突检测。
+  // 注意：不直接改 input.selfAssessment（避免副作用污染调用方），用局部副本。
+  const patchedSelfAssessment: SelfAssessmentEvidence = {
+    ...selfAssessment,
+    claimed_known: [...selfAssessment.claimed_known],
+    claimed_weak: [...selfAssessment.claimed_weak],
+  }
+
+  if (
+    patchedSelfAssessment.claimed_known.length === 0 &&
+    patchedSelfAssessment.claimed_weak.length === 0
+  ) {
+    for (const item of objectiveDiagnosis.items) {
+      if (item.verdict === "unanswered") continue
+      const canonical = canonicalizeConcept(item.concept, knowledgeBase).canonical
+      if (item.verdict === "correct") {
+        if (!patchedSelfAssessment.claimed_known.includes(canonical)) {
+          patchedSelfAssessment.claimed_known.push(canonical)
+        }
+      } else {
+        if (!patchedSelfAssessment.claimed_weak.includes(canonical)) {
+          patchedSelfAssessment.claimed_weak.push(canonical)
+        }
+      }
+    }
+  }
+
+  // 第四步：记录自评 vs 客观的冲突（使用修补后的副本）
   const conflicts: ProfileConflict[] = []
   for (const item of objectiveDiagnosis.items) {
     if (item.verdict === "unanswered") continue
     const canonical = canonicalizeConcept(item.concept, knowledgeBase).canonical
-    const selfSaysKnown = selfAssessment.claimed_known.some(
+    const selfSaysKnown = patchedSelfAssessment.claimed_known.some(
       (raw) => alignToObjectiveSource(raw, knowledgeBase, objectiveCanonicalBySource).canonical === canonical,
     )
-    const selfSaysWeak = selfAssessment.claimed_weak.some(
+    const selfSaysWeak = patchedSelfAssessment.claimed_weak.some(
       (raw) => alignToObjectiveSource(raw, knowledgeBase, objectiveCanonicalBySource).canonical === canonical,
     )
     if (selfSaysKnown && item.verdict === "incorrect") {
@@ -136,10 +162,9 @@ export function synthesizeProfile(input: SynthesizeProfileInput): ProfileSynthes
     }
   }
 
-  // 第四步：level 判定级联（只降不升）
+  // 第五步：level 判定级联
   const levelResolution = resolveLevel(selfAssessment.self_rating, objectiveDiagnosis)
 
-  // 第五步：按证据强度顺序输出概念数组（objective → self → background，稳定可复现）
   const ordered = [...resolved.values()].sort(
     (left, right) => EVIDENCE_STRENGTH[right.source] - EVIDENCE_STRENGTH[left.source],
   )
@@ -186,8 +211,6 @@ function alignToObjectiveSource(
   }
 }
 
-// level 级联：客观封顶 → 多题全对的保守上调 → 自评 → 默认 beginner。
-// 答错仍是强信号；答对只有在至少 3 道真实题全部通过时才允许上调，且单轮最多一档。
 function resolveLevel(
   selfRating: KnowledgeDifficulty | null,
   objectiveDiagnosis: ObjectiveDiagnosisEvidence,
@@ -235,6 +258,6 @@ function resolveLevel(
   return {
     value: "beginner",
     source: "default",
-    rule: "无自评且无客观信号，保守默认 beginner（起点过高伤体验，remediate 代价低）",
+    rule: "无自评且无客观信号，保守默认 beginner",
   }
 }

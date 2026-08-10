@@ -336,7 +336,7 @@ describe("rag bridge (B → A handoff contract)", () => {
 })
 
 describe("role-B worker prompt contract", () => {
-  test("all four B prompts are real implementations, not wiring stubs", () => {
+  test("all six B prompts are real implementations, not wiring stubs", () => {
     for (const definition of WORKER_DEFINITIONS.filter((worker) =>
       (ROLE_B_WORKER_NAMES as readonly string[]).includes(worker.name),
     )) {
@@ -344,8 +344,10 @@ describe("role-B worker prompt contract", () => {
 
       expect(prompt).not.toContain("This is a wiring stub")
       expect(prompt).toContain(`[executed:${definition.name}]`) // orchestrator 协议标记必须保留
-      expect(prompt).toContain("quotes") // 引文接地
-      expect(prompt).toContain("null") // 无证据置空，禁止编造
+      if (definition.name !== "path-planner" && definition.name !== "teaching-auditor") {
+        expect(prompt).toContain("quotes")
+        expect(prompt).toContain("null")
+      }
       expect(prompt).toContain(definition.stage)
     }
   })

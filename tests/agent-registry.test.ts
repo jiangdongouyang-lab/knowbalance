@@ -3,10 +3,10 @@ import { createWorkflowAgents } from "../src/agents/registry"
 import { WORKER_DEFINITIONS } from "../src/agents/workers"
 
 describe("workflow agent registry", () => {
-  test("registers one primary orchestrator and eight subagents", () => {
+  test("registers one primary orchestrator and nine subagents", () => {
     const agents = createWorkflowAgents()
 
-    expect(Object.keys(agents)).toHaveLength(9)
+    expect(Object.keys(agents)).toHaveLength(10)
     expect(agents["learning-orchestrator"].mode).toBe("primary")
 
     for (const worker of WORKER_DEFINITIONS) {
