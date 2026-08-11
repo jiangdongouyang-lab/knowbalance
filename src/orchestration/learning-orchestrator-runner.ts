@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs"
+import { join } from "node:path"
 import { createTraceLedger, appendTraceEvent, writeTraceSummary, type TraceLedger } from "./trace-ledger"
 import { transitionOrchestrationState, ORCHESTRATION_WORKER_SEQUENCE } from "./state-machine"
 import { validateWorkerResult } from "./worker-contract"
@@ -20,6 +22,8 @@ export interface RunLearningOrchestratorInput {
   mode: OrchestrationMode
   learner_request: LearnerRequest
   now?: () => string
+  /** 如提供，每个 worker 的产物会写入 {artifact_dir}/step{N}-{worker}.json */
+  artifact_dir?: string
 }
 
 export interface RunLearningOrchestratorResult {
@@ -203,6 +207,14 @@ export async function runLearningOrchestrator(
     }
 
     completedSteps += 1
+
+    // 2号 Day 2 增强: 写入 worker 产物到磁盘，供 OpenCode ledger 引用
+    if (input.artifact_dir) {
+      mkdirSync(join(input.artifact_dir, "artifacts"), { recursive: true })
+      const artifactPath = join(input.artifact_dir, "artifacts", `step${stepIndex}-${step.worker}.json`)
+      await Bun.write(artifactPath, JSON.stringify(workerResult.artifacts, null, 2))
+    }
+
     persistenceEvents.push(...(workerResult.persistence_events ?? []))
     persistenceEvents.push(...(workerResult.mastery_updates ?? []).map((update) => ({
       event_type: "mastery_update" as const,

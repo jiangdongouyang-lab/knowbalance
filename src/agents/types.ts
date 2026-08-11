@@ -10,6 +10,7 @@ export type WorkflowAgentName =
   | "concept-tutor"
   | "code-lab"
   | "tiered-evaluator"
+  | "teaching-auditor"
 
 export type WorkflowAgentRegistry = Record<WorkflowAgentName, AgentConfig>
 

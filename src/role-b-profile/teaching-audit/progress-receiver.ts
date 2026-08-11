@@ -36,8 +36,26 @@ export function receiveLearningProgress(input: ReceiveProgressInput): ReceivePro
         mastery: snapshot.mastery,
         evidenceBatches: snapshot.evidence_batches,
       })),
-      // DynamicFeedbackResult 没有 objective_id 到 source_id 的映射，不能据此改写概念列表。
-      conceptEvidence: [],
+      // 从 mastery_snapshot 的 objective_id 反推 source_id 和概念名。
+      // C 的 DynamicFeedbackResult 不直接提供 objective_id→source_id 映射，
+      // 但 objective_id 格式为 "obj-K007"，可提取 "K007" 作为 source_id。
+      // ⚠️ concept 字段暂时使用 sourceId（如 "K007"），而非中文概念名（如 "for 循环"）。
+      // 下游 applyProgressObservation 的字符串匹配对此无效；
+      // 实际使用时需通过 conceptMatches 回调接入知识库做语义匹配。
+      // 未来 C 提供显式映射后可替换为精确数据。
+      conceptEvidence: feedback.mastery_snapshot
+        .filter((s) => s.mastery > 0)
+        .map((snapshot) => {
+          const sourceId = snapshot.objective_id.startsWith("obj-")
+            ? snapshot.objective_id.slice(4)
+            : snapshot.objective_id
+          return {
+            sourceId,
+            concept: sourceId,
+            evidenceScore: snapshot.mastery,
+            evidenceBatches: snapshot.evidence_batches,
+          }
+        }),
     },
   })
 }
@@ -94,7 +112,6 @@ export function applyProgressObservation(
   const oldLevel = currentProfile.level
   let newLevel = oldLevel
 
-  // 事件批次没有轮次总分分母，不据此调整 level；完整动态反馈仍按原规则处理。
   const allMastered = observation.mastery.length > 0
     && observation.mastery.every((snapshot) => snapshot.mastery >= MASTERY_THRESHOLD)
   if (
@@ -109,7 +126,6 @@ export function applyProgressObservation(
     }
   }
 
-  // 如果 decision 是 remediate 且 accuracy 很低，考虑降级
   if (
     observation.action === "remediate"
     && overallAccuracy !== null
